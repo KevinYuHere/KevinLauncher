@@ -59,6 +59,13 @@ npx.cmd electron-builder --win --prepackaged (Join-Path $root 'release\win-unpac
 if ($LASTEXITCODE -ne 0) { throw 'electron-builder failed' }
 
 # --------------------------------------- 4. update payload assets
+# The notes are embedded into the manifest as well, so the free
+# `releases/latest/download/update-manifest.json` path can show them without an
+# API call.
+if (-not $Notes) {
+  $Notes = "KevinLauncher $Version`n`n- 详见仓库提交记录 https://github.com/KevinYuHere/KevinLauncher/commits/main"
+}
+Set-Content -LiteralPath (Join-Path $root 'release\RELEASE_NOTES.md') -Value $Notes -Encoding UTF8
 if ($FakeElectron) {
   node scripts/build-update-payload.mjs (Join-Path $root 'release\win-unpacked') $Version $FakeElectron
 } else {
@@ -83,9 +90,6 @@ if ($SkipUpload) {
 
 # ------------------------------------------------------------ 5. publish
 $gh = Find-Gh
-if (-not $Notes) {
-  $Notes = "KevinLauncher $Version`n`n- 详见仓库提交记录 https://github.com/KevinYuHere/KevinLauncher/commits/main"
-}
 # `gh release view` writes to stderr when the tag does not exist; with
 # $ErrorActionPreference = 'Stop' that would abort the script, so relax it here.
 $ErrorActionPreference = 'Continue'

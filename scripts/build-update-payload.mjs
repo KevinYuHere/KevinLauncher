@@ -97,6 +97,16 @@ if (await fs.stat(installerPath).catch(() => null)) {
   })
 }
 
+// Release notes (written by scripts/release.ps1) are embedded so the free
+// `releases/latest/download/update-manifest.json` path can show them without
+// calling the GitHub API.
+let notes = ''
+try {
+  notes = (await fs.readFile(join(outDir, 'RELEASE_NOTES.md'), 'utf8')).trim()
+} catch {
+  /* no notes for this build */
+}
+
 await fs.writeFile(
   join(outDir, 'update-manifest.json'),
   JSON.stringify(
@@ -108,7 +118,9 @@ await fs.writeFile(
       payloadSha256,
       installerName: installerSize ? installerName : null,
       installerSize,
-      installerSha256
+      installerSha256,
+      notes,
+      htmlUrl: `https://github.com/KevinYuHere/KevinLauncher/releases/tag/v${version}`
     },
     null,
     2
