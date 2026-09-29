@@ -90,6 +90,16 @@ const api: KevinApi = {
   appUpdateStart: () => ipcRenderer.invoke('appUpdate:start'),
   appUpdateToggle: () => ipcRenderer.invoke('appUpdate:toggle'),
 
+  installerInfo: () => ipcRenderer.invoke('installer:info'),
+  installerInspect: (dir: string) => ipcRenderer.invoke('installer:inspect', dir),
+  installerFreeSpace: (dir: string) => ipcRenderer.invoke('installer:freeSpace', dir),
+  installerPickDirectory: (current: string) => ipcRenderer.invoke('installer:pickDirectory', current),
+  installerRun: (dir: string) => ipcRenderer.invoke('installer:run', dir),
+  installerLaunch: (dir: string) => ipcRenderer.invoke('installer:launch', dir),
+
+  uninstallerInfo: () => ipcRenderer.invoke('uninstaller:info'),
+  uninstallerRun: (keepUserData: boolean) => ipcRenderer.invoke('uninstaller:run', keepUserData),
+
   windowMinimize: () => ipcRenderer.invoke('window:minimize'),
   windowToggleMaximize: () => ipcRenderer.invoke('window:toggleMaximize'),
   windowClose: () => ipcRenderer.invoke('window:close'),
@@ -143,6 +153,21 @@ const api: KevinApi = {
       callback(state)
     ipcRenderer.on('app-update:state', listener)
     return () => ipcRenderer.removeListener('app-update:state', listener)
+  },
+  onInstallerProgress: (
+    callback: (progress: import('@shared/types').InstallerProgress) => void
+  ) => {
+    const listener = (
+      _e: unknown,
+      progress: import('@shared/types').InstallerProgress
+    ): void => callback(progress)
+    ipcRenderer.on('installer:progress', listener)
+    return () => ipcRenderer.removeListener('installer:progress', listener)
+  },
+  onUninstallerProgress: (callback: (progress: { step: string }) => void) => {
+    const listener = (_e: unknown, progress: { step: string }): void => callback(progress)
+    ipcRenderer.on('uninstaller:progress', listener)
+    return () => ipcRenderer.removeListener('uninstaller:progress', listener)
   }
 }
 

@@ -39,9 +39,14 @@ win:
   signAndEditExecutable: false
   target:
     - nsis
+    # Portable self-extracting package: it always runs in install mode (the
+    # self-drawn installer UI), never as a portable app — see docs/INSTALLER.md.
+    - portable
   # Launcher runs elevated so game clients can be launched/tracked without
   # repeated UAC prompts.
   requestedExecutionLevel: requireAdministrator
+portable:
+  artifactName: ${productName}-Installer-${version}.${ext}
 nsis:
   oneClick: false
   perMachine: false

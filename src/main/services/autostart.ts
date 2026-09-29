@@ -74,3 +74,14 @@ export async function applyAutoStart(mode: AutoStartMode): Promise<void> {
 export function startedHidden(): boolean {
   return process.argv.includes(TRAY_START_ARG)
 }
+
+/** Removes both the scheduled task and the Run-key fallback (used by uninstall). */
+export async function removeAutoStartTask(): Promise<void> {
+  await runSchtasks(['/Delete', '/F', '/TN', AUTO_START_TASK])
+  try {
+    app.setLoginItemSettings({ openAtLogin: false })
+  } catch {
+    /* ignore */
+  }
+  log('autoStart: removed')
+}

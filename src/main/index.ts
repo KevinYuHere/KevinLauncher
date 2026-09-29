@@ -64,12 +64,28 @@ function relaunchElevated(): void {
   }
 }
 
-function createWindow(icon?: string, hidden = false): void {
+/** Window size / role of the current run. */
+type RunMode = 'app' | 'install' | 'uninstall'
+
+/**
+ * `--uninstall` is what the Windows Settings entry runs; the portable
+ * `KevinLauncher-Setup-*.exe` sets `PORTABLE_EXECUTABLE_FILE`, in which case the
+ * payload always acts as the installer (never as a portable app).
+ */
+function detectMode(): RunMode {
+  if (process.argv.includes('--uninstall')) return 'uninstall'
+  if (process.env.PORTABLE_EXECUTABLE_FILE || process.argv.includes('--install')) return 'install'
+  return 'app'
+}
+
+function createWindow(icon?: string, hidden = false, mode: RunMode = 'app'): void {
+  const setup = mode !== 'app'
   const mainWindow = new BrowserWindow({
-    width: 1180,
-    height: 760,
-    minWidth: 900,
-    minHeight: 600,
+    width: setup ? 680 : 1180,
+    height: setup ? 560 : 760,
+    minWidth: setup ? 620 : 900,
+    minHeight: setup ? 500 : 600,
+    resizable: setup ? false : true,
     show: false,
     frame: false,
     autoHideMenuBar: true,
@@ -112,7 +128,7 @@ function createWindow(icon?: string, hidden = false): void {
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
     mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
   } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+    mainWindow.loadFile(join(__dirname, '../renderer/index.html'), { hash: mode })
   }
 }
 
@@ -162,13 +178,19 @@ app.whenReady().then(async () => {
 
   registerIpc()
 
+  const mode = detectMode()
+  windowIcon = (await launcherIconPaths()).png
+  // `startedHidden()` is true when the Run entry launched us with `--tray`.
+  createWindow(windowIcon, mode === 'app' && startedHidden(), mode)
+
+  // In install / uninstall mode the app is just a small setup UI: no tray, no
+  // autostart, no update checking.
+  if (mode !== 'app') return
+
   const launcherSettings = await AppStore.launcherSettings()
   setCloseToTray(launcherSettings.closeAction === 'tray')
   applyAutoStart(launcherSettings.autoStart)
 
-  windowIcon = (await launcherIconPaths()).png
-  // `startedHidden()` is true when the Run entry launched us with `--tray`.
-  createWindow(windowIcon, startedHidden())
   void applyLauncherIcon()
   // The tray icon is always present while the launcher runs.
   void ensureTray()

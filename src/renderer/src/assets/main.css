@@ -2483,6 +2483,197 @@ textarea:focus-visible {
   font-variant-numeric: tabular-nums;
 }
 
+/* ------------------------------------- self-drawn installer / uninstaller */
+.setup {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+}
+.setup-drag {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 40px;
+  -webkit-app-region: drag;
+}
+.setup-card {
+  width: 100%;
+  max-width: 560px;
+  display: flex;
+  flex-direction: column;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  background: var(--glass);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  overflow: hidden;
+}
+.setup-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--line);
+}
+.setup-logo {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+}
+.setup-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--fg);
+}
+.setup-sub {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--fg-3);
+}
+.setup-close {
+  margin-left: auto;
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg-2);
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+.setup-close:hover {
+  background: var(--glass-hover);
+  color: var(--fg);
+}
+.setup-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 232px;
+  padding: 18px;
+}
+.setup-label {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  opacity: 0.55;
+}
+.setup-path {
+  display: flex;
+  gap: 8px;
+  -webkit-app-region: no-drag;
+}
+.setup-path input {
+  flex: 1;
+  min-width: 0;
+  height: 34px;
+  padding: 0 10px;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--fg);
+  font-size: 13px;
+}
+.setup-note {
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--fg-2);
+  word-break: break-all;
+}
+.setup-warn {
+  margin-top: 6px;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: #f0b429;
+}
+.setup-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--fg-3);
+  font-variant-numeric: tabular-nums;
+}
+.setup-current {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.setup-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.setup-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  font-size: 13px;
+  color: var(--fg);
+}
+.setup-list em {
+  font-style: normal;
+  text-align: right;
+  color: var(--fg-3);
+  word-break: break-all;
+}
+.setup-check {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--fg);
+  cursor: pointer;
+}
+.setup-check-path {
+  display: block;
+  font-style: normal;
+  font-size: 11.5px;
+  color: var(--fg-3);
+  word-break: break-all;
+}
+/* Plain theme-coloured progress bar — the ring is reserved for upgrades. */
+.setup-bar {
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+  overflow: hidden;
+}
+.setup-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--brand);
+  transition: width 0.2s ease;
+}
+.setup-bar-indeterminate {
+  width: 35%;
+  animation: setup-bar-run 1.1s ease-in-out infinite;
+}
+@keyframes setup-bar-run {
+  0% {
+    margin-left: -35%;
+  }
+  100% {
+    margin-left: 100%;
+  }
+}
+.setup-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 14px 18px;
+  border-top: 1px solid var(--line);
+}
+
 /* -------------------------------------------------- launcher update dialog */
 .update-modal {
   width: min(520px, 90vw);

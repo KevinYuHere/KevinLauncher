@@ -320,6 +320,49 @@ export interface AppUpdateState {
   error?: string
 }
 
+/** A KevinLauncher installation found on this machine. */
+export interface DetectedInstall {
+  dir: string
+  version: string | null
+  source: 'registry' | 'default'
+}
+
+/** State of the directory the user wants to install into. */
+export interface InstallTarget {
+  dir: string
+  exists: boolean
+  /** True when the directory already holds a KevinLauncher installation. */
+  isInstalled: boolean
+  version: string | null
+  fileCount: number
+}
+
+/** Everything the install UI needs to render its first page. */
+export interface InstallerInfo {
+  defaultDir: string
+  detected: DetectedInstall | null
+  target: InstallTarget | null
+  payloadSize: number
+  version: string
+  dataDir: string
+}
+
+export interface InstallerProgress {
+  phase: 'copying' | 'shortcuts'
+  done: number
+  total: number
+  current: string
+}
+
+/** Everything the uninstall UI needs. */
+export interface UninstallerInfo {
+  installDir: string
+  version: string
+  dataDir: string
+  dataSize: number
+  installSize: number
+}
+
 /** API exposed on `window.api` through the preload context bridge. */
 export interface KevinApi {
   listAddons(): Promise<AddonDescriptor[]>
@@ -419,6 +462,23 @@ export interface KevinApi {
   onAppUpdateAvailable(callback: (info: AppUpdateInfo) => void): () => void
   /** Fired whenever the download / install state changes. */
   onAppUpdateState(callback: (state: AppUpdateState) => void): () => void
+
+  /** --- installer mode (`KevinLauncher-Setup-*.exe`) --- */
+  installerInfo(): Promise<InstallerInfo>
+  installerInspect(dir: string): Promise<InstallTarget>
+  installerFreeSpace(dir: string): Promise<number>
+  installerPickDirectory(current: string): Promise<string | null>
+  /** Copies the payload into `dir`, writes shortcuts + the uninstall entry. */
+  installerRun(dir: string): Promise<boolean>
+  /** Starts the installed launcher and closes the installer. */
+  installerLaunch(dir: string): Promise<void>
+  onInstallerProgress(callback: (progress: InstallerProgress) => void): () => void
+
+  /** --- uninstaller mode (`KevinLauncher.exe --uninstall`) --- */
+  uninstallerInfo(): Promise<UninstallerInfo>
+  /** Removes the installation (and optionally the user data), then quits. */
+  uninstallerRun(keepUserData: boolean): Promise<void>
+  onUninstallerProgress(callback: (progress: { step: string }) => void): () => void
 
   windowMinimize(): Promise<void>
   windowToggleMaximize(): Promise<boolean>

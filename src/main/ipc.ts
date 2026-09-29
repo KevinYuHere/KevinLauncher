@@ -1,6 +1,6 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, shell } from 'electron'
 import { randomUUID } from 'crypto'
-import { execFile } from 'child_process'
+import { execFile, spawn } from 'child_process'
 import { promisify } from 'util'
 import { tmpdir } from 'os'
 import { basename, dirname, extname, join } from 'path'
@@ -10,8 +10,21 @@ import { ADDONS } from './addons/registry'
 import { AppStore } from './services/appStore'
 import { BgStore } from './services/background'
 import { BrandStore } from './services/brand'
-import { ensureTray, setCloseToTray } from './services/behavior'
+import { ensureTray, markQuitting, setCloseToTray } from './services/behavior'
 import { applyAutoStart } from './services/autostart'
+import {
+  applyPayload,
+  defaultInstallDir,
+  detectInstallation,
+  finishUninstall,
+  freeSpace,
+  inspectTarget,
+  installSize,
+  removeInstallation,
+  writeShortcuts,
+  writeUninstallEntry
+} from './services/install'
+import { directorySize } from './services/updateDownload'
 import { applyLauncherIcon } from './services/appIcon'
 import { IconStore } from './services/icon'
 import { extractAccent } from './services/theme'
@@ -936,6 +949,77 @@ export function registerIpc(): void {
   ipcMain.handle('appUpdate:state', () => appUpdate.stateSnapshot())
   ipcMain.handle('appUpdate:start', () => appUpdate.begin())
   ipcMain.handle('appUpdate:toggle', () => appUpdate.toggle())
+
+  // --- installer / uninstaller UI (fresh install + --uninstall) -------------
+  ipcMain.handle('installer:info', async () => {
+    const detected = await detectInstallation()
+    return {
+      defaultDir: defaultInstallDir(),
+      detected,
+      target: detected ? await inspectTarget(detected.dir) : null,
+      payloadSize: await installSize(),
+      version: currentAppVersion(),
+      dataDir: app.getPath('userData')
+    }
+  })
+  ipcMain.handle('installer:inspect', (_e, dir: string) => inspectTarget(dir))
+  ipcMain.handle('installer:freeSpace', (_e, dir: string) => freeSpace(dir))
+  ipcMain.handle('installer:pickDirectory', async (e, current: string) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    const result = await dialog.showOpenDialog(win ?? undefined!, {
+      title: '选择安装位置',
+      properties: ['openDirectory', 'createDirectory'],
+      defaultPath: current || defaultInstallDir()
+    })
+    return result.canceled ? null : (result.filePaths[0] ?? null)
+  })
+  ipcMain.handle('installer:run', async (e, dir: string) => {
+    const sender = e.sender
+    const source = dirname(process.execPath)
+    await applyPayload(source, dir, (progress) => {
+      if (!sender.isDestroyed()) sender.send('installer:progress', { phase: 'copying', ...progress })
+    })
+    if (!sender.isDestroyed()) sender.send('installer:progress', { phase: 'shortcuts', done: 0, total: 0, current: '' })
+    writeShortcuts(dir)
+    await writeUninstallEntry(dir, currentAppVersion())
+    // Autostart defaults to ON after a fresh install (scheduled task, silent UAC).
+    await AppStore.setLauncher({ autoStart: 'window' })
+    await applyAutoStart('window')
+    log(`install: finished (${dir})`)
+    return true
+  })
+  ipcMain.handle('installer:launch', async (_e, dir: string) => {
+    spawn(join(dir, 'KevinLauncher.exe'), [], { detached: true, stdio: 'ignore' }).unref()
+    markQuitting()
+    app.quit()
+  })
+
+  ipcMain.handle('uninstaller:info', async () => {
+    const dir = dirname(process.execPath)
+    const detected = await detectInstallation()
+    return {
+      installDir: detected?.dir ?? dir,
+      version: currentAppVersion(),
+      dataDir: app.getPath('userData'),
+      dataSize: await directorySize(app.getPath('userData')),
+      installSize: await directorySize(dir)
+    }
+  })
+  ipcMain.handle('uninstaller:run', async (e, keepUserData: boolean) => {
+    const sender = e.sender
+    const dir = dirname(process.execPath)
+    const detected = await detectInstallation()
+    await removeInstallation({
+      installDir: detected?.dir ?? dir,
+      keepUserData,
+      onProgress: (step) => {
+        if (!sender.isDestroyed()) sender.send('uninstaller:progress', { step })
+      }
+    })
+    finishUninstall(detected?.dir ?? dir)
+    markQuitting()
+    app.quit()
+  })
 
   ipcMain.handle('window:minimize', (e) => {
     BrowserWindow.fromWebContents(e.sender)?.minimize()
