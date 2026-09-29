@@ -3,7 +3,7 @@
 一个面向 Windows 的多应用启动器，内置米哈游三款游戏（原神 / 崩坏：星穹铁道 / 绝区零）与明日方舟的扩展模块：
 抽卡记录、游戏更新与预下载、截图图库、使用时长统计。
 
-界面为 Starward 风格的深色毛玻璃（Acrylic 观感），并支持亮/暗玻璃、背景模糊与暗化、跟随主题色自动黑/白文字。
+界面为毛玻璃（Acrylic 观感），并支持亮/暗玻璃、背景模糊与暗化、跟随主题色自动黑/白文字。
 
 > 本项目为**非官方第三方工具**，与 miHoYo / HoYoverse / Hypergryph 无任何关联。
 > 功能与接口流程参考了 [Starward](https://github.com/Scighost/Starward)，详见 [THIRD-PARTY-NOTICES](./THIRD-PARTY-NOTICES.md)。
@@ -23,18 +23,21 @@
 - 截图图库：浏览截图目录，缩略图在 Worker 中按需生成，大图在独立查看器窗口打开。
 - 外观：每个应用可单独设置主题色、亮/暗玻璃、背景图与背景模糊/暗化；主题色会自动适配黑/白文字。
 - 启动器设置：启动器图标、界面字体、关闭按钮行为、启动应用后的行为、全部设置的导出 / 导入备份。
-- **检查更新**：基于 GitHub Releases，启动时与每 24 小时自动检查一次；设置页也提供手动检查。
+- **检查更新**：基于 GitHub Releases，启动时与每 24 小时自动检查一次；设置页也可手动检查
+  （结果会以顶部 toast 提示：发现新版本 / 已是最新版本 / 检查失败原因）。
   检测到新版本弹出更新日志，可选择「立即更新」或「暂不更新」。
   选择更新后**不会打开安装程序窗口、也不需要任何选择**：左侧导航（设置按钮上方）会出现
-  **主题色进度环**，点击可**暂停 / 继续**下载（8 连接、断点续传、自动重试），悬停展开浮层显示
-  百分比、已下载 / 总大小与预计剩余时间。下载完成后自动进入**安装阶段**并在同一个环形上显示
-  安装进度（安装不可暂停），完成后重启完成升级，全程不阻塞界面。
-- 全新安装使用**完全自行绘制**的安装界面（见下）。
+  **主题色进度环**，点击可**暂停 / 继续**下载（8 连接、断点续传、失败自动重试、连接停滞超时重试），
+  悬停展开浮层显示百分比、已下载 / 总大小与预计剩余时间。下载完成后自动进入**安装阶段**并在
+  同一个环形上显示安装进度（安装不可暂停），完成后重启完成升级，全程不阻塞界面。
+  > 下载优先走 `api.github.com` 的资源接口，某些网络（如国内）无法直连 `github.com` 时仍可更新。
+> 全新安装的**完全自行绘制安装界面**尚未实装（目前使用下方 NSIS 向导），
+> 方案见 [docs/INSTALLER.md](./docs/INSTALLER.md)。
 
-### 安装程序
+### 安装程序（当前：NSIS）
 
 - NSIS 安装向导（非静默）：可视化选择安装目录，自动写入开始菜单与桌面快捷方式（不询问）。
-- 安装包带有深色品牌页眉 / 侧边栏与程序图标，风格与启动器一致。
+- 安装包带有深色品牌页眉 / 侧边栏与程序图标。
 
 ### 后台行为
 
@@ -92,11 +95,12 @@ npm run typecheck
 ### 构建 Windows 安装包
 
 ```powershell
-npm run build:win
+npm run build:win      # 只打包（不含升级载荷与上传）
+npm run release        # 完整流程：构建 + 打包 + 升级载荷 + 发布（推荐）
 ```
 
 由于 `electron-builder.yml` 中设置了 `win.signAndEditExecutable: false`（避免联网下载 winCodeSign），
-打包出的 exe 图标需要在打包后手动写入：
+打包出的 exe 图标需要在打包后手动写入（`scripts\release.ps1` 已自动处理）：
 
 ```powershell
 & "$env:LOCALAPPDATA\electron-builder\Cache\winCodeSign\<hash>\rcedit-x64.exe" `
@@ -109,7 +113,7 @@ npm run build:win
 
 ```powershell
 # 1) 改 package.json 的 version（例如 0.1.0）
-# 2) 一条命令完成：构建 -> 打包 -> 生成差分资源 -> 发布到 GitHub Releases
+# 2) 一条命令完成：构建 -> 打包 -> 生成升级载荷 -> 发布到 GitHub Releases
 npm run release
 ```
 
@@ -126,6 +130,12 @@ NSIS 打包、`scripts/build-update-payload.mjs`（生成升级用的 zip 与清
 
 > 参数：`-SkipUpload` 只构建不上传；`-Draft` 发草稿；`-Version x.y.z` 指定版本。
 
+发布后可用冒烟测试脚本验证（按客户端的方式用 8 个连接 Range 下载载荷并校验 SHA-256）：
+
+```powershell
+node scripts\verify-release.mjs v0.1.0
+```
+
 ---
 
 ## 数据存放位置
@@ -140,6 +150,7 @@ NSIS 打包、`scripts/build-update-payload.mjs`（生成升级用的 zip 与清
 ├─ fonts.json           # 本机字体缓存
 ├─ icons\ brand\ bg\    # 图标 / 启动器图标 / 背景图
 ├─ predownload\         # 预下载暂存（正式更新时复用）
+├─ update-staging\      # 启动器升级：下载的载荷与解包结果（升级后自动清理）
 └─ launcher.log         # 运行日志
 ```
 
@@ -152,17 +163,20 @@ NSIS 打包、`scripts/build-update-payload.mjs`（生成升级用的 zip 与清
 ```
 src/
 ├─ main/            # 主进程（Electron）
-│  ├─ update/       # 更新与预下载：sophon / sophonPatch / hoyoplay / arknightsUpdate / updateManager
+│  ├─ update/       # 游戏更新与预下载：sophon / sophonPatch / hoyoplay / arknightsUpdate / updateManager
 │  ├─ gacha/        # 抽卡：mihoyo / arknights / 缓存扫描与鉴权
-│  ├─ services/     # launcher / runtime / playTimeStore / appStore / icon / brand / background / downloader / logger ...
+│  ├─ services/     # launcher / runtime / playTimeStore / appStore / icon / brand / background /
+│  │                # downloader / logger / autostart / appUpdate / updateDownload / updateApply ...
 │  └─ workers/      # worker 线程：sophon 下载装配、进程快照
 ├─ preload/         # contextBridge（window.api）
-├─ shared/          # 主进程与渲染进程共享类型
+├─ shared/          # 主进程与渲染进程共享类型（types.ts、version.ts）
 └─ renderer/        # React 界面
-   └─ src/components/   # HomeView / GachaView / GalleryView / UpdateView / SettingsView / PlayTimeView ...
-tests/              # Vitest 单元测试（含本地 HTTP 服务模拟下载）
-docs/               # ARCHITECTURE / PLAN / UPSTREAM
+   └─ src/components/   # HomeView / GachaView / GalleryView / UpdateView / SettingsView /
+                        # PlayTimeView / UpdateRing / AppUpdateDialog ...
+tests/              # Vitest 单元测试（含本地 HTTP 服务模拟下载与 Range 续传）
+docs/               # ARCHITECTURE / INSTALLER / PLAN / UPSTREAM
 resources/          # 图标、hpatchz.exe
+scripts/            # install / dev / release / build-update-payload / verify-release / gen-installer-art
 ```
 
 ---

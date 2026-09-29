@@ -17,8 +17,15 @@ import { dirname, join } from 'path'
 const USER_AGENT = 'KevinLauncher'
 /** Parallel connections used for downloading. */
 export const PARALLEL = 8
-/** Attempts per connection before giving up. */
-const ATTEMPTS = 3
+/** Attempts per connection before giving up (a flaky link may need several). */
+const ATTEMPTS = 8
+/** Base backoff between attempts (ms); grows linearly with the attempt number. */
+const RETRY_DELAY = 700
+/**
+ * Per-attempt timeout. A stalled connection must not hang the whole download:
+ * whatever arrived is kept and the attempt is retried with a `Range` request.
+ */
+const ATTEMPT_TIMEOUT = 45_000
 
 export interface TransferProgress {
   transferred: number
@@ -54,12 +61,13 @@ export async function directorySize(dir: string): Promise<number> {
 }
 
 /**
- * Downloads `url` into `dest` using `PARALLEL` connections. Each connection has
- * its own `.partN` file, so pausing (aborting `signal`) and resuming later only
- * transfers what is still missing. Every connection retries with a backoff.
+ * Downloads `urls[0]` into `dest` using `PARALLEL` connections. Each connection
+ * has its own `.partN` file, so pausing (aborting `signal`) and resuming later
+ * only transfers what is still missing. Every connection retries with a backoff
+ * (moving on to the next URL, if any, when one is unreachable).
  */
 export async function downloadPayload(
-  url: string,
+  urls: string[],
   dest: string,
   size: number,
   onProgress?: (progress: TransferProgress) => void,
@@ -102,12 +110,16 @@ export async function downloadPayload(
         for (let attempt = 0; ; attempt++) {
           try {
             if (bytes >= part.end - part.start) return
-            const response = await fetch(url, {
+            // Abort a stalled connection after ATTEMPT_TIMEOUT (or on pause).
+            const timed = AbortSignal.timeout(ATTEMPT_TIMEOUT)
+            const attemptSignal = signal ? AbortSignal.any([signal, timed]) : timed
+            const response = await fetch(urls[Math.min(attempt, urls.length - 1)], {
               headers: {
                 Range: `bytes=${part.start + bytes}-${part.end - 1}`,
+                accept: 'application/octet-stream',
                 'user-agent': USER_AGENT
               },
-              signal
+              signal: attemptSignal
             })
             if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`)
             const handle = await fs.open(part.path, 'a')
@@ -128,7 +140,7 @@ export async function downloadPayload(
           } catch (error) {
             if (signal?.aborted) throw error
             if (attempt >= ATTEMPTS - 1) throw error
-            await delay(400 * (attempt + 1))
+            await delay(RETRY_DELAY * (attempt + 1))
             bytes = await fileSize(part.path)
             have.set(part.path, bytes)
           }

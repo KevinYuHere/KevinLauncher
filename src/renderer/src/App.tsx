@@ -163,23 +163,6 @@ export default function App(): ReactElement {
     void window.api.appUpdateToggle()
   }, [])
 
-  const handleCheckUpdate = useCallback(async (): Promise<void> => {
-    setCheckingUpdate(true)
-    setUpdateCheckText('正在检查…')
-    try {
-      const status = await window.api.appUpdateCheck()
-      if (status.hasUpdate && status.info) {
-        setAppUpdate(status.info)
-        setUpdateCheckText(`发现新版本 ${status.info.version}`)
-      } else if (status.error) {
-        setUpdateCheckText(`检查失败：${status.error}`)
-      } else {
-        setUpdateCheckText('已是最新版本')
-      }
-    } finally {
-      setCheckingUpdate(false)
-    }
-  }, [])
 
   useEffect(() => {
     const root = document.documentElement
@@ -228,6 +211,28 @@ export default function App(): ReactElement {
     setToast(message)
     window.setTimeout(() => setToast(null), 3200)
   }, [])
+
+  /** Manual "check for updates": report the outcome as a toast. */
+  const handleCheckUpdate = useCallback(async (): Promise<void> => {
+    setCheckingUpdate(true)
+    setUpdateCheckText('正在检查…')
+    try {
+      const status = await window.api.appUpdateCheck()
+      if (status.hasUpdate && status.info) {
+        setAppUpdate(status.info)
+        setUpdateCheckText(`发现新版本 ${status.info.version}`)
+        showToast(`发现新版本 ${status.info.version}`)
+      } else if (status.error) {
+        setUpdateCheckText(`检查失败：${status.error}`)
+        showToast(`检查更新失败：${status.error}`)
+      } else {
+        setUpdateCheckText('已是最新版本')
+        showToast('已是最新版本')
+      }
+    } finally {
+      setCheckingUpdate(false)
+    }
+  }, [showToast])
 
   // When switching games, keep the current page if the new game supports it;
   // otherwise fall back to the home page.

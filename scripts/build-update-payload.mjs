@@ -25,6 +25,8 @@ const root = resolve(import.meta.dirname, '..')
 const unpacked = resolve(process.argv[2] ?? join(root, 'release', 'win-unpacked'))
 const version =
   process.argv[3] ?? JSON.parse(await fs.readFile(join(root, 'package.json'), 'utf8')).version
+/** Assets are written next to the unpacked directory (release/ by default). */
+const outDir = resolve(unpacked, '..')
 
 /** Recursively lists every file, relative to `base` (always `/` separated). */
 async function walk(base, dir = base, out = []) {
@@ -42,7 +44,7 @@ const installSize = (
 ).reduce((sum, size) => sum + size, 0)
 
 // bsdtar (shipped with Windows) picks the format from the extension.
-const zipPath = join(root, 'release', `KevinLauncher-${version}.zip`)
+const zipPath = join(outDir, `KevinLauncher-${version}.zip`)
 await fs.rm(zipPath, { force: true })
 await exec('tar', ['-a', '-cf', zipPath, '-C', unpacked, '.'], { maxBuffer: 32 * 1024 * 1024 })
 
@@ -56,7 +58,7 @@ const payloadSha256 = await new Promise((resolveHash, reject) => {
 const { size: payloadSize } = await fs.stat(zipPath)
 
 await fs.writeFile(
-  join(root, 'release', 'update-manifest.json'),
+  join(outDir, 'update-manifest.json'),
   JSON.stringify({ version, installSize, payloadSha256, payloadSize }, null, 2),
   'utf8'
 )

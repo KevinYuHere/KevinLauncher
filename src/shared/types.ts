@@ -270,8 +270,10 @@ export interface AppUpdateInfo {
   notes: string
   /** Release page URL (opened when there is no payload asset). */
   htmlUrl: string
-  /** Download URL of the update payload (`KevinLauncher-<version>.zip`). */
-  payloadUrl: string | null
+  /** Download URLs of the update payload, best first (API asset endpoint, then
+   *  the `github.com/.../releases/download/...` URL). Some networks cannot
+   *  reach `github.com` but can reach `api.github.com`. */
+  payloadUrls: string[]
   payloadSize: number
   /** Hex SHA-256 of the payload, from the release manifest. */
   payloadSha256: string | null

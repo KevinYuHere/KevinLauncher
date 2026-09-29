@@ -59,7 +59,7 @@ describe('downloadPayload', () => {
   it('downloads over several connections', async () => {
     payload = randomBytes(600_000)
     const dest = join(await tmp(), 'payload.zip')
-    await downloadPayload(baseUrl, dest, payload.length)
+    await downloadPayload([baseUrl], dest, payload.length)
     expect(await fs.readFile(dest)).toEqual(payload)
     expect(maxInFlight).toBeGreaterThan(1)
   })
@@ -68,7 +68,7 @@ describe('downloadPayload', () => {
     payload = randomBytes(400_000)
     const dest = join(await tmp(), 'payload.zip')
     const seen: number[] = []
-    await downloadPayload(baseUrl, dest, payload.length, (progress) => seen.push(progress.transferred))
+    await downloadPayload([baseUrl], dest, payload.length, (progress) => seen.push(progress.transferred))
     expect(seen.at(-1)).toBe(payload.length)
     for (let i = 1; i < seen.length; i++) expect(seen[i]).toBeGreaterThanOrEqual(seen[i - 1])
   })
@@ -80,7 +80,7 @@ describe('downloadPayload', () => {
     await fs.writeFile(`${dest}.part0`, payload.subarray(0, chunk))
     await fs.writeFile(`${dest}.part1`, payload.subarray(chunk, chunk + 5000))
 
-    await downloadPayload(baseUrl, dest, payload.length)
+    await downloadPayload([baseUrl], dest, payload.length)
 
     expect(await fs.readFile(dest)).toEqual(payload)
     expect(requests).toContain(`bytes=${chunk + 5000}-${chunk * 2 - 1}`)
@@ -90,7 +90,7 @@ describe('downloadPayload', () => {
     payload = randomBytes(200_000)
     failFirst = { '0': 2 }
     const dest = join(await tmp(), 'payload.zip')
-    await downloadPayload(baseUrl, dest, payload.length)
+    await downloadPayload([baseUrl], dest, payload.length)
     expect(await fs.readFile(dest)).toEqual(payload)
   })
 
@@ -104,7 +104,7 @@ describe('downloadPayload', () => {
     const controller = new AbortController()
     controller.abort()
     await expect(
-      downloadPayload(baseUrl, dest, payload.length, undefined, controller.signal)
+      downloadPayload([baseUrl], dest, payload.length, undefined, controller.signal)
     ).rejects.toThrow()
 
     // Simulate the state after pausing: the first half of the first connection
@@ -112,7 +112,7 @@ describe('downloadPayload', () => {
     await fs.mkdir(join(dest, '..'), { recursive: true })
     await fs.writeFile(`${dest}.part0`, payload.subarray(0, 10_000))
     requests = []
-    await downloadPayload(baseUrl, dest, payload.length)
+    await downloadPayload([baseUrl], dest, payload.length)
 
     expect(await fs.readFile(dest)).toEqual(payload)
     // The kept bytes are reused (a Range starting at 10 000) instead of restarting.

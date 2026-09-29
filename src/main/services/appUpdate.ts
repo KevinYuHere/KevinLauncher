@@ -24,7 +24,7 @@ interface GitHubRelease {
   body?: string
   html_url?: string
   published_at?: string
-  assets?: { name?: string; browser_download_url?: string; size?: number }[]
+  assets?: { id?: number; name?: string; browser_download_url?: string; size?: number }[]
 }
 
 /** Everything the UI needs while idle (no download running). */
@@ -39,11 +39,35 @@ const IDLE_STATE: AppUpdateState = {
   message: ''
 }
 
-/** Downloads a small text asset (the release manifest). */
-async function fetchText(url: string): Promise<string> {
-  const response = await fetch(url, { headers: { 'user-agent': USER_AGENT } })
-  if (!response.ok) throw new Error(`HTTP ${response.status}`)
-  return response.text()
+/**
+ * Candidate URLs for a release asset, best first.
+ *
+ * The API asset endpoint is used first on purpose: some networks (China in
+ * particular) can reach `api.github.com` but time out on `github.com`, where
+ * the classic `/releases/download/...` URLs live.
+ */
+function assetUrls(asset: { id?: number; browser_download_url?: string }): string[] {
+  const urls: string[] = []
+  if (asset.id) urls.push(`https://api.github.com/repos/${GITHUB_REPO}/releases/assets/${asset.id}`)
+  if (asset.browser_download_url) urls.push(asset.browser_download_url)
+  return urls
+}
+
+/** Downloads a small text asset (the release manifest), trying each URL. */
+async function fetchText(urls: string[]): Promise<string> {
+  let lastError: unknown
+  for (const url of urls) {
+    try {
+      const response = await fetch(url, {
+        headers: { accept: 'application/octet-stream', 'user-agent': USER_AGENT }
+      })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      return await response.text()
+    } catch (error) {
+      lastError = error
+    }
+  }
+  throw lastError ?? new Error('无法获取更新清单')
 }
 
 /** Reads the newest published release, or `null` when the repo has none. */
@@ -69,9 +93,9 @@ async function fetchLatestRelease(): Promise<AppUpdateInfo | null> {
   // and the payload hash.
   let installSize = 0
   let payloadSha256: string | null = null
-  if (manifest?.browser_download_url) {
+  if (manifest) {
     try {
-      const meta = JSON.parse(await fetchText(manifest.browser_download_url)) as {
+      const meta = JSON.parse(await fetchText(assetUrls(manifest))) as {
         installSize?: number
         payloadSha256?: string
       }
@@ -87,7 +111,7 @@ async function fetchLatestRelease(): Promise<AppUpdateInfo | null> {
     name: release.name?.trim() || `v${version}`,
     notes: (release.body ?? '').trim(),
     htmlUrl: release.html_url ?? `https://github.com/${GITHUB_REPO}/releases`,
-    payloadUrl: payload?.browser_download_url ?? null,
+    payloadUrls: payload ? assetUrls(payload) : [],
     payloadSize: payload?.size ?? 0,
     payloadSha256,
     installSize,
@@ -181,7 +205,7 @@ export class AppUpdateChecker {
   begin(): void {
     const info = this.info
     if (!info || this.running) return
-    if (!app.isPackaged || !info.payloadUrl) {
+    if (!app.isPackaged || !info.payloadUrls.length) {
       void shell.openExternal(info.htmlUrl)
       return
     }
@@ -228,7 +252,7 @@ export class AppUpdateChecker {
         this.patch({ percent: 100, transferred: info.payloadSize, bytesPerSecond: 0 })
       } else {
         await downloadPayload(
-          info.payloadUrl as string,
+          info.payloadUrls,
           archive,
           info.payloadSize,
           (progress) => {
