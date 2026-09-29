@@ -11,6 +11,7 @@ import { AppStore } from './services/appStore'
 import { BgStore } from './services/background'
 import { BrandStore } from './services/brand'
 import { ensureTray, markQuitting, setCloseToTray } from './services/behavior'
+import { isElevated } from './services/elevation'
 import { applyAutoStart } from './services/autostart'
 import {
   applyPayload,
@@ -37,7 +38,9 @@ import {
   currentDataDir,
   defaultDataDir,
   hasData,
+  isTransientEntry,
   migrateData,
+  normalizeDataDir,
   switchDataDir,
   writeDataDir
 } from './services/dataDir'
@@ -206,19 +209,10 @@ function psQuote(value: string): string {
 }
 
 /** Entries that are never part of a backup (transient / regenerated data). */
-const BACKUP_EXCLUDE = new Set(['logs', 'update-staging'])
-const isBackupExcluded = (name: string): boolean =>
-  BACKUP_EXCLUDE.has(name) || name.endsWith('.log') || name.startsWith('simulate.')
-
-/**
- * Copies the whole data directory into `stage`, except transient entries. The
- * backup therefore covers every setting automatically — including ones added in
- * future versions — instead of a hard-coded list of files.
- */
 async function stageBackup(userData: string, stage: string): Promise<void> {
   const entries = await fs.readdir(userData, { withFileTypes: true })
   for (const entry of entries) {
-    if (isBackupExcluded(entry.name)) continue
+    if (isTransientEntry(entry.name)) continue
     const source = join(userData, entry.name)
     const target = join(stage, entry.name)
     if (entry.isDirectory()) await copyDir(source, target)
@@ -231,7 +225,7 @@ async function restoreBackup(stage: string, userData: string): Promise<string[]>
   const restored: string[] = []
   const entries = await fs.readdir(stage, { withFileTypes: true })
   for (const entry of entries) {
-    if (isBackupExcluded(entry.name)) continue
+    if (isTransientEntry(entry.name)) continue
     const source = join(stage, entry.name)
     const target = join(userData, entry.name)
     if (entry.isDirectory()) await copyDir(source, target)
@@ -1021,6 +1015,15 @@ export function registerIpc(): void {
     // Files of a running launcher are locked — close it first.
     const remaining = await closeRunningInstances()
     if (remaining > 0) {
+      // Not elevated: the running launcher may be, so retry from an elevated
+      // instance (which can also stop it).
+      if (!(await isElevated()) && !hasInstallDirArgument()) {
+        log('install: cannot stop the running launcher — retrying elevated')
+        relaunchInstallerElevated()
+        markQuitting()
+        app.quit()
+        return false
+      }
       throw new Error('检测到仍在运行的 KevinLauncher，请先退出后重试')
     }
 
@@ -1035,9 +1038,9 @@ export function registerIpc(): void {
 
     // Remember the chosen data directory (and take existing data along).
     if (requestedDataDir) {
-      const target = requestedDataDir.trim()
+      const target = normalizeDataDir(requestedDataDir)
       const fallback = defaultDataDir()
-      if (target && target.toLowerCase() !== fallback.toLowerCase()) {
+      if (target.toLowerCase() !== fallback.toLowerCase()) {
         if (await hasData(fallback)) await migrateData(fallback, target)
         await writeDataDir(target)
         log(`install: data directory set to ${target}`)
@@ -1066,11 +1069,11 @@ export function registerIpc(): void {
       properties: ['openDirectory', 'createDirectory'],
       defaultPath: current || defaultDataDir()
     })
-    return result.canceled ? null : normalizeInstallDir(result.filePaths[0] ?? '')
+    return result.canceled ? null : normalizeDataDir(result.filePaths[0] ?? '')
   })
   /** Moves the data to `dir` and restarts the launcher. */
   ipcMain.handle('dataDir:set', (e, dir: string) => {
-    const target = normalizeInstallDir(dir)
+    const target = normalizeDataDir(dir)
     if (directoriesOverlap(target, dirname(process.execPath))) {
       throw new Error('数据目录不能与程序目录相同，也不能互相包含')
     }

@@ -176,11 +176,42 @@ export async function runningInstances(): Promise<string[]> {
   }
 }
 
+/**
+ * PIDs of the other launcher instances (i.e. not this installer/uninstaller).
+ *
+ * The path is only used to *identify* them; they are killed by PID afterwards,
+ * because `Stop-Process -Name` would also take this process' own
+ * renderer/GPU helpers down (which made the setup window go black) and a
+ * path-based re-filter silently skips processes whose path cannot be read.
+ */
+async function otherInstancePids(): Promise<number[]> {
+  const self = `'${process.execPath.replace(/'/g, "''")}'`
+  try {
+    const { stdout } = await exec(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        `$self = ${self}; Get-Process KevinLauncher -ErrorAction SilentlyContinue | ` +
+          `Where-Object { $_.Path -ne $self } | Select-Object -ExpandProperty Id`
+      ],
+      { windowsHide: true, maxBuffer: 8 * 1024 * 1024 }
+    )
+    return stdout
+      .split(/\r?\n/)
+      .map((line) => Number.parseInt(line.trim(), 10))
+      .filter((pid) => Number.isInteger(pid) && pid > 0 && pid !== process.pid)
+  } catch {
+    return []
+  }
+}
+
 /** Closes every other running launcher (best effort; needs elevation to work). */
 export async function closeRunningInstances(): Promise<number> {
-  const paths = await runningInstances()
-  if (!paths.length) return 0
-  const self = process.pid
+  const pids = await otherInstancePids()
+  if (!pids.length) return 0
+  log(`install: closing launcher instance(s) ${pids.join(', ')}`)
   try {
     await exec(
       'powershell.exe',
@@ -188,15 +219,15 @@ export async function closeRunningInstances(): Promise<number> {
         '-NoProfile',
         '-NonInteractive',
         '-Command',
-        `Get-Process KevinLauncher -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne ${self} } | Stop-Process -Force`
+        `Stop-Process -Id ${pids.join(',')} -Force -ErrorAction SilentlyContinue`
       ],
       { windowsHide: true }
     )
   } catch {
     /* ignore: the caller reports the remaining instances */
   }
-  await new Promise((resolve) => setTimeout(resolve, 800))
-  return (await runningInstances()).length
+  await new Promise((resolve) => setTimeout(resolve, 1500))
+  return (await otherInstancePids()).length
 }
 
 /**
@@ -371,7 +402,7 @@ export async function applyPayload(
     const from = join(sourceDir, ...file.split('/'))
     const to = join(targetDir, ...file.split('/'))
     await fs.mkdir(dirname(to), { recursive: true })
-    await fs.copyFile(from, to)
+    await copyWithRetry(from, to)
     done += sizes.get(file) ?? 0
     const now = Date.now()
     if (onProgress && (now - lastReport > 60 || done === total)) {
@@ -382,6 +413,23 @@ export async function applyPayload(
 
   await writeInstallInfo(targetDir, currentAppVersion(), files)
   return { files, bytes: total }
+}
+
+/**
+ * Copies a file, retrying briefly: right after the running launcher is stopped
+ * Windows may still hold the executable/DLL handles for a moment (EBUSY/EPERM).
+ */
+async function copyWithRetry(from: string, to: string): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await fs.copyFile(from, to)
+      return
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (attempt >= 5 || (code !== 'EBUSY' && code !== 'EPERM' && code !== 'EACCES')) throw error
+      await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)))
+    }
+  }
 }
 
 /** Creates the Start Menu and desktop shortcuts (no prompt, as required). */
