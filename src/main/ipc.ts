@@ -1012,9 +1012,10 @@ export function registerIpc(): void {
       return false
     }
 
-    // Files of a running launcher are locked — close it first.
-    const remaining = await closeRunningInstances()
-    if (remaining > 0) {
+    // Files of a running launcher are locked — close the instance in this
+    // directory first (never the installer itself, which lives elsewhere).
+    const free = await closeRunningInstances(dir)
+    if (!free) {
       // Not elevated: the running launcher may be, so retry from an elevated
       // instance (which can also stop it).
       if (!(await isElevated()) && !hasInstallDirArgument()) {
@@ -1024,7 +1025,7 @@ export function registerIpc(): void {
         app.quit()
         return false
       }
-      throw new Error('检测到仍在运行的 KevinLauncher，请先退出后重试')
+      throw new Error(`无法关闭正在运行的 ${join(dir, 'KevinLauncher.exe')}，请先退出该实例后重试`)
     }
 
     await applyPayload(source, dir, (progress) => {

@@ -176,16 +176,9 @@ export async function runningInstances(): Promise<string[]> {
   }
 }
 
-/**
- * PIDs of the other launcher instances (i.e. not this installer/uninstaller).
- *
- * The path is only used to *identify* them; they are killed by PID afterwards,
- * because `Stop-Process -Name` would also take this process' own
- * renderer/GPU helpers down (which made the setup window go black) and a
- * path-based re-filter silently skips processes whose path cannot be read.
- */
-async function otherInstancePids(): Promise<number[]> {
-  const self = `'${process.execPath.replace(/'/g, "''")}'`
+/** PIDs running the given executable (empty when the path cannot be read). */
+async function pidsUsing(exe: string): Promise<number[]> {
+  const target = `'${exe.replace(/'/g, "''")}'`
   try {
     const { stdout } = await exec(
       'powershell.exe',
@@ -193,8 +186,8 @@ async function otherInstancePids(): Promise<number[]> {
         '-NoProfile',
         '-NonInteractive',
         '-Command',
-        `$self = ${self}; Get-Process KevinLauncher -ErrorAction SilentlyContinue | ` +
-          `Where-Object { $_.Path -ne $self } | Select-Object -ExpandProperty Id`
+        `Get-Process KevinLauncher -ErrorAction SilentlyContinue | ` +
+          `Where-Object { $_.Path -ieq ${target} } | Select-Object -ExpandProperty Id`
       ],
       { windowsHide: true, maxBuffer: 8 * 1024 * 1024 }
     )
@@ -207,27 +200,52 @@ async function otherInstancePids(): Promise<number[]> {
   }
 }
 
-/** Closes every other running launcher (best effort; needs elevation to work). */
-export async function closeRunningInstances(): Promise<number> {
-  const pids = await otherInstancePids()
-  if (!pids.length) return 0
-  log(`install: closing launcher instance(s) ${pids.join(', ')}`)
+/** True when the executable can be opened for writing (i.e. not in use). */
+async function isUnlocked(file: string): Promise<boolean> {
   try {
-    await exec(
-      'powershell.exe',
-      [
-        '-NoProfile',
-        '-NonInteractive',
-        '-Command',
-        `Stop-Process -Id ${pids.join(',')} -Force -ErrorAction SilentlyContinue`
-      ],
-      { windowsHide: true }
-    )
-  } catch {
-    /* ignore: the caller reports the remaining instances */
+    const handle = await fs.open(file, 'r+')
+    await handle.close()
+    return true
+  } catch (error) {
+    // A missing file cannot be locked either.
+    return (error as NodeJS.ErrnoException).code === 'ENOENT'
   }
-  await new Promise((resolve) => setTimeout(resolve, 1500))
-  return (await otherInstancePids()).length
+}
+
+/**
+ * Closes the launcher **installed in `targetDir`** (best effort).
+ *
+ * Only processes running `<targetDir>\KevinLauncher.exe` are targeted — this is
+ * what makes it safe: the installer itself runs from its own folder, so it can
+ * never close itself (a previous "exclude my own path" filter did exactly that
+ * when the paths did not compare equal).
+ *
+ * Returns true when the executable is no longer in use.
+ */
+export async function closeRunningInstances(targetDir: string): Promise<boolean> {
+  const exe = join(targetDir, EXE)
+  const pids = await pidsUsing(exe)
+  if (pids.length) {
+    log(`install: closing launcher instance(s) ${pids.join(', ')} at ${targetDir}`)
+    try {
+      await exec(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `Stop-Process -Id ${pids.join(',')} -Force -ErrorAction SilentlyContinue`
+        ],
+        { windowsHide: true }
+      )
+    } catch {
+      /* reported through the return value */
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+  }
+  // Opening the exe for writing is the reliable "still running?" probe — it does
+  // not depend on being able to read process paths.
+  return isUnlocked(exe)
 }
 
 /**
