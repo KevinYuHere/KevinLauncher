@@ -16,8 +16,19 @@ const USER_AGENT = 'KevinLauncher'
 
 /** Time between automatic checks (startup check is separate). */
 const CHECK_INTERVAL = 24 * 60 * 60 * 1000
+/** Manual checks closer than this reuse the previous result (API rate limit). */
+const CHECK_THROTTLE = 60 * 1000
+/** After a 403 (rate limit) automatic checks stay quiet for this long. */
+const RATE_LIMIT_BACKOFF = 30 * 60 * 1000
 /** Small delay so the window is painted before the first request. */
 const STARTUP_DELAY = 4_000
+
+/** Human readable reason for a failed check (403 = GitHub rate limit). */
+function describeCheckError(error: unknown): string {
+  const message = (error as Error).message ?? String(error)
+  if (/403/.test(message)) return 'GitHub 接口请求过于频繁（限流），请稍后再试'
+  return message
+}
 
 interface GitHubRelease {
   tag_name?: string
@@ -174,6 +185,10 @@ export class AppUpdateChecker {
   private state: AppUpdateState = { ...IDLE_STATE }
   private controller: AbortController | null = null
   private running = false
+  /** Timestamp of the last API request (throttles manual checks). */
+  private lastCheck = 0
+  /** Automatic checks are skipped until this timestamp after a 403. */
+  private rateLimitedUntil = 0
 
   /** Currently installed version (from `resources/app-version.txt`). */
   current(): string {
@@ -208,7 +223,16 @@ export class AppUpdateChecker {
   }
 
   /** Performs a check now and returns the resulting status (never throws). */
-  async check(): Promise<AppUpdateStatus> {
+  async check(force = false): Promise<AppUpdateStatus> {
+    // The unauthenticated GitHub API allows 60 requests per hour: never hammer
+    // it (a manual check right after another one reuses the last result).
+    const now = Date.now()
+    if (!force && this.lastCheck && now - this.lastCheck < CHECK_THROTTLE) {
+      return this.status()
+    }
+    // Back off after a rate-limit response instead of making it worse.
+    if (this.rateLimitedUntil > now) return this.status()
+    this.lastCheck = now
     try {
       const latest = await fetchLatestRelease()
       this.error = undefined
@@ -222,9 +246,15 @@ export class AppUpdateChecker {
         for (const listener of this.listeners) listener(found)
       }
     } catch (error) {
-      this.error = (error as Error).message
-      this.info = null
-      log(`appUpdate: check failed: ${this.error}`)
+      // Keep the previous result: a failed check (network, rate limit, …) must
+      // not make an already known update disappear, otherwise a paused download
+      // could no longer be resumed.
+      this.error = describeCheckError(error)
+      if (/403/.test((error as Error).message)) {
+        this.rateLimitedUntil = now + RATE_LIMIT_BACKOFF
+        log('appUpdate: GitHub rate limit hit — next automatic check in 30 minutes')
+      }
+      log(`appUpdate: check failed: ${(error as Error).message}`)
     }
     return this.status()
   }
@@ -233,13 +263,16 @@ export class AppUpdateChecker {
   begin(): void {
     const info = this.info
     if (!info || this.running) return
-    if (!app.isPackaged || !info.payloadUrls.length) {
+    if (!app.isPackaged || (!info.payloadUrls.length && !info.installerUrls.length)) {
       void shell.openExternal(info.htmlUrl)
       return
     }
     this.running = true
+    // Hold on to the info for the whole run: a later (failed) check must not
+    // change what is being downloaded.
     this.controller = new AbortController()
-    log(`appUpdate: starting ${info.version} (${Math.round(info.payloadSize / 1048576)} MB)`)
+    const megabytes = Math.round((info.installerSize || info.payloadSize) / 1048576)
+    log(`appUpdate: starting ${info.version} (~${megabytes} MB)`)
     void this.run(info, this.controller).finally(() => {
       this.running = false
     })
