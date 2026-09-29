@@ -148,6 +148,50 @@ async function fetchReleaseViaLatestUrl(): Promise<AppUpdateInfo | null> {
   return infoFromManifest(JSON.parse(await response.text()) as ManifestFields)
 }
 
+/** True for URLs of the API-free `releases/latest/download/...` form. */
+const isLatestDownloadUrl = (url: string): boolean => url.includes('/releases/latest/download/')
+
+/** Downloads a payload, falling back to the API asset endpoint when needed. */
+async function downloadWithFallback(options: {
+  primary: string[]
+  size: number
+  dest: string
+  onProgress?: (progress: { transferred: number; total: number; bytesPerSecond: number }) => void
+  signal?: AbortSignal
+  /** Resolves API asset URLs (rate limited) when the free path fails. */
+  fallbackUrls?: () => Promise<string[]>
+}): Promise<void> {
+  const { primary, size, dest, onProgress, signal, fallbackUrls } = options
+  try {
+    // Only two attempts on the free path: if github.com is unreachable right
+    // now, switch to the API instead of retrying for minutes with 0 progress.
+    await downloadPayload(primary, dest, size, onProgress, signal, primary.some(isLatestDownloadUrl) ? 2 : 8)
+    return
+  } catch (error) {
+    if (signal?.aborted) throw error
+    if (!fallbackUrls || !primary.some(isLatestDownloadUrl)) throw error
+    log(`appUpdate: ${primary[0]} failed (${(error as Error).message}) — retrying via the API`)
+    const fallback = await fallbackUrls()
+    if (!fallback.length) throw error
+    await downloadPayload(fallback, dest, size, onProgress, signal, 8)
+  }
+}
+
+/** API asset URLs (api.github.com) for the payload or the installer. */
+async function apiAssetUrls(kind: 'payload' | 'installer'): Promise<string[]> {
+  const response = await fetch(RELEASES_API, {
+    headers: { accept: 'application/vnd.github+json', 'user-agent': USER_AGENT }
+  })
+  if (!response.ok) throw new Error(`GitHub 返回 HTTP ${response.status}`)
+  const release = (await response.json()) as GitHubRelease
+  const assets = release.assets ?? []
+  const asset =
+    kind === 'payload'
+      ? assets.find((item) => /KevinLauncher-.*\.zip$/i.test(item.name ?? ''))
+      : assets.find((item) => /KevinLauncher-Installer.*\.exe$/i.test(item.name ?? ''))
+  return asset ? assetUrls(asset) : []
+}
+
 /** Reads the newest published release, or `null` when the repo has none. */
 async function fetchLatestRelease(): Promise<AppUpdateInfo | null> {
   // 1) Free path first (no rate limit, no auth).
@@ -451,11 +495,12 @@ export class AppUpdateChecker {
       if (info.payloadSize > 0 && (await fileSize(archive)) === info.payloadSize) {
         this.patch({ percent: 100, transferred: info.payloadSize, bytesPerSecond: 0 })
       } else {
-        await downloadPayload(
-          info.payloadUrls,
-          archive,
-          info.payloadSize,
-          (progress) => {
+        await downloadWithFallback({
+          primary: info.payloadUrls,
+          size: info.payloadSize,
+          dest: archive,
+          signal: controller.signal,
+          onProgress: (progress) => {
             this.patch({
               percent: info.payloadSize > 0 ? (progress.transferred / info.payloadSize) * 100 : 0,
               transferred: progress.transferred,
@@ -463,8 +508,8 @@ export class AppUpdateChecker {
               bytesPerSecond: progress.bytesPerSecond
             })
           },
-          controller.signal
-        )
+          fallbackUrls: () => apiAssetUrls('payload')
+        })
       }
       const downloaded = await fileSize(archive)
       if (info.payloadSize > 0 && downloaded !== info.payloadSize) {
@@ -523,11 +568,12 @@ export class AppUpdateChecker {
       message: '正在下载安装程序…'
     })
     if (!(info.installerSize > 0 && (await fileSize(installer)) === info.installerSize)) {
-      await downloadPayload(
-        info.installerUrls,
-        installer,
-        info.installerSize,
-        (progress) => {
+      await downloadWithFallback({
+        primary: info.installerUrls,
+        size: info.installerSize,
+        dest: installer,
+        signal: controller.signal,
+        onProgress: (progress) => {
           this.patch({
             percent:
               info.installerSize > 0 ? (progress.transferred / info.installerSize) * 100 : 0,
@@ -536,8 +582,8 @@ export class AppUpdateChecker {
             bytesPerSecond: progress.bytesPerSecond
           })
         },
-        controller.signal
-      )
+        fallbackUrls: () => apiAssetUrls('installer')
+      })
     }
     const size = await fileSize(installer)
     if (info.installerSize > 0 && size !== info.installerSize) {

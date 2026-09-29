@@ -83,7 +83,8 @@ export async function downloadPayload(
   dest: string,
   size: number,
   onProgress?: (progress: TransferProgress) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  attempts = ATTEMPTS
 ): Promise<void> {
   await fs.mkdir(dirname(dest), { recursive: true })
   const chunk = Math.ceil(size / PARALLEL)
@@ -151,7 +152,7 @@ export async function downloadPayload(
             return
           } catch (error) {
             if (signal?.aborted) throw error
-            if (attempt >= ATTEMPTS - 1) throw error
+            if (attempt >= attempts - 1) throw error
             await delay(RETRY_DELAY * (attempt + 1))
             bytes = await fileSize(part.path)
             have.set(part.path, bytes)
