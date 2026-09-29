@@ -17,6 +17,7 @@ import {
   showMainWindow
 } from './services/behavior'
 import { applyAutoStart, startedHidden } from './services/autostart'
+import { applyDataDir } from './services/dataDir'
 import { BgStore } from './services/background'
 import { BrandStore } from './services/brand'
 import { IconStore } from './services/icon'
@@ -37,8 +38,11 @@ protocol.registerSchemesAsPrivileged([
 ])
 
 // Keep the same userData directory (`%APPDATA%\kevin-launcher`) for both dev
-// and packaged builds so config / icons / backgrounds stay shared.
+// and packaged builds so config / icons / backgrounds stay shared. A custom
+// directory (chosen in the installer or in the settings) is stored in the
+// registry and applied here, before anything reads `app.getPath('userData')`.
 app.setName('kevin-launcher')
+applyDataDir()
 
 /** Window size / role of the current run. */
 type RunMode = 'app' | 'install' | 'uninstall'
@@ -56,11 +60,8 @@ function detectMode(): RunMode {
 
 const runMode: RunMode = detectMode()
 
-// Only a single instance of the *launcher* may run. The installer/uninstaller
-// deliberately skip the lock: opening the installer while the launcher runs must
-// open the installer (it closes the launcher before overwriting it).
-const singleInstance = runMode === 'app' ? app.requestSingleInstanceLock() : true
-if (!singleInstance) app.quit()
+/** Set once the launcher holds the single-instance lock (app mode only). */
+let holdsLock = false
 
 /** Icon used for the window / taskbar (resolved once on startup). */
 let windowIcon: string | undefined
@@ -137,19 +138,38 @@ function createWindow(icon?: string, hidden = false, mode: RunMode = 'app'): voi
 }
 
 app.whenReady().then(async () => {
-  if (!singleInstance) return
   electronApp.setAppUserModelId('com.kevin.kevinlauncher')
 
+  // Elevation must happen *before* the single-instance lock: a non-elevated
+  // instance that took the lock and then relaunched itself elevated would lose
+  // the race (the elevated process finds the lock taken and exits), so
+  // double-clicking the shortcut would appear to do nothing.
+  //
   // Packaged launcher runs elevated so launching protected game clients never
   // triggers a UAC prompt and their processes can be tracked/stopped. In dev
   // this is handled by scripts/dev.ps1 (avoids an electron-vite restart loop).
-  // The installer elevates itself only when the chosen directory needs it, and
+  // The installer elevates itself only when the chosen directory needs it and
   // the uninstaller never needs administrator rights.
   if (runMode === 'app' && !is.dev && !(await isElevated())) {
+    log('app: not elevated — requesting administrator rights and restarting')
     relaunchElevated()
     app.quit()
     return
   }
+
+  // Only a single instance of the *launcher* may run. The installer/uninstaller
+  // deliberately skip the lock: opening the installer while the launcher runs
+  // must open the installer (it closes the launcher before overwriting it).
+  if (runMode === 'app') {
+    if (!app.requestSingleInstanceLock()) {
+      log('app: another instance holds the lock — exiting')
+      app.quit()
+      return
+    }
+    holdsLock = true
+    app.on('second-instance', () => showMainWindow())
+  }
+  log(`app: mode=${runMode} packaged=${app.isPackaged} dev=${is.dev}`)
 
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)
@@ -242,10 +262,7 @@ app.whenReady().then(async () => {
   })
 })
 
-if (singleInstance) {
-  // A second launch (e.g. double-clicking the shortcut again) focuses this one.
-  app.on('second-instance', () => showMainWindow())
-
+if (holdsLock || runMode !== 'app') {
   app.on('before-quit', () => {
     markQuitting()
   })

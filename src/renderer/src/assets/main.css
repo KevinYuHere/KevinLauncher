@@ -2908,6 +2908,16 @@ textarea:focus-visible {
   line-height: 1.75;
   color: rgba(255, 255, 255, 0.66);
 }
+.setup-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.setup-field-label {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.62);
+}
 .setup-path {
   display: flex;
   gap: 10px;

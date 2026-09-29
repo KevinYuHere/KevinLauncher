@@ -476,7 +476,7 @@ export interface KevinApi {
   installerFreeSpace(dir: string): Promise<number>
   installerPickDirectory(current: string): Promise<string | null>
   /** Copies the payload into `dir`, writes shortcuts + the uninstall entry. */
-  installerRun(dir: string): Promise<boolean>
+  installerRun(dir: string, dataDir?: string): Promise<boolean>
   /** Starts the installed launcher and closes the installer. */
   installerLaunch(dir: string): Promise<void>
   onInstallerProgress(callback: (progress: InstallerProgress) => void): () => void
@@ -486,6 +486,13 @@ export interface KevinApi {
   /** Removes the installation (and optionally the user data), then quits. */
   uninstallerRun(keepUserData: boolean): Promise<void>
   onUninstallerProgress(callback: (progress: { step: string }) => void): () => void
+
+  /** --- data directory (config, playtime, gacha, icons …) --- */
+  dataDirGet(): Promise<{ current: string; default: string }>
+  dataDirPick(current: string): Promise<string | null>
+  /** Moves the existing data to `dir` and restarts the launcher. */
+  dataDirSet(dir: string): Promise<void>
+  onDataDirProgress(callback: (progress: { step: string }) => void): () => void
 
   windowMinimize(): Promise<void>
   windowToggleMaximize(): Promise<boolean>

@@ -15,6 +15,7 @@ type Step = 'location' | 'confirm' | 'progress' | 'done'
 export default function Installer(): ReactElement | null {
   const [info, setInfo] = useState<InstallerInfo | null>(null)
   const [dir, setDir] = useState('')
+  const [dataDir, setDataDir] = useState('')
   const [target, setTarget] = useState<InstallTarget | null>(null)
   const [free, setFree] = useState(0)
   const [step, setStep] = useState<Step>('location')
@@ -27,6 +28,7 @@ export default function Installer(): ReactElement | null {
       setInfo(data)
       setTarget(data.target)
       setDir(data.prefillDir)
+      setDataDir(data.dataDir)
     })
     return window.api.onInstallerProgress(setProgress)
   }, [])
@@ -46,11 +48,16 @@ export default function Installer(): ReactElement | null {
     if (picked) setDir(await window.api.installerNormalize(picked))
   }
 
+  const browseDataDir = async (): Promise<void> => {
+    const picked = await window.api.dataDirPick(dataDir)
+    if (picked) setDataDir(picked)
+  }
+
   const start = async (): Promise<void> => {
     setError(null)
     setStep('progress')
     try {
-      const done = await window.api.installerRun(dir)
+      const done = await window.api.installerRun(dir, dataDir)
       // `false` means the installer restarted itself elevated (UAC) and this
       // process is about to exit.
       if (done) setStep('done')
@@ -126,11 +133,28 @@ export default function Installer(): ReactElement | null {
               将安装到下面的目录，并创建开始菜单与桌面快捷方式。
             </p>
 
-            <div className="setup-path">
-              <input value={dir} spellCheck={false} onChange={(e) => setDir(e.target.value)} />
-              <button className="btn" onClick={() => void browse()}>
-                浏览…
-              </button>
+            <div className="setup-field">
+              <label className="setup-field-label">安装位置</label>
+              <div className="setup-path">
+                <input value={dir} spellCheck={false} onChange={(e) => setDir(e.target.value)} />
+                <button className="btn" onClick={() => void browse()}>
+                  浏览…
+                </button>
+              </div>
+            </div>
+
+            <div className="setup-field">
+              <label className="setup-field-label">用户数据目录</label>
+              <div className="setup-path">
+                <input
+                  value={dataDir}
+                  spellCheck={false}
+                  onChange={(e) => setDataDir(e.target.value)}
+                />
+                <button className="btn" onClick={() => void browseDataDir()}>
+                  浏览…
+                </button>
+              </div>
             </div>
 
             {target?.isInstalled && (
@@ -179,15 +203,15 @@ export default function Installer(): ReactElement | null {
               </li>
               <li>
                 <span>卸载入口</span>
-                <em>写入（可在 Windows 设置中卸载）</em>
+                <em>写入</em>
               </li>
               <li>
                 <span>开机自启</span>
-                <em>默认开启（计划任务，可在设置中关闭）</em>
+                <em>默认开启</em>
               </li>
               <li>
                 <span>用户数据</span>
-                <em>保留（{info?.dataDir}）</em>
+                <em>{dataDir || info?.dataDir}</em>
               </li>
             </ul>
           </section>

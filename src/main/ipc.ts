@@ -32,6 +32,14 @@ import {
   writeUninstallEntry
 } from './services/install'
 import { directorySize } from './services/updateDownload'
+import {
+  currentDataDir,
+  defaultDataDir,
+  hasData,
+  migrateData,
+  switchDataDir,
+  writeDataDir
+} from './services/dataDir'
 import { applyLauncherIcon } from './services/appIcon'
 import { IconStore } from './services/icon'
 import { extractAccent } from './services/theme'
@@ -196,14 +204,43 @@ function psQuote(value: string): string {
   return `'${value.replace(/'/g, "''")}'`
 }
 
-/** Data files / folders that make up a full backup. */
-const BACKUP_FILES = ['config.json', 'playtime.json']
-const BACKUP_DIRS = ['icons', 'brand', 'bg', 'gacha']
+/** Entries that are never part of a backup (transient / regenerated data). */
+const BACKUP_EXCLUDE = new Set(['logs', 'update-staging'])
+const isBackupExcluded = (name: string): boolean =>
+  BACKUP_EXCLUDE.has(name) || name.endsWith('.log') || name.startsWith('simulate.')
 
 /**
- * Apps whose update availability is faked so the download UI can be previewed
- * (then the actual download is simulated). Populated from `simulate.json`.
+ * Copies the whole data directory into `stage`, except transient entries. The
+ * backup therefore covers every setting automatically — including ones added in
+ * future versions — instead of a hard-coded list of files.
  */
+async function stageBackup(userData: string, stage: string): Promise<void> {
+  const entries = await fs.readdir(userData, { withFileTypes: true })
+  for (const entry of entries) {
+    if (isBackupExcluded(entry.name)) continue
+    const source = join(userData, entry.name)
+    const target = join(stage, entry.name)
+    if (entry.isDirectory()) await copyDir(source, target)
+    else if (entry.isFile()) await fs.copyFile(source, target)
+  }
+}
+
+/** Restores a staged backup over the data directory (transient entries skipped). */
+async function restoreBackup(stage: string, userData: string): Promise<string[]> {
+  const restored: string[] = []
+  const entries = await fs.readdir(stage, { withFileTypes: true })
+  for (const entry of entries) {
+    if (isBackupExcluded(entry.name)) continue
+    const source = join(stage, entry.name)
+    const target = join(userData, entry.name)
+    if (entry.isDirectory()) await copyDir(source, target)
+    else if (entry.isFile()) await fs.copyFile(source, target)
+    restored.push(entry.name)
+  }
+  return restored
+}
+
+
 const previewApps = new Map<
   string,
   { hasUpdate: boolean; preDownloadVersion: string | null; stopAt?: number }
@@ -688,20 +725,7 @@ export function registerIpc(): void {
 
     const stage = await fs.mkdtemp(join(tmpdir(), 'kl-export-'))
     try {
-      for (const name of BACKUP_FILES) {
-        try {
-          await fs.copyFile(join(userData, name), join(stage, name))
-        } catch {
-          /* not present */
-        }
-      }
-      for (const dir of BACKUP_DIRS) {
-        try {
-          await copyDir(join(userData, dir), join(stage, dir))
-        } catch {
-          /* not present */
-        }
-      }
+      await stageBackup(userData, stage)
       await execFileAsync(
         'powershell.exe',
         [
@@ -742,20 +766,7 @@ export function registerIpc(): void {
         ],
         { windowsHide: true }
       )
-      for (const name of BACKUP_FILES) {
-        try {
-          await fs.copyFile(join(out, name), join(userData, name))
-        } catch {
-          /* skip missing */
-        }
-      }
-      for (const dir of BACKUP_DIRS) {
-        try {
-          await copyDir(join(out, dir), join(userData, dir))
-        } catch {
-          /* skip missing */
-        }
-      }
+      await restoreBackup(out, userData)
       await AppStore.reload()
       await playTime.reload()
       gacha.reload()
@@ -986,7 +997,7 @@ export function registerIpc(): void {
     })
     return result.canceled ? null : (result.filePaths[0] ?? null)
   })
-  ipcMain.handle('installer:run', async (e, requested: string) => {
+  ipcMain.handle('installer:run', async (e, requested: string, requestedDataDir?: string) => {
     const sender = e.sender
     const dir = normalizeInstallDir(requested)
     const source = dirname(process.execPath)
@@ -1014,14 +1025,61 @@ export function registerIpc(): void {
     }
     writeShortcuts(dir)
     await writeUninstallEntry(dir, currentAppVersion())
+
+    // Remember the chosen data directory (and take existing data along).
+    if (requestedDataDir) {
+      const target = requestedDataDir.trim()
+      const fallback = defaultDataDir()
+      if (target && target.toLowerCase() !== fallback.toLowerCase()) {
+        if (await hasData(fallback)) await migrateData(fallback, target)
+        await writeDataDir(target)
+        log(`install: data directory set to ${target}`)
+      } else {
+        await writeDataDir(fallback)
+      }
+    }
+
     // Autostart defaults to ON after a fresh install (scheduled task, silent UAC).
     await AppStore.setLauncher({ autoStart: 'window' })
     await applyAutoStart('window')
     log(`install: finished (${dir})`)
     return true
   })
+
+  // --- data directory (moved by the user in the settings) -------------------
+  ipcMain.handle('dataDir:get', () => ({
+    current: currentDataDir(),
+    default: defaultDataDir()
+  }))
+  ipcMain.handle('dataDir:pick', async (e, current: string) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    const result = await dialog.showOpenDialog(win ?? undefined!, {
+      title: '选择数据目录',
+      properties: ['openDirectory', 'createDirectory'],
+      defaultPath: current || defaultDataDir()
+    })
+    return result.canceled ? null : normalizeInstallDir(result.filePaths[0] ?? '')
+  })
+  /** Moves the data to `dir` and restarts the launcher. */
+  ipcMain.handle('dataDir:set', (e, dir: string) => {
+    const sender = e.sender
+    return switchDataDir(normalizeInstallDir(dir), (step) => {
+      if (!sender.isDestroyed()) sender.send('dataDir:progress', { step })
+    })
+  })
   ipcMain.handle('installer:launch', async (_e, dir: string) => {
-    spawn(join(dir, 'KevinLauncher.exe'), [], { detached: true, stdio: 'ignore' }).unref()
+    // Start it as a *launcher*, not as an installer: the portable variables are
+    // inherited through the environment and would put the new process back into
+    // install mode (showing another installer window instead of the app).
+    const env = { ...process.env }
+    delete env.PORTABLE_EXECUTABLE_FILE
+    delete env.PORTABLE_EXECUTABLE_DIR
+    spawn(join(dir, 'KevinLauncher.exe'), [], {
+      detached: true,
+      stdio: 'ignore',
+      cwd: dir,
+      env
+    }).unref()
     markQuitting()
     app.quit()
   })

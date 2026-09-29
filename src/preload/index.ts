@@ -96,11 +96,16 @@ const api: KevinApi = {
   installerInspect: (dir: string) => ipcRenderer.invoke('installer:inspect', dir),
   installerFreeSpace: (dir: string) => ipcRenderer.invoke('installer:freeSpace', dir),
   installerPickDirectory: (current: string) => ipcRenderer.invoke('installer:pickDirectory', current),
-  installerRun: (dir: string) => ipcRenderer.invoke('installer:run', dir),
+  installerRun: (dir: string, dataDir?: string) =>
+    ipcRenderer.invoke('installer:run', dir, dataDir),
   installerLaunch: (dir: string) => ipcRenderer.invoke('installer:launch', dir),
 
   uninstallerInfo: () => ipcRenderer.invoke('uninstaller:info'),
   uninstallerRun: (keepUserData: boolean) => ipcRenderer.invoke('uninstaller:run', keepUserData),
+
+  dataDirGet: () => ipcRenderer.invoke('dataDir:get'),
+  dataDirPick: (current: string) => ipcRenderer.invoke('dataDir:pick', current),
+  dataDirSet: (dir: string) => ipcRenderer.invoke('dataDir:set', dir),
 
   windowMinimize: () => ipcRenderer.invoke('window:minimize'),
   windowToggleMaximize: () => ipcRenderer.invoke('window:toggleMaximize'),
@@ -170,6 +175,11 @@ const api: KevinApi = {
     const listener = (_e: unknown, progress: { step: string }): void => callback(progress)
     ipcRenderer.on('uninstaller:progress', listener)
     return () => ipcRenderer.removeListener('uninstaller:progress', listener)
+  },
+  onDataDirProgress: (callback: (progress: { step: string }) => void) => {
+    const listener = (_e: unknown, progress: { step: string }): void => callback(progress)
+    ipcRenderer.on('dataDir:progress', listener)
+    return () => ipcRenderer.removeListener('dataDir:progress', listener)
   }
 }
 

@@ -88,6 +88,7 @@ export default function App(): ReactElement {
   const [dismissedUpdate, setDismissedUpdate] = useState<string | null>(null)
   const [checkingUpdate, setCheckingUpdate] = useState(false)
   const [updateCheckText, setUpdateCheckText] = useState('')
+  const [dataDir, setDataDir] = useState('')
 
   const refreshApps = useCallback(async (): Promise<void> => {
     setApps(await window.api.listApps())
@@ -133,6 +134,7 @@ export default function App(): ReactElement {
     void window.api.getLauncherSettings().then(setLauncherSettings)
     void window.api.listFonts().then(setFonts)
     void window.api.appVersion().then(setVersion)
+    void window.api.dataDirGet().then((info) => setDataDir(info.current))
     return window.api.onLauncherChanged(() =>
       void window.api.getLauncherSettings().then(setLauncherSettings)
     )
@@ -233,6 +235,15 @@ export default function App(): ReactElement {
       setCheckingUpdate(false)
     }
   }, [showToast])
+
+  /** Moves every setting to a new data directory (the launcher restarts). */
+  const handleChangeDataDir = useCallback(async (): Promise<void> => {
+    const picked = await window.api.dataDirPick(dataDir)
+    if (!picked) return
+    if (!(await confirm(`将把现有数据迁移到：\n${picked}\n\n完成后启动器会自动重启。`))) return
+    showToast('正在迁移数据…')
+    await window.api.dataDirSet(picked)
+  }, [dataDir, showToast])
 
   // When switching games, keep the current page if the new game supports it;
   // otherwise fall back to the home page.
@@ -494,6 +505,8 @@ export default function App(): ReactElement {
         }
         onExportData={() => void exportData()}
         onImportData={() => void importData()}
+        dataDir={dataDir}
+        onChangeDataDir={() => void handleChangeDataDir()}
         onCheckUpdate={() => void handleCheckUpdate()}
         checkingUpdate={checkingUpdate}
         updateCheckText={updateCheckText}

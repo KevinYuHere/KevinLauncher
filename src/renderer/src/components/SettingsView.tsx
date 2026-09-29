@@ -62,6 +62,9 @@ interface SettingsViewProps {
   }) => void
   onExportData: () => void
   onImportData: () => void
+  /** Current data directory (config, playtime, gacha, icons …). */
+  dataDir: string
+  onChangeDataDir: () => void
   /** Manually check GitHub Releases for a newer launcher version. */
   onCheckUpdate: () => void
   checkingUpdate: boolean
@@ -200,6 +203,8 @@ export default function SettingsView({
   onSetBehavior,
   onExportData,
   onImportData,
+  dataDir,
+  onChangeDataDir,
   onCheckUpdate,
   checkingUpdate,
   updateCheckText
@@ -533,6 +538,16 @@ export default function SettingsView({
                 action={
                   <button className="btn sm" disabled={checkingUpdate} onClick={onCheckUpdate}>
                     {checkingUpdate ? '检查中…' : '检查更新'}
+                  </button>
+                }
+              />
+
+              <Row
+                name="数据目录"
+                desc={dataDir || '…'}
+                action={
+                  <button className="btn sm" onClick={onChangeDataDir}>
+                    更改…
                   </button>
                 }
               />
