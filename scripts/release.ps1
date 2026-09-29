@@ -61,11 +61,15 @@ if ($LASTEXITCODE -ne 0) { throw 'electron-builder failed' }
 # --------------------------------------- 4. update payload assets
 # The notes are embedded into the manifest as well, so the free
 # `releases/latest/download/update-manifest.json` path can show them without an
-# API call.
-if (-not $Notes) {
-  $Notes = "KevinLauncher $Version`n`n- 详见仓库提交记录 https://github.com/KevinYuHere/KevinLauncher/commits/main"
+# API call. They are always read from / written to a FILE: passing multi-line
+# text through `-File` gets word-split and the leftovers bind to other
+# parameters (which once sent release notes into $Version).
+$notesFile = Join-Path $root 'release\RELEASE_NOTES.md'
+if ($Notes) {
+  Set-Content -LiteralPath $notesFile -Value $Notes -Encoding UTF8
+} elseif (-not (Test-Path $notesFile)) {
+  Set-Content -LiteralPath $notesFile -Value "KevinLauncher $Version" -Encoding UTF8
 }
-Set-Content -LiteralPath (Join-Path $root 'release\RELEASE_NOTES.md') -Value $Notes -Encoding UTF8
 if ($FakeElectron) {
   node scripts/build-update-payload.mjs (Join-Path $root 'release\win-unpacked') $Version $FakeElectron
 } else {
@@ -100,7 +104,7 @@ if ($exists) {
   Write-Host "release $tag exists -> uploading with --clobber" -ForegroundColor Yellow
   & $gh release upload $tag @assets --clobber
 } else {
-  $createArgs = @('release', 'create', $tag) + $assets + @('--title', "KevinLauncher $Version", '--notes', $Notes)
+  $createArgs = @('release', 'create', $tag) + $assets + @('--title', "KevinLauncher $Version", '--notes-file', $notesFile)
   if ($Draft) { $createArgs += '--draft' }
   & $gh @createArgs
 }
