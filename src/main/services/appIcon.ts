@@ -1,9 +1,11 @@
 import { app, BrowserWindow, nativeImage, shell } from 'electron'
-import { existsSync, promises as fs } from 'fs'
+import { execFile } from 'child_process'
+import { existsSync, promises as fs, renameSync } from 'fs'
 import { join } from 'path'
 import { AppStore } from './appStore'
 import { BrandStore } from './brand'
 import { setTrayImage } from './behavior'
+import { log } from './logger'
 
 function bundledIcon(name: string): string {
   return app.isPackaged
@@ -11,21 +13,47 @@ function bundledIcon(name: string): string {
     : join(app.getAppPath(), 'resources', name)
 }
 
+/**
+ * Shortcut locations to keep in sync.
+ *
+ * The desktop path must come from `app.getPath('desktop')`: the folder is often
+ * redirected (OneDrive, or a moved desktop like `D:\account\desktop`), in which
+ * case `%USERPROFILE%\Desktop` does not exist and its shortcut was never
+ * updated — which is exactly why the desktop icon did not change.
+ */
 function shortcutCandidates(): string[] {
-  const list: string[] = []
-  if (process.env.APPDATA) {
-    list.push(
-      join(process.env.APPDATA, 'Microsoft\\Windows\\Start Menu\\Programs\\KevinLauncher.lnk')
-    )
+  const paths: string[] = []
+  const push = (path: string | undefined | null): void => {
+    if (path) paths.push(path)
   }
+
+  try {
+    push(join(app.getPath('desktop'), 'KevinLauncher.lnk'))
+  } catch {
+    /* no desktop folder available */
+  }
+  push(
+    join(
+      app.getPath('appData'),
+      'Microsoft',
+      'Windows',
+      'Start Menu',
+      'Programs',
+      'KevinLauncher.lnk'
+    )
+  )
   if (process.env.PROGRAMDATA) {
-    list.push(
-      join(process.env.PROGRAMDATA, 'Microsoft\\Windows\\Start Menu\\Programs\\KevinLauncher.lnk')
+    push(
+      join(process.env.PROGRAMDATA, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'KevinLauncher.lnk')
     )
   }
-  if (process.env.USERPROFILE) list.push(join(process.env.USERPROFILE, 'Desktop\\KevinLauncher.lnk'))
-  if (process.env.PUBLIC) list.push(join(process.env.PUBLIC, 'Desktop\\KevinLauncher.lnk'))
-  return list
+  if (process.env.PUBLIC) push(join(process.env.PUBLIC, 'Desktop', 'KevinLauncher.lnk'))
+  // Fallbacks for setups where the desktop could not be resolved.
+  if (process.env.USERPROFILE) {
+    push(join(process.env.USERPROFILE, 'Desktop', 'KevinLauncher.lnk'))
+    push(join(process.env.USERPROFILE, 'OneDrive', 'Desktop', 'KevinLauncher.lnk'))
+  }
+  return [...new Set(paths)]
 }
 
 /**
@@ -47,6 +75,36 @@ export async function launcherIconPaths(): Promise<{ png: string; ico: string }>
 }
 
 /**
+ * Windows caches shortcut/taskbar icons aggressively: writing a new icon into a
+ * .lnk often is not visible until the cache is refreshed. `ie4uinit.exe -show`
+ * is the documented way to rebuild it without restarting Explorer.
+ */
+function refreshIconCache(): void {
+  try {
+    execFile('ie4uinit.exe', ['-show'], { windowsHide: true }, () => {
+      /* best effort */
+    })
+  } catch {
+    /* not available on every build */
+  }
+}
+
+/**
+ * Renames a shortcut to a temporary name and back: the shell treats it as a new
+ * file and re-reads its icon, which is what makes the change appear in the Start
+ * Menu / on the desktop without rebuilding the whole icon cache.
+ */
+function touchShortcut(path: string): void {
+  try {
+    const temp = `${path}.${Date.now().toString(36)}.tmp`
+    renameSync(path, temp)
+    renameSync(temp, path)
+  } catch {
+    /* best effort */
+  }
+}
+
+/**
  * Apply the launcher icon to every window (taskbar / Alt-Tab), the tray, and
  * any Start Menu / Desktop shortcuts.
  */
@@ -63,9 +121,16 @@ export async function applyLauncherIcon(): Promise<void> {
     try {
       if (!existsSync(path)) continue
       const details = shell.readShortcutLink(path)
-      shell.writeShortcutLink(path, 'update', { ...details, icon: ico, iconIndex: 0 })
-    } catch {
-      /* ignore shortcuts we cannot edit */
+      // Re-create rather than update: `create` also succeeds when the file is in
+      // a state `update` refuses, and it always rewrites the icon.
+      shell.writeShortcutLink(path, 'create', { ...details, icon: ico, iconIndex: 0 })
+      touchShortcut(path)
+      const applied = shell.readShortcutLink(path)
+      log(`icon: shortcut ${path} -> ${applied.icon}#${applied.iconIndex}`)
+    } catch (error) {
+      log(`icon: shortcut ${path} failed (${(error as Error).message})`)
     }
   }
+
+  refreshIconCache()
 }
