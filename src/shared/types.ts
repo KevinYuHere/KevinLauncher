@@ -281,6 +281,11 @@ export interface AppUpdateInfo {
   installSize: number
   /** Electron version the release was built with ('' when unknown). */
   electronVersion: string | null
+  /** Full installer used when the runtime itself changed (URLs, best first). */
+  installerUrls: string[]
+  installerName: string | null
+  installerSize: number
+  installerSha256: string | null
   publishedAt: string
 }
 

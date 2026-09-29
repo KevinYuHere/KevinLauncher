@@ -3,8 +3,9 @@ import { join } from 'path'
 import { promises as fs } from 'fs'
 import type { AppUpdateInfo, AppUpdateState, AppUpdateStatus } from '@shared/types'
 import { isNewerVersion } from '@shared/version'
-import { downloadPayload, extractPayload } from './updateDownload'
+import { downloadPayload, extractPayload, sha256File } from './updateDownload'
 import { currentAppVersion } from './appVersion'
+import { markQuitting } from './behavior'
 import { log } from './logger'
 
 /** Owner/repository used for release checks (public GitHub API). */
@@ -87,23 +88,33 @@ async function fetchLatestRelease(): Promise<AppUpdateInfo | null> {
 
   const assets = release.assets ?? []
   const payload = assets.find((item) => /KevinLauncher-.*\.zip$/i.test(item.name ?? ''))
+  const installer = assets.find((item) => /KevinLauncher-Installer.*\.exe$/i.test(item.name ?? ''))
   const manifest = assets.find((item) => /update-manifest\.json$/i.test(item.name ?? ''))
 
-  // The manifest only carries the unpacked size (install progress denominator)
-  // and the payload hash.
+  // The manifest carries the unpacked size (install progress denominator), the
+  // payload hash and — for runtime upgrades — the full installer's details.
   let installSize = 0
   let payloadSha256: string | null = null
   let electronVersion: string | null = null
+  let installerName: string | null = null
+  let installerSize = installer?.size ?? 0
+  let installerSha256: string | null = null
   if (manifest) {
     try {
       const meta = JSON.parse(await fetchText(assetUrls(manifest))) as {
         appSize?: number
         payloadSha256?: string
         electron?: string
+        installerName?: string
+        installerSize?: number
+        installerSha256?: string
       }
       installSize = meta.appSize ?? 0
       payloadSha256 = meta.payloadSha256 ?? null
       electronVersion = meta.electron ?? null
+      installerName = meta.installerName ?? null
+      if (meta.installerSize) installerSize = meta.installerSize
+      installerSha256 = meta.installerSha256 ?? null
     } catch (error) {
       log(`appUpdate: manifest unreadable (${(error as Error).message})`)
     }
@@ -119,6 +130,10 @@ async function fetchLatestRelease(): Promise<AppUpdateInfo | null> {
     payloadSha256,
     installSize,
     electronVersion,
+    installerUrls: installer ? assetUrls(installer) : [],
+    installerName: installerName ?? installer?.name ?? null,
+    installerSize,
+    installerSha256,
     publishedAt: release.published_at ?? ''
   }
 }
@@ -252,11 +267,11 @@ export class AppUpdateChecker {
     const staging = join(app.getPath('userData'), 'update-staging', info.version)
     const archive = join(staging, 'app.zip')
     try {
-      // A new Electron runtime cannot be swapped while the launcher is running.
+      // A new Electron runtime cannot be swapped while the launcher is running:
+      // download the full installer and hand over to it instead.
       if (info.electronVersion && info.electronVersion !== process.versions.electron) {
-        throw new Error(
-          `本次更新需要新的运行库（Electron ${info.electronVersion}），请下载安装包进行覆盖安装`
-        )
+        await this.updateViaInstaller(info, staging, controller)
+        return
       }
 
       await fs.mkdir(staging, { recursive: true })
@@ -318,6 +333,67 @@ export class AppUpdateChecker {
       log(`appUpdate: failed: ${message}`)
       this.patch({ phase: 'error', message: '更新失败', error: message })
     }
+  }
+
+  /**
+   * Runtime (Electron) upgrade: download the full installer, verify it and open
+   * it. Files of the running launcher cannot be replaced in place, so the
+   * installer takes over (it closes this instance and overwrites the files).
+   */
+  private async updateViaInstaller(
+    info: AppUpdateInfo,
+    staging: string,
+    controller: AbortController
+  ): Promise<void> {
+    if (!info.installerUrls.length) {
+      throw new Error('本次更新包含新的运行库，但发布中没有提供安装程序，请手动下载安装包')
+    }
+    await fs.mkdir(staging, { recursive: true })
+    const installer = join(staging, info.installerName ?? 'KevinLauncher-Installer.exe')
+
+    this.patch({
+      phase: 'downloading',
+      version: info.version,
+      total: info.installerSize,
+      message: '正在下载安装程序…'
+    })
+    if (!(info.installerSize > 0 && (await fileSize(installer)) === info.installerSize)) {
+      await downloadPayload(
+        info.installerUrls,
+        installer,
+        info.installerSize,
+        (progress) => {
+          this.patch({
+            percent:
+              info.installerSize > 0 ? (progress.transferred / info.installerSize) * 100 : 0,
+            transferred: progress.transferred,
+            total: info.installerSize,
+            bytesPerSecond: progress.bytesPerSecond
+          })
+        },
+        controller.signal
+      )
+    }
+    const size = await fileSize(installer)
+    if (info.installerSize > 0 && size !== info.installerSize) {
+      throw new Error('安装程序大小不匹配')
+    }
+    if (info.installerSha256 && (await sha256File(installer)) !== info.installerSha256) {
+      throw new Error('安装程序校验失败')
+    }
+
+    this.patch({
+      phase: 'installing',
+      percent: 100,
+      installPercent: 100,
+      message: '正在打开安装程序…'
+    })
+    log(`appUpdate: opening ${installer}`)
+    const failure = await shell.openPath(installer)
+    if (failure) throw new Error(failure)
+    // The installer closes this instance itself before overwriting the files.
+    markQuitting()
+    app.quit()
   }
 
   /** Atomically rewrites the version pointer read by the shell loader. */

@@ -71,7 +71,7 @@ export default function UpdateRing({
       <button className="rail-item rail-update-btn" title={label} onClick={click}>
         {state.phase === 'idle' || state.phase === 'error' ? (
           <span className="rail-update-icon">
-            <Icon name="update" size={22} />
+            <Icon name="launcherUpdate" size={22} />
             <span className="rail-update-dot" />
           </span>
         ) : (
@@ -82,7 +82,9 @@ export default function UpdateRing({
         )}
       </button>
 
-      {hover && (state.phase !== 'idle' || info) && (
+      {/* Only while something is actually happening — hovering the idle icon
+          should not pop a panel open. */}
+      {hover && state.phase !== 'idle' && (
         <div className="rail-pop glass">
           <div className="rail-pop-head">
             {installing ? '正在安装更新' : paused ? '已暂停' : '正在下载更新'}

@@ -226,6 +226,8 @@ export default function App(): ReactElement {
     try {
       const status = await window.api.appUpdateCheck()
       if (status.hasUpdate && status.info) {
+        // Same dialog as the automatic startup check.
+        setDismissedUpdate(null)
         setAppUpdate(status.info)
         setUpdateCheckText(`发现新版本 ${status.info.version}`)
         showToast(`发现新版本 ${status.info.version}`)

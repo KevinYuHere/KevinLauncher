@@ -2413,11 +2413,16 @@ textarea:focus-visible {
 }
 
 /* ------------------------------------------- rail: launcher update slot */
+/* Launcher-update slot: colours follow the other rail icons (white/black per
+   theme), not the theme colour. */
 .rail-update {
   position: relative;
 }
 .rail-update-btn {
-  color: var(--brand);
+  color: var(--fg-2);
+}
+.rail-update-btn:hover {
+  color: var(--fg);
 }
 .rail-update-icon {
   position: relative;
@@ -2431,24 +2436,24 @@ textarea:focus-visible {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: var(--brand);
+  background: currentColor;
   box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.35);
 }
 .rail-ring {
   position: relative;
   display: grid;
   place-items: center;
-  color: var(--brand);
+  color: inherit;
 }
 .rail-ring .ring {
-  color: var(--brand);
+  color: currentColor;
 }
 .rail-ring-percent {
   position: absolute;
   font-size: 9px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
-  color: var(--brand);
+  color: currentColor;
 }
 /* Opens to the right of the rail, like the game download popover. */
 .rail-pop {
@@ -2470,7 +2475,7 @@ textarea:focus-visible {
   margin-top: 2px;
   font-size: 24px;
   font-weight: 800;
-  color: var(--brand);
+  color: var(--fg);
   font-variant-numeric: tabular-nums;
 }
 .rail-pop-row {

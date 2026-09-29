@@ -79,16 +79,17 @@ Windows 上**正在运行的 exe 与已加载的 DLL 不能被覆盖**（也不�
 
 ### 运行时变化时（Electron 升级，少数情况）
 
-载荷清单里记 `runtimeVersion`；若本机运行时版本不匹配，则本次是**大版本更新**：
-界面提示「本次更新包含运行库，重启后自动完成」，下载**完整载荷**后走"退出 → 小助手换文件
-→ 重启"的兜底路径（**无 UI 的时间只有几百毫秒的改名**，因为文件已提前写好为 `*.new`）。
-这是 Windows 文件锁定的硬限制，无法完全消除，但会**明确告知用户**。
+清单里记 `electron`；若与本机 `process.versions.electron` 不一致，则本次是**运行库更新**：
+界面照常显示下载进度（这次下载的是**完整安装程序**，清单里带 `installerName/Size/Sha256`），
+校验通过后**自动打开安装程序**并退出当前实例——安装程序会关闭本实例、覆盖安装并写入新版运行库。
+这是 Windows 文件锁定的硬限制（运行中的 exe/DLL 无法就地替换），因此交给安装程序完成，
+用户侧依然是"点一下更新 → 自动完成"。
 
 ## 5. 全新安装 / 手动安装（B，自绘界面）
 
 ### 载体：一个 exe，两种模式
 
-`electron-builder` 增加 `portable` 目标，产物 `KevinLauncher-Setup-<version>.exe`（≈78 MB，
+`electron-builder` 增加 `portable` 目标，产物 `KevinLauncher-Installer-<version>.exe`（≈78 MB，
 7z 自解压，内含运行时 + 应用）。运行时 electron-builder 会设置 `PORTABLE_EXECUTABLE_FILE`，
 应用检测到即进入**安装模式**（`#installer=1` → `Installer.tsx`），**永不作为便携版运行**；
 装完后从安装目录启动则无该变量、正常运行。

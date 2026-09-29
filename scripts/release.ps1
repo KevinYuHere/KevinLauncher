@@ -1,15 +1,19 @@
 # Builds and publishes a release:
 #   1. electron-vite build
 #   2. electron-builder --dir  (then rcedit applies the exe icon locally)
-#   3. electron-builder nsis --prepackaged
-#   4. node scripts/build-update-payload.mjs  -> KevinLauncher-<v>.zip + update-manifest.json
-#   5. gh release create/upload (installer, blockmap, latest.yml, zip, manifest)
+#   3. electron-builder --prepackaged   -> self-drawn installer (portable target)
+#   4. node scripts/build-update-payload.mjs -> KevinLauncher-<v>-app.zip + manifest
+#   5. gh release create/upload (installer, app payload, manifest)
 #
 # Usage:  powershell -ExecutionPolicy Bypass -File scripts\release.ps1
 #         powershell -ExecutionPolicy Bypass -File scripts\release.ps1 -Version 0.1.0 -Notes "..." -Draft
+#         powershell -ExecutionPolicy Bypass -File scripts\release.ps1 -FakeElectron 34.0.0
+#           (records a different Electron version in the manifest to test the
+#            runtime-upgrade path)
 param(
   [string]$Version = '',
   [string]$Notes = '',
+  [string]$FakeElectron = '',
   [switch]$SkipUpload,
   [switch]$Draft
 )
@@ -50,18 +54,20 @@ if ($rcedit) {
   Write-Host '!! rcedit not cached: exe icon not applied' -ForegroundColor Yellow
 }
 
-# --------------------------------------------------- 3. NSIS installer
-npx.cmd electron-builder --win nsis --prepackaged (Join-Path $root 'release\win-unpacked') --publish never
-if ($LASTEXITCODE -ne 0) { throw 'electron-builder nsis failed' }
+# ------------------------------- 3. installer (self-drawn, portable target)
+npx.cmd electron-builder --win --prepackaged (Join-Path $root 'release\win-unpacked') --publish never
+if ($LASTEXITCODE -ne 0) { throw 'electron-builder failed' }
 
 # --------------------------------------- 4. update payload assets
-node scripts/build-update-payload.mjs (Join-Path $root 'release\win-unpacked') $Version
+if ($FakeElectron) {
+  node scripts/build-update-payload.mjs (Join-Path $root 'release\win-unpacked') $Version $FakeElectron
+} else {
+  node scripts/build-update-payload.mjs (Join-Path $root 'release\win-unpacked') $Version
+}
 if ($LASTEXITCODE -ne 0) { throw 'build-update-payload failed' }
 
 $assets = @(
-  (Join-Path $root "release\KevinLauncher-Setup-$Version.exe"),
-  (Join-Path $root "release\KevinLauncher-Setup-$Version.exe.blockmap"),
-  (Join-Path $root 'release\latest.yml'),
+  (Join-Path $root "release\KevinLauncher-Installer-$Version.exe"),
   (Join-Path $root "release\KevinLauncher-$Version-app.zip"),
   (Join-Path $root 'release\update-manifest.json')
 )

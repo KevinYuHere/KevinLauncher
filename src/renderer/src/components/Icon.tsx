@@ -7,6 +7,7 @@ export type IconName =
   | 'gacha'
   | 'gallery'
   | 'update'
+  | 'launcherUpdate'
   | 'settings'
   | 'plus'
   | 'stop'
@@ -44,6 +45,14 @@ const PATHS: Record<IconName, ReactElement> = {
       <path d="M12 3v11" />
       <path d="M7.5 9.5 12 14l4.5-4.5" />
       <path d="M4.5 19.5h15" />
+    </>
+  ),
+  // Launcher self-update: deliberately different from the game-update icon above.
+  launcherUpdate: (
+    <>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 7.5v6" />
+      <path d="M9.2 10.8 12 13.6l2.8-2.8" />
     </>
   ),
   settings: (

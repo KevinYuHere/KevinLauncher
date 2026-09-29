@@ -45,7 +45,6 @@
 - 自动创建**开始菜单 + 桌面快捷方式**、写入**卸载入口**（可在 Windows「设置 → 应用」中卸载，
   卸载时打开的是自绘卸载界面，可勾选是否保留用户数据）、并以**计划任务**默认开启开机自启。
 
-> 仓库同时仍产出 NSIS 安装包（`KevinLauncher-Setup-<版本>.exe`）作为回退，验证通过后会移除。
 > 设计说明见 [docs/INSTALLER.md](./docs/INSTALLER.md)。
 
 ### 后台行为
@@ -73,7 +72,7 @@
 | 运行时 | Electron 33 |
 | 界面 | React 18 + TypeScript，原生 CSS（毛玻璃设计令牌） |
 | 构建 | electron-vite + Vite 5 |
-| 打包 | electron-builder（NSIS） |
+| 打包 | electron-builder（portable 自解压安装包） |
 | 测试 | Vitest |
 | 存储 | JSON 文件（`%APPDATA%\kevin-launcher`），无数据库 |
 | 关键依赖 | `fzstd`（zstd 解压）、`hpatchz.exe`（差分补丁） |
@@ -127,17 +126,17 @@ npm run release
 ```
 
 `scripts\release.ps1` 会依次执行 electron-vite 构建、`electron-builder --dir` + 图标写入、
-NSIS 打包、`scripts/build-update-payload.mjs`（生成升级用的 zip 与清单），最后用 `gh` 把
-5 个资源上传到 `v<version>`：
+portable 安装包、`scripts/build-update-payload.mjs`（生成升级载荷与清单），最后用 `gh` 把
+3 个资源上传到 `v<version>`：
 
 | 资源 | 用途 |
 | --- | --- |
-| `KevinLauncher-Setup-<version>.exe` | 全新安装的安装程序 |
-| `...exe.blockmap`、`latest.yml` | electron-builder 产物（校验 / 兼容其他工具） |
-| `KevinLauncher-<version>.zip` | 升级载荷：应用文件树（旧客户端下载并解包） |
-| `update-manifest.json` | 升级清单：版本、解包总大小（安装进度分母）、载荷 SHA-256 |
+| `KevinLauncher-Installer-<version>.exe` | 安装程序（自绘界面；运行库升级时也由它完成覆盖安装） |
+| `KevinLauncher-<version>-app.zip` | 升级载荷：应用代码（运行库不变时只需这 0.1 MB） |
+| `update-manifest.json` | 升级清单：版本、Electron 版本、载荷/安装包大小与 SHA-256 |
 
-> 参数：`-SkipUpload` 只构建不上传；`-Draft` 发草稿；`-Version x.y.z` 指定版本。
+> 参数：`-SkipUpload` 只构建不上传；`-Draft` 发草稿；`-Version x.y.z` 指定版本；
+> `-FakeElectron 34.0.0` 可在清单里写入不同的 Electron 版本，用于测试**运行库升级**路径。
 
 发布后可用冒烟测试脚本验证（按客户端的方式用 8 个连接 Range 下载载荷并校验 SHA-256）：
 
