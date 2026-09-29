@@ -39,12 +39,9 @@ win:
   signAndEditExecutable: false
   target:
     - nsis
-    - portable
   # Launcher runs elevated so game clients can be launched/tracked without
   # repeated UAC prompts.
   requestedExecutionLevel: requireAdministrator
-portable:
-  artifactName: ${productName}-Setup-${version}.${ext}
 nsis:
   oneClick: false
   perMachine: false
