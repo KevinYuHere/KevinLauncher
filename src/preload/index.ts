@@ -91,6 +91,8 @@ const api: KevinApi = {
   appUpdateToggle: () => ipcRenderer.invoke('appUpdate:toggle'),
 
   installerInfo: () => ipcRenderer.invoke('installer:info'),
+  installerNormalize: (dir: string) => ipcRenderer.invoke('installer:normalize', dir),
+  installerRunning: () => ipcRenderer.invoke('installer:running'),
   installerInspect: (dir: string) => ipcRenderer.invoke('installer:inspect', dir),
   installerFreeSpace: (dir: string) => ipcRenderer.invoke('installer:freeSpace', dir),
   installerPickDirectory: (current: string) => ipcRenderer.invoke('installer:pickDirectory', current),

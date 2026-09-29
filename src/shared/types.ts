@@ -324,7 +324,7 @@ export interface AppUpdateState {
 export interface DetectedInstall {
   dir: string
   version: string | null
-  source: 'registry' | 'default'
+  source: 'registry' | 'default' | 'running'
 }
 
 /** State of the directory the user wants to install into. */
@@ -342,6 +342,10 @@ export interface InstallerInfo {
   defaultDir: string
   detected: DetectedInstall | null
   target: InstallTarget | null
+  /** Paths of launchers that are running right now (closed before installing). */
+  running: string[]
+  /** Pre-filled install directory (detected installation, `KevinLauncher` appended). */
+  prefillDir: string
   payloadSize: number
   version: string
   dataDir: string
@@ -465,6 +469,9 @@ export interface KevinApi {
 
   /** --- installer mode (`KevinLauncher-Setup-*.exe`) --- */
   installerInfo(): Promise<InstallerInfo>
+  /** `KevinLauncher` is appended to a folder that is not named like that. */
+  installerNormalize(dir: string): Promise<string>
+  installerRunning(): Promise<string[]>
   installerInspect(dir: string): Promise<InstallTarget>
   installerFreeSpace(dir: string): Promise<number>
   installerPickDirectory(current: string): Promise<string | null>

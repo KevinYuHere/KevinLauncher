@@ -42,9 +42,11 @@ win:
     # Portable self-extracting package: it always runs in install mode (the
     # self-drawn installer UI), never as a portable app — see docs/INSTALLER.md.
     - portable
-  # Launcher runs elevated so game clients can be launched/tracked without
-  # repeated UAC prompts.
-  requestedExecutionLevel: requireAdministrator
+  # No requireAdministrator in the manifest: it would break the portable
+  # launcher (CreateProcess returns ERROR_ELEVATION_REQUIRED) and force a UAC
+  # prompt even for the uninstaller. The app requests elevation itself when it
+  # needs it (see main/index.ts).
+  requestedExecutionLevel: asInvoker
 portable:
   artifactName: ${productName}-Installer-${version}.${ext}
 nsis:

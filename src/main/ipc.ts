@@ -14,13 +14,20 @@ import { ensureTray, markQuitting, setCloseToTray } from './services/behavior'
 import { applyAutoStart } from './services/autostart'
 import {
   applyPayload,
+  canWrite,
+  closeRunningInstances,
   defaultInstallDir,
   detectInstallation,
   finishUninstall,
   freeSpace,
+  hasInstallDirArgument,
   inspectTarget,
+  installDirArgument,
   installSize,
+  normalizeInstallDir,
+  relaunchInstallerElevated,
   removeInstallation,
+  runningInstances,
   writeShortcuts,
   writeUninstallEntry
 } from './services/install'
@@ -953,15 +960,21 @@ export function registerIpc(): void {
   // --- installer / uninstaller UI (fresh install + --uninstall) -------------
   ipcMain.handle('installer:info', async () => {
     const detected = await detectInstallation()
+    const running = await runningInstances()
+    const explicit = installDirArgument()
     return {
       defaultDir: defaultInstallDir(),
-      detected,
+      detected: detected ?? (running.length ? { dir: dirname(running[0]), version: null, source: 'running' as const } : null),
       target: detected ? await inspectTarget(detected.dir) : null,
+      running,
+      prefillDir: explicit ?? (detected ? normalizeInstallDir(detected.dir) : defaultInstallDir()),
       payloadSize: await installSize(),
       version: currentAppVersion(),
       dataDir: app.getPath('userData')
     }
   })
+  ipcMain.handle('installer:normalize', (_e, dir: string) => normalizeInstallDir(dir))
+  ipcMain.handle('installer:running', () => runningInstances())
   ipcMain.handle('installer:inspect', (_e, dir: string) => inspectTarget(dir))
   ipcMain.handle('installer:freeSpace', (_e, dir: string) => freeSpace(dir))
   ipcMain.handle('installer:pickDirectory', async (e, current: string) => {
@@ -973,13 +986,32 @@ export function registerIpc(): void {
     })
     return result.canceled ? null : (result.filePaths[0] ?? null)
   })
-  ipcMain.handle('installer:run', async (e, dir: string) => {
+  ipcMain.handle('installer:run', async (e, requested: string) => {
     const sender = e.sender
+    const dir = normalizeInstallDir(requested)
     const source = dirname(process.execPath)
+
+    // A new directory that needs administrator rights: ask for UAC and continue
+    // in the elevated instance with the same target.
+    if (!(await canWrite(dir)) && !hasInstallDirArgument()) {
+      relaunchInstallerElevated()
+      markQuitting()
+      app.quit()
+      return false
+    }
+
+    // Files of a running launcher are locked — close it first.
+    const remaining = await closeRunningInstances()
+    if (remaining > 0) {
+      throw new Error('检测到仍在运行的 KevinLauncher，请先退出后重试')
+    }
+
     await applyPayload(source, dir, (progress) => {
       if (!sender.isDestroyed()) sender.send('installer:progress', { phase: 'copying', ...progress })
     })
-    if (!sender.isDestroyed()) sender.send('installer:progress', { phase: 'shortcuts', done: 0, total: 0, current: '' })
+    if (!sender.isDestroyed()) {
+      sender.send('installer:progress', { phase: 'shortcuts', done: 0, total: 0, current: '' })
+    }
     writeShortcuts(dir)
     await writeUninstallEntry(dir, currentAppVersion())
     // Autostart defaults to ON after a fresh install (scheduled task, silent UAC).

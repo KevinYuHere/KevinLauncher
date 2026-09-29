@@ -40,9 +40,26 @@ protocol.registerSchemesAsPrivileged([
 // and packaged builds so config / icons / backgrounds stay shared.
 app.setName('kevin-launcher')
 
-// Only a single instance may run; a second launch just focuses the first one
-// (and its elevated process). Everything below is skipped in the loser.
-const singleInstance = app.requestSingleInstanceLock()
+/** Window size / role of the current run. */
+type RunMode = 'app' | 'install' | 'uninstall'
+
+/**
+ * `--uninstall` is what the Windows Settings entry runs; the portable
+ * `KevinLauncher-Installer-*.exe` sets `PORTABLE_EXECUTABLE_FILE`, in which case
+ * the payload always acts as the installer (never as a portable app).
+ */
+function detectMode(): RunMode {
+  if (process.argv.includes('--uninstall')) return 'uninstall'
+  if (process.env.PORTABLE_EXECUTABLE_FILE || process.argv.includes('--install')) return 'install'
+  return 'app'
+}
+
+const runMode: RunMode = detectMode()
+
+// Only a single instance of the *launcher* may run. The installer/uninstaller
+// deliberately skip the lock: opening the installer while the launcher runs must
+// open the installer (it closes the launcher before overwriting it).
+const singleInstance = runMode === 'app' ? app.requestSingleInstanceLock() : true
 if (!singleInstance) app.quit()
 
 /** Icon used for the window / taskbar (resolved once on startup). */
@@ -65,26 +82,13 @@ function relaunchElevated(): void {
 }
 
 /** Window size / role of the current run. */
-type RunMode = 'app' | 'install' | 'uninstall'
-
-/**
- * `--uninstall` is what the Windows Settings entry runs; the portable
- * `KevinLauncher-Setup-*.exe` sets `PORTABLE_EXECUTABLE_FILE`, in which case the
- * payload always acts as the installer (never as a portable app).
- */
-function detectMode(): RunMode {
-  if (process.argv.includes('--uninstall')) return 'uninstall'
-  if (process.env.PORTABLE_EXECUTABLE_FILE || process.argv.includes('--install')) return 'install'
-  return 'app'
-}
-
 function createWindow(icon?: string, hidden = false, mode: RunMode = 'app'): void {
   const setup = mode !== 'app'
   const mainWindow = new BrowserWindow({
-    width: setup ? 680 : 1180,
-    height: setup ? 560 : 760,
-    minWidth: setup ? 620 : 900,
-    minHeight: setup ? 500 : 600,
+    width: setup ? 1000 : 1180,
+    height: setup ? 680 : 760,
+    minWidth: setup ? 940 : 900,
+    minHeight: setup ? 620 : 600,
     resizable: setup ? false : true,
     show: false,
     frame: false,
@@ -136,10 +140,12 @@ app.whenReady().then(async () => {
   if (!singleInstance) return
   electronApp.setAppUserModelId('com.kevin.kevinlauncher')
 
-  // Packaged builds run elevated so launching protected game clients never
+  // Packaged launcher runs elevated so launching protected game clients never
   // triggers a UAC prompt and their processes can be tracked/stopped. In dev
   // this is handled by scripts/dev.ps1 (avoids an electron-vite restart loop).
-  if (!is.dev && !(await isElevated())) {
+  // The installer elevates itself only when the chosen directory needs it, and
+  // the uninstaller never needs administrator rights.
+  if (runMode === 'app' && !is.dev && !(await isElevated())) {
     relaunchElevated()
     app.quit()
     return
@@ -178,7 +184,7 @@ app.whenReady().then(async () => {
 
   registerIpc()
 
-  const mode = detectMode()
+  const mode = runMode
   windowIcon = (await launcherIconPaths()).png
   // `startedHidden()` is true when the Run entry launched us with `--tray`.
   createWindow(windowIcon, mode === 'app' && startedHidden(), mode)
@@ -191,9 +197,10 @@ app.whenReady().then(async () => {
   setCloseToTray(launcherSettings.closeAction === 'tray')
   applyAutoStart(launcherSettings.autoStart)
 
-  void applyLauncherIcon()
-  // The tray icon is always present while the launcher runs.
-  void ensureTray()
+  // Icons first (window + tray image), then the tray itself: creating the tray
+  // before the icon is resolved would leave it with a generic image.
+  await applyLauncherIcon()
+  await ensureTray()
   warmUpFonts()
 
   // Check GitHub Releases shortly after launch, then every 24 hours.

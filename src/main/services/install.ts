@@ -42,7 +42,12 @@ export interface InstallInfo {
 export interface DetectedInstall {
   dir: string
   version: string | null
-  source: 'registry' | 'default'
+  /**
+   * Where the location came from: the uninstall registry entry, the default
+   * path, or a **currently running** launcher (which is not necessarily
+   * installed — e.g. running from a build directory).
+   */
+  source: 'registry' | 'default' | 'running'
 }
 
 export interface InstallTarget {
@@ -147,6 +152,67 @@ async function writeInstallInfo(dir: string, version: string, files: string[]): 
   await fs.writeFile(join(dir, INFO_FILE), JSON.stringify(info, null, 2), 'utf8')
 }
 
+/** Paths of every running KevinLauncher.exe that is not this process. */
+export async function runningInstances(): Promise<string[]> {
+  try {
+    const { stdout } = await exec(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        'Get-Process KevinLauncher -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Path'
+      ],
+      { windowsHide: true, maxBuffer: 8 * 1024 * 1024 }
+    )
+    const self = process.execPath.toLowerCase()
+    return stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.toLowerCase().endsWith('.exe'))
+      .filter((line) => line.toLowerCase() !== self)
+  } catch {
+    return []
+  }
+}
+
+/** Closes every other running launcher (best effort; needs elevation to work). */
+export async function closeRunningInstances(): Promise<number> {
+  const paths = await runningInstances()
+  if (!paths.length) return 0
+  const self = process.pid
+  try {
+    await exec(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        `Get-Process KevinLauncher -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne ${self} } | Stop-Process -Force`
+      ],
+      { windowsHide: true }
+    )
+  } catch {
+    /* ignore: the caller reports the remaining instances */
+  }
+  await new Promise((resolve) => setTimeout(resolve, 800))
+  return (await runningInstances()).length
+}
+
+/**
+ * Makes sure the launcher ends up in its own sub-directory: a chosen path that
+ * is itself a drive root (or any folder not already named KevinLauncher) gets
+ * `\KevinLauncher` appended, so nobody installs straight into `D:\`.
+ */
+export function normalizeInstallDir(dir: string): string {
+  const trimmed = dir.replace(/[\\/]+$/, '')
+  if (!trimmed) return defaultInstallDir()
+  // Drive root like "D:" / "D:\"
+  if (/^[a-zA-Z]:$/.test(trimmed)) return join(trimmed + '\\', 'KevinLauncher')
+  if (/(^|[\\/])KevinLauncher$/i.test(trimmed)) return trimmed
+  return join(trimmed, 'KevinLauncher')
+}
+
 /** Finds an existing installation (registry first, then the default path). */
 export async function detectInstallation(): Promise<DetectedInstall | null> {
   for (const [key, source] of [
@@ -164,6 +230,17 @@ export async function detectInstallation(): Promise<DetectedInstall | null> {
       dir: fallback,
       version: (await readInstallInfo(fallback))?.version ?? null,
       source: 'default'
+    }
+  }
+  // A launcher that is running right now (e.g. straight from a build folder) is
+  // still the most relevant target for an overwrite install.
+  const running = await runningInstances()
+  if (running.length) {
+    const dir = dirname(running[0])
+    return {
+      dir,
+      version: (await readInstallInfo(dir))?.version ?? null,
+      source: 'running'
     }
   }
   return null
@@ -206,6 +283,49 @@ export async function freeSpace(dir: string): Promise<number> {
 }
 
 // ------------------------------------------------------------------- install
+
+/** True when `dir` can be created/written by this process. */
+export async function canWrite(dir: string): Promise<boolean> {
+  try {
+    await fs.mkdir(dir, { recursive: true })
+    const probe = join(dir, `.kevin-write-${Date.now()}`)
+    await fs.writeFile(probe, 'ok')
+    await fs.rm(probe, { force: true })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Restarts the installer elevated (UAC) when the chosen directory needs
+ * administrator rights (e.g. `C:\Program Files`). The portable executable is
+ * relaunched (not the extracted copy, which disappears with this process).
+ */
+export function relaunchInstallerElevated(): void {
+  const exe = process.env.PORTABLE_EXECUTABLE_FILE ?? process.execPath
+  const quote = (value: string): string => `'${value.replace(/'/g, "''")}'`
+  const args = process.argv.slice(1).filter((arg) => !arg.startsWith('--install-dir'))
+  const script =
+    `Start-Process -FilePath ${quote(exe)} ` +
+    `-ArgumentList @(${args.map(quote).join(',')}) -Verb RunAs`
+  spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true
+  }).unref()
+}
+
+/** `--install-dir <dir>` lets the elevated instance continue with the same target. */
+export function installDirArgument(): string | null {
+  const index = process.argv.indexOf('--install-dir')
+  return index >= 0 ? (process.argv[index + 1] ?? null) : null
+}
+
+/** True when `--install-dir` was passed (i.e. we are the elevated instance). */
+export function hasInstallDirArgument(): boolean {
+  return process.argv.includes('--install-dir')
+}
 
 /**
  * Files that were installed by the previous version but are not part of the new

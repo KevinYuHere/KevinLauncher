@@ -1,4 +1,5 @@
 import { app, BrowserWindow, Menu, Tray, nativeImage, type NativeImage } from 'electron'
+import { join } from 'path'
 
 let closeToTray = false
 let quitting = false
@@ -35,17 +36,38 @@ export function showMainWindow(): void {
   win.focus()
 }
 
+/**
+ * Bundled default icon. Used when the tray is created before the configured
+ * icon has been resolved — `app.getFileIcon()` must not be used as the primary
+ * source because Windows returns it without an alpha channel (which shows up as
+ * white corners in the notification area) and it can fail outright, leaving
+ * Electron's default icon.
+ */
+function bundledIcon(): NativeImage {
+  const path = app.isPackaged
+    ? join(process.resourcesPath, 'icon.png')
+    : join(app.getAppPath(), 'resources', 'icon.png')
+  return nativeImage.createFromPath(path)
+}
+
 /** Create the tray icon (idempotent) with a show/quit menu. */
 export async function ensureTray(): Promise<void> {
   if (tray) return
+
   let image = trayImage
-  if (!image) {
+  if (!image || image.isEmpty()) image = bundledIcon()
+  if (image.isEmpty()) {
+    // Last resort only; see the note above.
     try {
       image = await app.getFileIcon(process.execPath, { size: 'small' })
     } catch {
       image = nativeImage.createEmpty()
     }
   }
+  // Never create a tray with an empty image: Windows would fall back to a
+  // generic (Electron) icon.
+  if (image.isEmpty()) return
+
   try {
     tray = new Tray(image)
   } catch {
