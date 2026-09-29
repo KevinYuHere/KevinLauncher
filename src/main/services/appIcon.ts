@@ -108,7 +108,9 @@ function touchShortcut(path: string): void {
  * Apply the launcher icon to every window (taskbar / Alt-Tab), the tray, and
  * any Start Menu / Desktop shortcuts.
  */
-export async function applyLauncherIcon(): Promise<void> {
+export async function applyLauncherIcon(
+  options: { refreshShell?: boolean } = {}
+): Promise<void> {
   const { png, ico } = await launcherIconPaths()
 
   const image = nativeImage.createFromPath(png)
@@ -117,6 +119,7 @@ export async function applyLauncherIcon(): Promise<void> {
     setTrayImage(image)
   }
 
+  const updated: string[] = []
   for (const path of shortcutCandidates()) {
     try {
       if (!existsSync(path)) continue
@@ -125,6 +128,7 @@ export async function applyLauncherIcon(): Promise<void> {
       // a state `update` refuses, and it always rewrites the icon.
       shell.writeShortcutLink(path, 'create', { ...details, icon: ico, iconIndex: 0 })
       touchShortcut(path)
+      updated.push(path)
       const applied = shell.readShortcutLink(path)
       log(`icon: shortcut ${path} -> ${applied.icon}#${applied.iconIndex}`)
     } catch (error) {
@@ -132,5 +136,9 @@ export async function applyLauncherIcon(): Promise<void> {
     }
   }
 
-  refreshIconCache()
+  notifyShell(updated, {
+    iconCache: true,
+    // Only a user-initiated change may restart the Start Menu host.
+    restartStartMenu: options.refreshShell === true
+  })
 }

@@ -391,7 +391,9 @@ export function registerIpc(): void {
       await BrandStore.saveIcoFor(iconFile, png)
     }
     await AppStore.setLauncher({ iconFile })
-    await applyLauncherIcon()
+    // User-initiated: refresh the shell caches immediately (including the Start
+    // Menu host, which otherwise keeps showing the old icon until logon).
+    await applyLauncherIcon({ refreshShell: true })
     broadcast('launcher:changed')
     return AppStore.launcherSettings()
   })
