@@ -4,7 +4,7 @@ import { promises as fs } from 'fs'
 import { join, basename } from 'path'
 import { pathToFileURL } from 'url'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
-import { registerIpc, registerUpdatePreview, runtime, warmUpFonts } from './ipc'
+import { registerIpc, registerUpdatePreview, runtime, warmUpFonts, appUpdate } from './ipc'
 import { AppStore } from './services/appStore'
 import { applyLauncherIcon, launcherIconPaths } from './services/appIcon'
 import {
@@ -154,6 +154,9 @@ app.whenReady().then(async () => {
   createWindow((await launcherIconPaths()).png)
   void applyLauncherIcon()
   warmUpFonts()
+
+  // Check GitHub Releases shortly after launch, then every 24 hours.
+  appUpdate.start()
 
   // One-shot download-UI preview: if `%userData%/simulate.json` exists, advertise
   // a fake update (and/or pre-download) for the given app(s), then remove the

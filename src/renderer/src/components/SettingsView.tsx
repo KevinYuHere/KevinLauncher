@@ -52,6 +52,11 @@ interface SettingsViewProps {
   onSetBehavior: (patch: { closeAction?: CloseAction; afterLaunch?: AfterLaunchAction }) => void
   onExportData: () => void
   onImportData: () => void
+  /** Manually check GitHub Releases for a newer launcher version. */
+  onCheckUpdate: () => void
+  checkingUpdate: boolean
+  /** Result hint of the last manual check (empty until one ran). */
+  updateCheckText: string
 }
 
 function Row({
@@ -184,7 +189,10 @@ export default function SettingsView({
   onSetFont,
   onSetBehavior,
   onExportData,
-  onImportData
+  onImportData,
+  onCheckUpdate,
+  checkingUpdate,
+  updateCheckText
 }: SettingsViewProps): ReactElement {
   const [tab, setTab] = useState<'game' | 'launcher'>('game')
   const [dir, setDir] = useState(1)
@@ -470,6 +478,16 @@ export default function SettingsView({
                       导入设置
                     </button>
                   </div>
+                }
+              />
+
+              <Row
+                name="检查更新"
+                desc={updateCheckText || '检查 GitHub Releases 上是否有新版本'}
+                action={
+                  <button className="btn sm" disabled={checkingUpdate} onClick={onCheckUpdate}>
+                    {checkingUpdate ? '检查中…' : '检查更新'}
+                  </button>
                 }
               />
 

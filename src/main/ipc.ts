@@ -26,10 +26,12 @@ import { TokenStore } from './services/tokenStore'
 import { getHoYoUpdateInfo } from './update/hoyoplay'
 import { getArknightsUpdateInfo } from './update/arknightsUpdate'
 import { UpdateManager } from './update/updateManager'
+import { AppUpdateChecker } from './services/appUpdate'
 import { log } from './services/logger'
 
 export const runtime = new Runtime()
 export const updates = new UpdateManager()
+export const appUpdate = new AppUpdateChecker()
 
 function broadcast(channel: string, payload?: unknown): void {
   for (const win of BrowserWindow.getAllWindows()) {
@@ -921,6 +923,12 @@ export function registerIpc(): void {
   ipcMain.handle('shell:openExternal', async (_e, url: string) => {
     if (/^https?:\/\//i.test(url)) await shell.openExternal(url)
   })
+
+  // --- launcher self-update (GitHub Releases) -------------------------------
+  appUpdate.onUpdate((info) => broadcast('app-update:available', info))
+  ipcMain.handle('appUpdate:status', () => appUpdate.status())
+  ipcMain.handle('appUpdate:check', () => appUpdate.check())
+  ipcMain.handle('appUpdate:run', () => appUpdate.run())
 
   ipcMain.handle('window:minimize', (e) => {
     BrowserWindow.fromWebContents(e.sender)?.minimize()

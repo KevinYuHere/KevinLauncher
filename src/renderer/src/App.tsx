@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } 
 import type {
   AddonDescriptor,
   AppEntry,
+  AppUpdateInfo,
   LauncherSettings,
   NewAppEntry,
   RunningApp,
@@ -19,6 +20,7 @@ import SettingsView from './components/SettingsView'
 import GalleryView from './components/GalleryView'
 import PlayTimeView from './components/PlayTimeView'
 import AppFormDialog, { type AppFormMedia } from './components/AppFormDialog'
+import AppUpdateDialog from './components/AppUpdateDialog'
 import { ConfirmHost, confirm } from './components/confirm'
 import IconCropper from './components/IconCropper'
 import type { ViewId } from './viewTypes'
@@ -66,6 +68,10 @@ export default function App(): ReactElement {
   const animRef = useRef<HTMLDivElement>(null)
   const prevViewRef = useRef<ViewId>('home')
   const checkedUpdates = useRef<Set<string>>(new Set())
+  const [appUpdate, setAppUpdate] = useState<AppUpdateInfo | null>(null)
+  const [dismissedUpdate, setDismissedUpdate] = useState<string | null>(null)
+  const [checkingUpdate, setCheckingUpdate] = useState(false)
+  const [updateCheckText, setUpdateCheckText] = useState('')
 
   const refreshApps = useCallback(async (): Promise<void> => {
     setApps(await window.api.listApps())
@@ -114,6 +120,33 @@ export default function App(): ReactElement {
     return window.api.onLauncherChanged(() =>
       void window.api.getLauncherSettings().then(setLauncherSettings)
     )
+  }, [])
+
+  // Launcher self-update: adopt the result of the startup / 24h check (the main
+  // process runs it) and of any later check.
+  useEffect(() => {
+    void window.api.appUpdateStatus().then((status) => {
+      if (status.info) setAppUpdate(status.info)
+    })
+    return window.api.onAppUpdateAvailable(setAppUpdate)
+  }, [])
+
+  const handleCheckUpdate = useCallback(async (): Promise<void> => {
+    setCheckingUpdate(true)
+    setUpdateCheckText('正在检查…')
+    try {
+      const status = await window.api.appUpdateCheck()
+      if (status.hasUpdate && status.info) {
+        setAppUpdate(status.info)
+        setUpdateCheckText(`发现新版本 ${status.info.version}`)
+      } else if (status.error) {
+        setUpdateCheckText(`检查失败：${status.error}`)
+      } else {
+        setUpdateCheckText('已是最新版本')
+      }
+    } finally {
+      setCheckingUpdate(false)
+    }
   }, [])
 
   useEffect(() => {
@@ -424,6 +457,9 @@ export default function App(): ReactElement {
         }
         onExportData={() => void exportData()}
         onImportData={() => void importData()}
+        onCheckUpdate={() => void handleCheckUpdate()}
+        checkingUpdate={checkingUpdate}
+        updateCheckText={updateCheckText}
       />
     )
   }
@@ -634,6 +670,10 @@ export default function App(): ReactElement {
           <span className="gacha-toast-spinner" />
           {`正在获取${gachaNotice.name ? `「${gachaNotice.name}」` : ''} ${gachaNotice.bannerName} 第 ${gachaNotice.page} 页…`}
         </div>
+      )}
+
+      {appUpdate && appUpdate.version !== dismissedUpdate && (
+        <AppUpdateDialog info={appUpdate} onDismiss={() => setDismissedUpdate(appUpdate.version)} />
       )}
     </div>
   )

@@ -84,6 +84,10 @@ const api: KevinApi = {
   openPath: (path: string) => ipcRenderer.invoke('shell:openPath', path),
   openExternal: (url: string) => ipcRenderer.invoke('shell:openExternal', url),
 
+  appUpdateStatus: () => ipcRenderer.invoke('appUpdate:status'),
+  appUpdateCheck: () => ipcRenderer.invoke('appUpdate:check'),
+  appUpdateRun: () => ipcRenderer.invoke('appUpdate:run'),
+
   windowMinimize: () => ipcRenderer.invoke('window:minimize'),
   windowToggleMaximize: () => ipcRenderer.invoke('window:toggleMaximize'),
   windowClose: () => ipcRenderer.invoke('window:close'),
@@ -125,6 +129,12 @@ const api: KevinApi = {
       callback(status)
     ipcRenderer.on('update:progress', listener)
     return () => ipcRenderer.removeListener('update:progress', listener)
+  },
+  onAppUpdateAvailable: (callback: (info: import('@shared/types').AppUpdateInfo) => void) => {
+    const listener = (_e: unknown, info: import('@shared/types').AppUpdateInfo): void =>
+      callback(info)
+    ipcRenderer.on('app-update:available', listener)
+    return () => ipcRenderer.removeListener('app-update:available', listener)
   }
 }
 

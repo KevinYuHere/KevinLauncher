@@ -2407,4 +2407,23 @@ textarea:focus-visible {
   opacity: 0.5;
 }
 
+/* -------------------------------------------------- launcher update dialog */
+.update-modal {
+  width: min(520px, 90vw);
+}
+.update-notes {
+  max-height: 46vh;
+  overflow-y: auto;
+  font-size: 13px;
+  line-height: 1.75;
+  white-space: pre-wrap;
+  word-break: break-word;
+  opacity: 0.85;
+}
+.update-error {
+  margin: 12px 0 0;
+  font-size: 12px;
+  color: var(--error);
+}
+
 

@@ -256,6 +256,32 @@ export interface LauncherSettings {
   afterLaunch: AfterLaunchAction
 }
 
+/** A newer release found on GitHub (self-update). */
+export interface AppUpdateInfo {
+  /** Version parsed from the release tag (leading `v` stripped). */
+  version: string
+  /** Release title. */
+  name: string
+  /** Release notes (Markdown). */
+  notes: string
+  /** Release page URL (opened when there is no installer asset). */
+  htmlUrl: string
+  /** Direct download URL of the Windows installer, if the release has one. */
+  downloadUrl: string | null
+  fileName: string | null
+  publishedAt: string
+}
+
+/** Result of the latest GitHub release check. */
+export interface AppUpdateStatus {
+  /** Currently installed version. */
+  current: string
+  hasUpdate: boolean
+  info: AppUpdateInfo | null
+  /** Set when the last check failed (network / rate limit / …). */
+  error?: string
+}
+
 /** API exposed on `window.api` through the preload context bridge. */
 export interface KevinApi {
   listAddons(): Promise<AddonDescriptor[]>
@@ -339,6 +365,15 @@ export interface KevinApi {
   pickDirectory(): Promise<string | null>
   openPath(path: string): Promise<void>
   openExternal(url: string): Promise<void>
+
+  /** Last known result of the GitHub release check. */
+  appUpdateStatus(): Promise<AppUpdateStatus>
+  /** Forces a release check now (used by the manual button). */
+  appUpdateCheck(): Promise<AppUpdateStatus>
+  /** Downloads + runs the installer of the available update. */
+  appUpdateRun(): Promise<void>
+  /** Fired when a newer version is found (startup / 24h / manual check). */
+  onAppUpdateAvailable(callback: (info: AppUpdateInfo) => void): () => void
 
   windowMinimize(): Promise<void>
   windowToggleMaximize(): Promise<boolean>
