@@ -1,5 +1,6 @@
 import { app, shell, BrowserWindow, protocol, net } from 'electron'
-import { spawn } from 'child_process'
+import { execFile } from 'child_process'
+import { promisify } from 'util'
 import { promises as fs } from 'fs'
 import { join, basename } from 'path'
 import { pathToFileURL } from 'url'
@@ -18,6 +19,8 @@ import {
 } from './services/behavior'
 import { applyAutoStart, startedHidden } from './services/autostart'
 import { applyDataDir } from './services/dataDir'
+
+const execFileAsync = promisify(execFile)
 import { BgStore } from './services/background'
 import { BrandStore } from './services/brand'
 import { IconStore } from './services/icon'
@@ -66,19 +69,32 @@ let holdsLock = false
 /** Icon used for the window / taskbar (resolved once on startup). */
 let windowIcon: string | undefined
 
-/** Relaunch the current executable elevated (used by packaged builds). */
-function relaunchElevated(): void {
+/**
+ * Relaunch the current executable elevated (used by packaged builds).
+ *
+ * Resolves `true` once the elevated process was created. PowerShell is awaited
+ * on purpose: quitting immediately after spawning used to lose the race, so
+ * double-clicking the shortcut appeared to do nothing.
+ */
+async function relaunchElevated(): Promise<boolean> {
   const quote = (value: string): string => `'${value.replace(/'/g, "''")}'`
-  const args = process.argv.slice(1).map(quote).join(',')
-  const script = `Start-Process -FilePath ${quote(process.execPath)} -ArgumentList @(${args}) -Verb RunAs`
+  const args = process.argv.slice(1).map(quote)
+  // `-ArgumentList @()` is rejected by Start-Process, so only pass it when there
+  // actually are arguments (this used to make every elevation attempt fail).
+  const script =
+    `Start-Process -FilePath ${quote(process.execPath)}` +
+    (args.length ? ` -ArgumentList @(${args.join(',')})` : '') +
+    ' -Verb RunAs'
   try {
-    spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
-      detached: true,
-      stdio: 'ignore',
-      windowsHide: true
-    }).unref()
-  } catch {
-    /* ignore */
+    await execFileAsync(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-Command', script],
+      { windowsHide: true, timeout: 180_000 }
+    )
+    return true
+  } catch (error) {
+    log(`app: elevation failed (${(error as Error).message})`)
+    return false
   }
 }
 
@@ -151,10 +167,15 @@ app.whenReady().then(async () => {
   // The installer elevates itself only when the chosen directory needs it and
   // the uninstaller never needs administrator rights.
   if (runMode === 'app' && !is.dev && !(await isElevated())) {
-    log('app: not elevated — requesting administrator rights and restarting')
-    relaunchElevated()
-    app.quit()
-    return
+    log('app: not elevated — requesting administrator rights')
+    if (await relaunchElevated()) {
+      app.quit()
+      return
+    }
+    // UAC was declined or unavailable: keep running without administrator
+    // rights (games then ask for elevation when they are launched) rather than
+    // leaving the user with no window at all.
+    log('app: continuing without administrator rights')
   }
 
   // Only a single instance of the *launcher* may run. The installer/uninstaller

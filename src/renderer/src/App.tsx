@@ -27,6 +27,7 @@ import { ConfirmHost, confirm } from './components/confirm'
 import IconCropper from './components/IconCropper'
 import type { ViewId } from './viewTypes'
 import { backgroundUrl, brandUrl, defaultIconUrl, VIDEO_RE } from './media'
+import { directoriesOverlap } from '@shared/paths'
 import { applyTheme } from './theme'
 
 type DialogState = { mode: 'add' } | { mode: 'edit'; entry: AppEntry } | null
@@ -89,6 +90,7 @@ export default function App(): ReactElement {
   const [checkingUpdate, setCheckingUpdate] = useState(false)
   const [updateCheckText, setUpdateCheckText] = useState('')
   const [dataDir, setDataDir] = useState('')
+  const [programDir, setProgramDir] = useState('')
 
   const refreshApps = useCallback(async (): Promise<void> => {
     setApps(await window.api.listApps())
@@ -134,7 +136,10 @@ export default function App(): ReactElement {
     void window.api.getLauncherSettings().then(setLauncherSettings)
     void window.api.listFonts().then(setFonts)
     void window.api.appVersion().then(setVersion)
-    void window.api.dataDirGet().then((info) => setDataDir(info.current))
+    void window.api.dataDirGet().then((info) => {
+      setDataDir(info.current)
+      setProgramDir(info.programDir)
+    })
     return window.api.onLauncherChanged(() =>
       void window.api.getLauncherSettings().then(setLauncherSettings)
     )
@@ -240,10 +245,18 @@ export default function App(): ReactElement {
   const handleChangeDataDir = useCallback(async (): Promise<void> => {
     const picked = await window.api.dataDirPick(dataDir)
     if (!picked) return
+    if (directoriesOverlap(picked, programDir)) {
+      showToast('数据目录不能与程序目录相同，也不能互相包含')
+      return
+    }
     if (!(await confirm(`将把现有数据迁移到：\n${picked}\n\n完成后启动器会自动重启。`))) return
     showToast('正在迁移数据…')
-    await window.api.dataDirSet(picked)
-  }, [dataDir, showToast])
+    try {
+      await window.api.dataDirSet(picked)
+    } catch (error) {
+      showToast(`更换数据目录失败：${(error as Error).message}`)
+    }
+  }, [dataDir, programDir, showToast])
 
   // When switching games, keep the current page if the new game supports it;
   // otherwise fall back to the home page.

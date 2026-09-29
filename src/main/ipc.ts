@@ -32,6 +32,7 @@ import {
   writeUninstallEntry
 } from './services/install'
 import { directorySize } from './services/updateDownload'
+import { directoriesOverlap } from '@shared/paths'
 import {
   currentDataDir,
   defaultDataDir,
@@ -1002,6 +1003,12 @@ export function registerIpc(): void {
     const dir = normalizeInstallDir(requested)
     const source = dirname(process.execPath)
 
+    // The data directory must never be the program directory (or inside it):
+    // an upgrade/uninstall would otherwise delete the user's data.
+    if (requestedDataDir && directoriesOverlap(dir, requestedDataDir)) {
+      throw new Error('用户数据目录不能与安装目录相同，也不能互相包含')
+    }
+
     // A new directory that needs administrator rights: ask for UAC and continue
     // in the elevated instance with the same target.
     if (!(await canWrite(dir)) && !hasInstallDirArgument()) {
@@ -1049,7 +1056,8 @@ export function registerIpc(): void {
   // --- data directory (moved by the user in the settings) -------------------
   ipcMain.handle('dataDir:get', () => ({
     current: currentDataDir(),
-    default: defaultDataDir()
+    default: defaultDataDir(),
+    programDir: dirname(process.execPath)
   }))
   ipcMain.handle('dataDir:pick', async (e, current: string) => {
     const win = BrowserWindow.fromWebContents(e.sender)
@@ -1062,8 +1070,12 @@ export function registerIpc(): void {
   })
   /** Moves the data to `dir` and restarts the launcher. */
   ipcMain.handle('dataDir:set', (e, dir: string) => {
+    const target = normalizeInstallDir(dir)
+    if (directoriesOverlap(target, dirname(process.execPath))) {
+      throw new Error('数据目录不能与程序目录相同，也不能互相包含')
+    }
     const sender = e.sender
-    return switchDataDir(normalizeInstallDir(dir), (step) => {
+    return switchDataDir(target, (step) => {
       if (!sender.isDestroyed()) sender.send('dataDir:progress', { step })
     })
   })

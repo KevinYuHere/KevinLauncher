@@ -488,7 +488,7 @@ export interface KevinApi {
   onUninstallerProgress(callback: (progress: { step: string }) => void): () => void
 
   /** --- data directory (config, playtime, gacha, icons …) --- */
-  dataDirGet(): Promise<{ current: string; default: string }>
+  dataDirGet(): Promise<{ current: string; default: string; programDir: string }>
   dataDirPick(current: string): Promise<string | null>
   /** Moves the existing data to `dir` and restarts the launcher. */
   dataDirSet(dir: string): Promise<void>

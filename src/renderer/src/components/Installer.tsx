@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactElement } from 'react'
 import type { InstallerInfo, InstallerProgress, InstallTarget } from '@shared/types'
+import { directoriesOverlap } from '@shared/paths'
 import { formatBytes } from '../format'
 
 type Step = 'location' | 'confirm' | 'progress' | 'done'
@@ -93,6 +94,9 @@ export default function Installer(): ReactElement | null {
     { id: 'progress', label: '安装' }
   ]
 
+  /** The data directory must not be the program directory (or inside it). */
+  const overlap = !!dir && !!dataDir && directoriesOverlap(dir, dataDir)
+
   return (
     <div className="setup">
       <Aurora />
@@ -177,6 +181,12 @@ export default function Installer(): ReactElement | null {
               </div>
             ) : null}
 
+            {overlap && (
+              <div className="setup-warn">
+                用户数据目录不能与安装目录相同，也不能互相包含——请修改其中一个目录。
+              </div>
+            )}
+
             <div className="setup-meta">
               <span>需要约 {formatBytes(info?.payloadSize ?? 0)}</span>
               <span>可用 {formatBytes(free)}</span>
@@ -254,7 +264,11 @@ export default function Installer(): ReactElement | null {
             <button className="btn" onClick={() => window.api.windowClose()}>
               取消
             </button>
-            <button className="btn primary" disabled={!dir} onClick={() => setStep('confirm')}>
+            <button
+              className="btn primary"
+              disabled={!dir || overlap}
+              onClick={() => setStep('confirm')}
+            >
               下一步
             </button>
           </>

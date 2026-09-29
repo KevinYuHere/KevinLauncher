@@ -306,9 +306,11 @@ export function relaunchInstallerElevated(): void {
   const exe = process.env.PORTABLE_EXECUTABLE_FILE ?? process.execPath
   const quote = (value: string): string => `'${value.replace(/'/g, "''")}'`
   const args = process.argv.slice(1).filter((arg) => !arg.startsWith('--install-dir'))
+  // `-ArgumentList @()` is rejected by Start-Process — omit it when empty.
   const script =
-    `Start-Process -FilePath ${quote(exe)} ` +
-    `-ArgumentList @(${args.map(quote).join(',')}) -Verb RunAs`
+    `Start-Process -FilePath ${quote(exe)}` +
+    (args.length ? ` -ArgumentList @(${args.map(quote).join(',')})` : '') +
+    ' -Verb RunAs'
   spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
     detached: true,
     stdio: 'ignore',
