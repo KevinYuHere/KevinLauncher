@@ -318,6 +318,12 @@ export class AppUpdateChecker {
   }
 
   status(): AppUpdateStatus {
+    // Never advertise a version that is already installed: a cached result can
+    // otherwise keep offering the update right after it was applied.
+    if (this.info && !isNewerVersion(this.info.version, this.current())) {
+      this.info = null
+      this.announced = null
+    }
     return { current: this.current(), hasUpdate: !!this.info, info: this.info, error: this.error }
   }
 
@@ -352,15 +358,26 @@ export class AppUpdateChecker {
     try {
       const raw = JSON.parse(await fs.readFile(this.cacheFile(), 'utf8')) as {
         checkedAt?: number
+        /** Version the cache was computed for (invalidate after an update). */
+        forVersion?: string
         info?: AppUpdateInfo | null
       }
       const checkedAt = raw.checkedAt ?? 0
-      if (Date.now() - checkedAt < CHECK_CACHE_TTL) {
+      const current = this.current()
+      const stale = raw.forVersion && raw.forVersion !== current
+      const usable =
+        !stale &&
+        Date.now() - checkedAt < CHECK_CACHE_TTL &&
+        !!raw.info &&
+        isNewerVersion(raw.info.version, current)
+      if (usable) {
         this.lastCheck = checkedAt
         this.info = raw.info ?? null
         log(
           `appUpdate: using cached check (${Math.round((Date.now() - checkedAt) / 60000)} min old)`
         )
+      } else if (stale) {
+        log(`appUpdate: cache is for ${raw.forVersion}, current is ${current} — discarding`)
       }
     } catch {
       /* no cache yet */
@@ -371,7 +388,7 @@ export class AppUpdateChecker {
     try {
       await fs.writeFile(
         this.cacheFile(),
-        JSON.stringify({ checkedAt: Date.now(), info: this.info }, null, 2),
+        JSON.stringify({ checkedAt: Date.now(), forVersion: this.current(), info: this.info }, null, 2),
         'utf8'
       )
     } catch {
