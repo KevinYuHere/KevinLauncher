@@ -13,9 +13,6 @@ extraResources:
     to: icon.png
   - from: resources/icon.ico
     to: icon.ico
-  # electron-updater reads this from resources/ to find the update feed.
-  - from: build/app-update.yml
-    to: app-update.yml
 # Used by electron-updater: produces latest.yml + the installer blockmap so the
 # app can be updated differentially (only changed byte ranges are downloaded).
 # Nothing is uploaded here — publish with `--publish never` and attach the files

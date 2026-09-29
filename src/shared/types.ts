@@ -268,17 +268,15 @@ export interface AppUpdateInfo {
   name: string
   /** Release notes (Markdown). */
   notes: string
-  /** Release page URL (opened when there is no installer asset). */
+  /** Release page URL (opened when there is no payload asset). */
   htmlUrl: string
-  /** Direct download URL of the Windows installer, if the release has one. */
-  downloadUrl: string | null
-  fileName: string | null
-  /** SHA-512 (base64) of the installer, from the release's `latest.yml`. */
-  sha512: string | null
-  /** Size in bytes of the installer. */
-  size: number
-  /** Block map URL used for the differential download. */
-  blockmapUrl: string | null
+  /** Download URL of the update payload (`KevinLauncher-<version>.zip`). */
+  payloadUrl: string | null
+  payloadSize: number
+  /** Hex SHA-256 of the payload, from the release manifest. */
+  payloadSha256: string | null
+  /** Total bytes of the unpacked app — the denominator of the install progress. */
+  installSize: number
   publishedAt: string
 }
 
@@ -292,12 +290,30 @@ export interface AppUpdateStatus {
   error?: string
 }
 
-/** Download progress of the launcher update itself. */
-export interface AppUpdateProgress {
+/** Lifecycle of the in-app upgrade. */
+export type AppUpdatePhase =
+  | 'idle'
+  | 'downloading'
+  /** Download paused by the user (install cannot be paused). */
+  | 'paused'
+  | 'installing'
+  | 'done'
+  | 'error'
+
+/**
+ * Everything the download ring / popover needs. `percent`/`transferred`/`total`
+ * describe the **download**, `installPercent` the **install** step.
+ */
+export interface AppUpdateState {
+  phase: AppUpdatePhase
+  version: string | null
   percent: number
   transferred: number
   total: number
   bytesPerSecond: number
+  installPercent: number
+  message: string
+  error?: string
 }
 
 /** API exposed on `window.api` through the preload context bridge. */
@@ -389,12 +405,16 @@ export interface KevinApi {
   appUpdateStatus(): Promise<AppUpdateStatus>
   /** Forces a release check now (used by the manual button). */
   appUpdateCheck(): Promise<AppUpdateStatus>
-  /** Downloads + runs the installer of the available update. */
-  appUpdateRun(): Promise<void>
+  /** Starts downloading + installing the available update. */
+  appUpdateStart(): Promise<void>
+  /** Pauses / resumes the update download (install cannot be paused). */
+  appUpdateToggle(): Promise<void>
+  /** Current upgrade state (for the ring / popover). */
+  appUpdateState(): Promise<AppUpdateState>
   /** Fired when a newer version is found (startup / 24h / manual check). */
   onAppUpdateAvailable(callback: (info: AppUpdateInfo) => void): () => void
-  /** Fired while the update installer is being downloaded. */
-  onAppUpdateProgress(callback: (progress: AppUpdateProgress) => void): () => void
+  /** Fired whenever the download / install state changes. */
+  onAppUpdateState(callback: (state: AppUpdateState) => void): () => void
 
   windowMinimize(): Promise<void>
   windowToggleMaximize(): Promise<boolean>

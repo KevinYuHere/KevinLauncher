@@ -1,14 +1,10 @@
 import { app, shell } from 'electron'
-import { spawn } from 'child_process'
-import { join } from 'path'
+import { dirname, join } from 'path'
 import { promises as fs } from 'fs'
-import type { AppUpdateInfo, AppUpdateProgress, AppUpdateStatus } from '@shared/types'
+import type { AppUpdateInfo, AppUpdateState, AppUpdateStatus } from '@shared/types'
 import { isNewerVersion } from '@shared/version'
-import {
-  downloadInstaller,
-  type CachedInstaller,
-  type InstallerSource
-} from './installerDownload'
+import { downloadPayload, extractPayload } from './updateDownload'
+import { applyStagedUpdate } from './updateApply'
 import { log } from './logger'
 
 /** Owner/repository used for release checks (public GitHub API). */
@@ -28,9 +24,26 @@ interface GitHubRelease {
   body?: string
   html_url?: string
   published_at?: string
-  draft?: boolean
-  prerelease?: boolean
   assets?: { name?: string; browser_download_url?: string; size?: number }[]
+}
+
+/** Everything the UI needs while idle (no download running). */
+const IDLE_STATE: AppUpdateState = {
+  phase: 'idle',
+  version: null,
+  percent: 0,
+  transferred: 0,
+  total: 0,
+  bytesPerSecond: 0,
+  installPercent: 0,
+  message: ''
+}
+
+/** Downloads a small text asset (the release manifest). */
+async function fetchText(url: string): Promise<string> {
+  const response = await fetch(url, { headers: { 'user-agent': USER_AGENT } })
+  if (!response.ok) throw new Error(`HTTP ${response.status}`)
+  return response.text()
 }
 
 /** Reads the newest published release, or `null` when the repo has none. */
@@ -48,23 +61,24 @@ async function fetchLatestRelease(): Promise<AppUpdateInfo | null> {
     .replace(/^v/i, '')
   if (!version) throw new Error('发布信息缺少版本号')
 
-  // Prefer the NSIS installer produced by electron-builder.
   const assets = release.assets ?? []
-  const installer =
-    assets.find((item) => /KevinLauncher-Setup.*\.exe$/i.test(item.name ?? '')) ??
-    assets.find((item) => /\.exe$/i.test(item.name ?? ''))
+  const payload = assets.find((item) => /KevinLauncher-.*\.zip$/i.test(item.name ?? ''))
+  const manifest = assets.find((item) => /update-manifest\.json$/i.test(item.name ?? ''))
 
-  // `latest.yml` carries the SHA-512 (base64) and size used to verify the file.
-  let sha512: string | null = null
-  let size = installer?.size ?? 0
-  const meta = assets.find((item) => /(^|\/)latest\.ya?ml$/i.test(item.name ?? ''))
-  if (meta?.browser_download_url) {
+  // The manifest only carries the unpacked size (install progress denominator)
+  // and the payload hash.
+  let installSize = 0
+  let payloadSha256: string | null = null
+  if (manifest?.browser_download_url) {
     try {
-      const fromYml = await fetchLatestYml(meta.browser_download_url)
-      sha512 = fromYml.sha512
-      if (fromYml.size) size = fromYml.size
+      const meta = JSON.parse(await fetchText(manifest.browser_download_url)) as {
+        installSize?: number
+        payloadSha256?: string
+      }
+      installSize = meta.installSize ?? 0
+      payloadSha256 = meta.payloadSha256 ?? null
     } catch (error) {
-      log(`appUpdate: latest.yml unavailable (${(error as Error).message})`)
+      log(`appUpdate: manifest unreadable (${(error as Error).message})`)
     }
   }
 
@@ -73,41 +87,41 @@ async function fetchLatestRelease(): Promise<AppUpdateInfo | null> {
     name: release.name?.trim() || `v${version}`,
     notes: (release.body ?? '').trim(),
     htmlUrl: release.html_url ?? `https://github.com/${GITHUB_REPO}/releases`,
-    downloadUrl: installer?.browser_download_url ?? null,
-    fileName: installer?.name ?? null,
-    sha512,
-    size,
-    blockmapUrl: installer?.browser_download_url
-      ? `${installer.browser_download_url}.blockmap`
-      : null,
+    payloadUrl: payload?.browser_download_url ?? null,
+    payloadSize: payload?.size ?? 0,
+    payloadSha256,
+    installSize,
     publishedAt: release.published_at ?? ''
   }
 }
 
-/** Reads the installer SHA-512 / size from a release's `latest.yml`. */
-async function fetchLatestYml(
-  url: string
-): Promise<{ sha512: string | null; size: number }> {
-  const response = await fetch(url, { headers: { 'user-agent': USER_AGENT } })
-  if (!response.ok) throw new Error(`HTTP ${response.status}`)
-  const text = await response.text()
-  return {
-    sha512: /\bsha512:\s*(\S+)/.exec(text)?.[1] ?? null,
-    size: Number(/\bsize:\s*(\d+)/.exec(text)?.[1] ?? 0)
+async function fileSize(path: string): Promise<number> {
+  try {
+    return (await fs.stat(path)).size
+  } catch {
+    return 0
   }
 }
 
 /**
- * Checks GitHub Releases for a newer version. Runs once shortly after launch,
- * then every 24 hours, and can be triggered manually from the settings page.
- * Emits the new release to listeners exactly once per version.
+ * Checks GitHub Releases for a newer version (once shortly after launch, then
+ * every 24 hours, plus manual checks) and runs the in-app upgrade:
+ *
+ * download (multi-connection, resumable, pausable) → unpack into a staging
+ * directory (progress shown as "installing", not pausable) → a small helper
+ * waits for this process to exit, swaps the files and restarts the launcher.
+ *
+ * The user never sees the NSIS installer UI and never has to choose anything.
  */
 export class AppUpdateChecker {
   private info: AppUpdateInfo | null = null
   private error: string | undefined
   private announced: string | null = null
   private listeners = new Set<(info: AppUpdateInfo) => void>()
-  private progressListeners = new Set<(progress: AppUpdateProgress) => void>()
+  private stateListeners = new Set<(state: AppUpdateState) => void>()
+  private state: AppUpdateState = { ...IDLE_STATE }
+  private controller: AbortController | null = null
+  private running = false
 
   /** Currently installed version (from package.json). */
   current(): string {
@@ -118,16 +132,21 @@ export class AppUpdateChecker {
     return { current: this.current(), hasUpdate: !!this.info, info: this.info, error: this.error }
   }
 
+  /** Current download / install state (for the rail ring and popover). */
+  stateSnapshot(): AppUpdateState {
+    return { ...this.state }
+  }
+
   /** Subscribe to "a newer version is available" notifications. */
   onUpdate(callback: (info: AppUpdateInfo) => void): () => void {
     this.listeners.add(callback)
     return () => this.listeners.delete(callback)
   }
 
-  /** Subscribe to the installer download progress. */
-  onProgress(callback: (progress: AppUpdateProgress) => void): () => void {
-    this.progressListeners.add(callback)
-    return () => this.progressListeners.delete(callback)
+  /** Subscribe to download / install state changes. */
+  onState(callback: (state: AppUpdateState) => void): () => void {
+    this.stateListeners.add(callback)
+    return () => this.stateListeners.delete(callback)
   }
 
   /** Starts the startup check and the 24-hour interval. */
@@ -158,78 +177,100 @@ export class AppUpdateChecker {
     return this.status()
   }
 
-  /** Directory caching downloaded installers (enables differential updates). */
-  private cacheDir(): string {
-    return join(app.getPath('userData'), 'update-cache')
-  }
-
-  /**
-   * The installer of the version we are running, if a previous update left it
-   * cached. Without it (e.g. the very first self-update) the changed blocks
-   * cannot be sourced locally, so the download is a plain full one.
-   */
-  private async previousInstaller(): Promise<CachedInstaller | null> {
-    const dir = this.cacheDir()
-    try {
-      const files = await fs.readdir(dir)
-      const candidates = files.filter((name) => /KevinLauncher-Setup-.*\.exe$/i.test(name))
-      const preferred = candidates.find((name) => name.includes(this.current())) ?? candidates[0]
-      if (!preferred) return null
-      const path = join(dir, preferred)
-      const blockmapPath = `${path}.blockmap`
-      try {
-        await fs.access(blockmapPath)
-      } catch {
-        return null
-      }
-      return { path, blockmapPath }
-    } catch {
-      return null
-    }
-  }
-
-  private emitProgress(progress: AppUpdateProgress): void {
-    for (const listener of this.progressListeners) listener(progress)
-  }
-
-  /**
-   * Downloads the new version and restarts into its installer. The installer is
-   * fetched over several connections and, when the previous installer is still
-   * cached, completed differentially (only changed byte ranges are transferred;
-   * the rest is copied from the cached file). A full download resumes from its
-   * part files and every connection retries. The file is verified against the
-   * release's SHA-512; on failure the release page is opened instead.
-   */
-  async run(): Promise<void> {
+  /** Begins the upgrade, or resumes a paused download. */
+  begin(): void {
     const info = this.info
-    if (!info) return
-    if (!app.isPackaged || !info.downloadUrl || !info.fileName) {
-      await shell.openExternal(info.htmlUrl)
+    if (!info || this.running) return
+    if (!app.isPackaged || !info.payloadUrl) {
+      void shell.openExternal(info.htmlUrl)
       return
     }
+    this.running = true
+    this.controller = new AbortController()
+    log(`appUpdate: starting ${info.version} (${Math.round(info.payloadSize / 1048576)} MB)`)
+    void this.run(info, this.controller).finally(() => {
+      this.running = false
+    })
+  }
 
-    const source: InstallerSource = {
-      url: info.downloadUrl,
-      blockmapUrl: info.blockmapUrl,
-      size: info.size,
-      sha512: info.sha512,
-      fileName: info.fileName
+  /**
+   * Pauses / resumes the **download**. The install step is intentionally not
+   * pausable, so while `installing` this does nothing.
+   */
+  toggle(): void {
+    const phase = this.state.phase
+    if (phase === 'downloading') {
+      this.controller?.abort()
+    } else if (phase === 'paused' || phase === 'error') {
+      this.begin()
     }
+  }
+
+  private patch(patch: Partial<AppUpdateState>): void {
+    this.state = { ...this.state, ...patch }
+    for (const listener of this.stateListeners) listener({ ...this.state })
+  }
+
+  private async run(info: AppUpdateInfo, controller: AbortController): Promise<void> {
+    const staging = join(app.getPath('userData'), 'update-staging', info.version)
+    const archive = join(staging, 'payload.zip')
     try {
-      const megabytes = info.size ? `, ${Math.round(info.size / 1048576)} MB` : ''
-      log(`appUpdate: downloading ${info.version}${megabytes}`)
-      const installer = await downloadInstaller(
-        source,
-        this.cacheDir(),
-        await this.previousInstaller(),
-        (progress) => this.emitProgress(progress)
-      )
-      log(`appUpdate: verified, starting ${installer}`)
-      spawn(installer, [], { detached: true, stdio: 'ignore' }).unref()
-      app.quit()
+      await fs.mkdir(staging, { recursive: true })
+
+      // 1) download (resumes from the .part files when restarted after a pause).
+      this.patch({
+        phase: 'downloading',
+        version: info.version,
+        total: info.payloadSize,
+        message: '正在下载更新…'
+      })
+      if (info.payloadSize > 0 && (await fileSize(archive)) === info.payloadSize) {
+        this.patch({ percent: 100, transferred: info.payloadSize, bytesPerSecond: 0 })
+      } else {
+        await downloadPayload(
+          info.payloadUrl as string,
+          archive,
+          info.payloadSize,
+          (progress) => {
+            this.patch({
+              percent: info.payloadSize > 0 ? (progress.transferred / info.payloadSize) * 100 : 0,
+              transferred: progress.transferred,
+              total: info.payloadSize,
+              bytesPerSecond: progress.bytesPerSecond
+            })
+          },
+          controller.signal
+        )
+      }
+      const downloaded = await fileSize(archive)
+      if (info.payloadSize > 0 && downloaded !== info.payloadSize) {
+        throw new Error('更新包大小不匹配')
+      }
+
+      // 2) install: unpack into the staging directory (not pausable).
+      this.patch({ phase: 'installing', percent: 100, installPercent: 0, message: '正在安装更新…' })
+      const unpacked = join(staging, 'app')
+      await extractPayload(archive, unpacked, info.installSize, (bytes, total) => {
+        this.patch({ installPercent: total > 0 ? Math.min(100, (bytes / total) * 100) : 0 })
+      })
+      await fs.rm(archive, { force: true }).catch(() => {})
+
+      // 3) hand over to the helper, which restarts the launcher afterwards.
+      this.patch({
+        phase: 'done',
+        installPercent: 100,
+        message: '更新完成，正在重启…'
+      })
+      await applyStagedUpdate(unpacked, dirname(app.getPath('exe')))
     } catch (error) {
-      log(`appUpdate: download failed: ${(error as Error).message}`)
-      await shell.openExternal(info.htmlUrl)
+      if (controller.signal.aborted) {
+        log('appUpdate: paused')
+        this.patch({ phase: 'paused', message: '已暂停' })
+        return
+      }
+      const message = (error as Error).message
+      log(`appUpdate: failed: ${message}`)
+      this.patch({ phase: 'error', message: '更新失败', error: message })
     }
   }
 }

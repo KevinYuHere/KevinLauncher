@@ -929,10 +929,12 @@ export function registerIpc(): void {
 
   // --- launcher self-update (GitHub Releases) -------------------------------
   appUpdate.onUpdate((info) => broadcast('app-update:available', info))
-  appUpdate.onProgress((progress) => broadcast('app-update:progress', progress))
+  appUpdate.onState((state) => broadcast('app-update:state', state))
   ipcMain.handle('appUpdate:status', () => appUpdate.status())
   ipcMain.handle('appUpdate:check', () => appUpdate.check())
-  ipcMain.handle('appUpdate:run', () => appUpdate.run())
+  ipcMain.handle('appUpdate:state', () => appUpdate.stateSnapshot())
+  ipcMain.handle('appUpdate:start', () => appUpdate.begin())
+  ipcMain.handle('appUpdate:toggle', () => appUpdate.toggle())
 
   ipcMain.handle('window:minimize', (e) => {
     BrowserWindow.fromWebContents(e.sender)?.minimize()

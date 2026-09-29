@@ -86,7 +86,9 @@ const api: KevinApi = {
 
   appUpdateStatus: () => ipcRenderer.invoke('appUpdate:status'),
   appUpdateCheck: () => ipcRenderer.invoke('appUpdate:check'),
-  appUpdateRun: () => ipcRenderer.invoke('appUpdate:run'),
+  appUpdateState: () => ipcRenderer.invoke('appUpdate:state'),
+  appUpdateStart: () => ipcRenderer.invoke('appUpdate:start'),
+  appUpdateToggle: () => ipcRenderer.invoke('appUpdate:toggle'),
 
   windowMinimize: () => ipcRenderer.invoke('window:minimize'),
   windowToggleMaximize: () => ipcRenderer.invoke('window:toggleMaximize'),
@@ -136,15 +138,11 @@ const api: KevinApi = {
     ipcRenderer.on('app-update:available', listener)
     return () => ipcRenderer.removeListener('app-update:available', listener)
   },
-  onAppUpdateProgress: (
-    callback: (progress: import('@shared/types').AppUpdateProgress) => void
-  ) => {
-    const listener = (
-      _e: unknown,
-      progress: import('@shared/types').AppUpdateProgress
-    ): void => callback(progress)
-    ipcRenderer.on('app-update:progress', listener)
-    return () => ipcRenderer.removeListener('app-update:progress', listener)
+  onAppUpdateState: (callback: (state: import('@shared/types').AppUpdateState) => void) => {
+    const listener = (_e: unknown, state: import('@shared/types').AppUpdateState): void =>
+      callback(state)
+    ipcRenderer.on('app-update:state', listener)
+    return () => ipcRenderer.removeListener('app-update:state', listener)
   }
 }
 

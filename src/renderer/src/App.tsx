@@ -3,6 +3,7 @@ import type {
   AddonDescriptor,
   AppEntry,
   AppUpdateInfo,
+  AppUpdateState,
   LauncherSettings,
   NewAppEntry,
   RunningApp,
@@ -21,6 +22,7 @@ import GalleryView from './components/GalleryView'
 import PlayTimeView from './components/PlayTimeView'
 import AppFormDialog, { type AppFormMedia } from './components/AppFormDialog'
 import AppUpdateDialog from './components/AppUpdateDialog'
+import UpdateRing from './components/UpdateRing'
 import { ConfirmHost, confirm } from './components/confirm'
 import IconCropper from './components/IconCropper'
 import type { ViewId } from './viewTypes'
@@ -28,6 +30,18 @@ import { backgroundUrl, brandUrl, defaultIconUrl, VIDEO_RE } from './media'
 import { applyTheme } from './theme'
 
 type DialogState = { mode: 'add' } | { mode: 'edit'; entry: AppEntry } | null
+
+/** No upgrade running (mirrors the main process' idle state). */
+const IDLE_APP_UPDATE: AppUpdateState = {
+  phase: 'idle',
+  version: null,
+  percent: 0,
+  transferred: 0,
+  total: 0,
+  bytesPerSecond: 0,
+  installPercent: 0,
+  message: ''
+}
 
 export default function App(): ReactElement {
   const [apps, setApps] = useState<AppEntry[]>([])
@@ -70,6 +84,7 @@ export default function App(): ReactElement {
   const prevViewRef = useRef<ViewId>('home')
   const checkedUpdates = useRef<Set<string>>(new Set())
   const [appUpdate, setAppUpdate] = useState<AppUpdateInfo | null>(null)
+  const [appUpdateState, setAppUpdateState] = useState<AppUpdateState>(IDLE_APP_UPDATE)
   const [dismissedUpdate, setDismissedUpdate] = useState<string | null>(null)
   const [checkingUpdate, setCheckingUpdate] = useState(false)
   const [updateCheckText, setUpdateCheckText] = useState('')
@@ -130,6 +145,22 @@ export default function App(): ReactElement {
       if (status.info) setAppUpdate(status.info)
     })
     return window.api.onAppUpdateAvailable(setAppUpdate)
+  }, [])
+
+  // Download / install progress for the rail indicator.
+  useEffect(() => {
+    void window.api.appUpdateState().then(setAppUpdateState)
+    return window.api.onAppUpdateState(setAppUpdateState)
+  }, [])
+
+  const handleUpdateStart = useCallback((): void => {
+    // The dialog steps aside; the rail ring shows the progress from now on.
+    setAppUpdate(null)
+    void window.api.appUpdateStart()
+  }, [])
+
+  const handleUpdateToggle = useCallback((): void => {
+    void window.api.appUpdateToggle()
   }, [])
 
   const handleCheckUpdate = useCallback(async (): Promise<void> => {
@@ -570,6 +601,14 @@ export default function App(): ReactElement {
         onNavigate={setView}
         showGacha={!!currentAddon?.capabilities.gacha}
         showUpdate={!!currentAddon?.capabilities.update}
+        updateSlot={
+          <UpdateRing
+            info={appUpdate}
+            state={appUpdateState}
+            onStart={handleUpdateStart}
+            onToggle={handleUpdateToggle}
+          />
+        }
       />
 
       <div className="topbar">
@@ -674,7 +713,11 @@ export default function App(): ReactElement {
       )}
 
       {appUpdate && appUpdate.version !== dismissedUpdate && (
-        <AppUpdateDialog info={appUpdate} onDismiss={() => setDismissedUpdate(appUpdate.version)} />
+        <AppUpdateDialog
+          info={appUpdate}
+          onStart={handleUpdateStart}
+          onDismiss={() => setDismissedUpdate(appUpdate.version)}
+        />
       )}
     </div>
   )

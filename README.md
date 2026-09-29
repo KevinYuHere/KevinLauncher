@@ -24,12 +24,12 @@
 - 外观：每个应用可单独设置主题色、亮/暗玻璃、背景图与背景模糊/暗化；主题色会自动适配黑/白文字。
 - 启动器设置：启动器图标、界面字体、关闭按钮行为、启动应用后的行为、全部设置的导出 / 导入备份。
 - **检查更新**：基于 GitHub Releases，启动时与每 24 小时自动检查一次；设置页也提供手动检查。
-  检测到新版本会弹出更新日志，右下角可选择「立即更新」或「暂不更新」。
-  「立即更新」由自研下载器完成：**多线程（默认 8 连接）**、**断点续传**（每个连接保留 `.partN`，
-  中断后按 HTTP Range 续传）、**校验失败自动重试**，并在本地仍缓存着上一版安装包时启用
-  **blockmap 差分下载**——只传输相比已安装版本变化的字节区间，未改动的部分直接从旧安装包复制，
-  因此新版 Electron/Chromium 等大块不会被重复下载。整个过程按 `latest.yml` 的 SHA-512 校验，
-  失败则回退为完整下载或打开 Release 页面。
+  检测到新版本弹出更新日志，可选择「立即更新」或「暂不更新」。
+  选择更新后**不会打开安装程序窗口、也不需要任何选择**：左侧导航（设置按钮上方）会出现
+  **主题色进度环**，点击可**暂停 / 继续**下载（8 连接、断点续传、自动重试），悬停展开浮层显示
+  百分比、已下载 / 总大小与预计剩余时间。下载完成后自动进入**安装阶段**并在同一个环形上显示
+  安装进度（安装不可暂停），完成后重启完成升级，全程不阻塞界面。
+- 全新安装使用**完全自行绘制**的安装界面（见下）。
 
 ### 安装程序
 
@@ -102,6 +102,29 @@ npm run build:win
 & "$env:LOCALAPPDATA\electron-builder\Cache\winCodeSign\<hash>\rcedit-x64.exe" `
   release\win-unpacked\KevinLauncher.exe --set-icon resources\icon.ico
 ```
+
+---
+
+## 发布新版本
+
+```powershell
+# 1) 改 package.json 的 version（例如 0.1.0）
+# 2) 一条命令完成：构建 -> 打包 -> 生成差分资源 -> 发布到 GitHub Releases
+npm run release
+```
+
+`scripts\release.ps1` 会依次执行 electron-vite 构建、`electron-builder --dir` + 图标写入、
+NSIS 打包、`scripts/build-update-payload.mjs`（生成升级用的 zip 与清单），最后用 `gh` 把
+5 个资源上传到 `v<version>`：
+
+| 资源 | 用途 |
+| --- | --- |
+| `KevinLauncher-Setup-<version>.exe` | 全新安装的安装程序 |
+| `...exe.blockmap`、`latest.yml` | electron-builder 产物（校验 / 兼容其他工具） |
+| `KevinLauncher-<version>.zip` | 升级载荷：应用文件树（旧客户端下载并解包） |
+| `update-manifest.json` | 升级清单：版本、解包总大小（安装进度分母）、载荷 SHA-256 |
+
+> 参数：`-SkipUpload` 只构建不上传；`-Draft` 发草稿；`-Version x.y.z` 指定版本。
 
 ---
 

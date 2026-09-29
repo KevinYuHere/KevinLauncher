@@ -2407,6 +2407,77 @@ textarea:focus-visible {
   opacity: 0.5;
 }
 
+/* ------------------------------------------- rail: launcher update slot */
+.rail-update {
+  position: relative;
+}
+.rail-update-btn {
+  color: var(--brand);
+}
+.rail-update-icon {
+  position: relative;
+  display: grid;
+  place-items: center;
+}
+.rail-update-dot {
+  position: absolute;
+  top: -1px;
+  right: -1px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--brand);
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.35);
+}
+.rail-ring {
+  position: relative;
+  display: grid;
+  place-items: center;
+  color: var(--brand);
+}
+.rail-ring .ring {
+  color: var(--brand);
+}
+.rail-ring-percent {
+  position: absolute;
+  font-size: 9px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--brand);
+}
+/* Opens to the right of the rail, like the game download popover. */
+.rail-pop {
+  position: absolute;
+  left: calc(100% + 10px);
+  bottom: -4px;
+  width: 236px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  pointer-events: none;
+  z-index: 30;
+}
+.rail-pop-head {
+  font-size: 12px;
+  opacity: 0.65;
+}
+.rail-pop-percent {
+  margin-top: 2px;
+  font-size: 24px;
+  font-weight: 800;
+  color: var(--brand);
+  font-variant-numeric: tabular-nums;
+}
+.rail-pop-row {
+  margin-top: 5px;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 11px;
+  opacity: 0.7;
+  font-variant-numeric: tabular-nums;
+}
+
 /* -------------------------------------------------- launcher update dialog */
 .update-modal {
   width: min(520px, 90vw);

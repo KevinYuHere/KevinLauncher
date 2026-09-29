@@ -1,6 +1,0 @@
-# Consumed by electron-updater at runtime (copied into the app's resources/).
-# Keep in sync with the `publish` section of electron-builder.yml.
-provider: github
-owner: KevinYuHere
-repo: KevinLauncher
-updaterCacheDirName: kevin-launcher-updater

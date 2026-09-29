@@ -1,6 +1,6 @@
 {
   "name": "kevin-launcher",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "KevinLauncher - a multi-application launcher with game add-ons",
   "main": "./out/main/index.js",
   "author": "Kevin",
@@ -14,7 +14,9 @@
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
-    "build:win": "electron-vite build && electron-builder --win"
+    "build:win": "electron-vite build && electron-builder --win",
+    "bundle": "node scripts/build-update-payload.mjs",
+    "release": "powershell -ExecutionPolicy Bypass -File scripts/release.ps1"
   },
   "dependencies": {
     "@electron-toolkit/preload": "^3.0.1",

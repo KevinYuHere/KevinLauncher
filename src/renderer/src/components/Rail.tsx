@@ -1,15 +1,17 @@
-import type { ReactElement } from 'react'
+import type { ReactElement, ReactNode } from 'react'
 import Icon, { type IconName } from './Icon'
 import type { ViewId } from '../viewTypes'
 
 // Left navigation rail. Only the pages relevant to the current app are shown
 // (gacha needs a game add-on, update needs an updatable module); settings is
-// pinned to the bottom.
+// pinned to the bottom, with the launcher-update indicator just above it.
 interface RailProps {
   view: ViewId
   onNavigate: (view: ViewId) => void
   showGacha: boolean
   showUpdate: boolean
+  /** Optional node rendered above the settings button (launcher update). */
+  updateSlot?: ReactNode
 }
 
 interface RailEntry {
@@ -19,7 +21,13 @@ interface RailEntry {
   visible: boolean
 }
 
-export default function Rail({ view, onNavigate, showGacha, showUpdate }: RailProps): ReactElement {
+export default function Rail({
+  view,
+  onNavigate,
+  showGacha,
+  showUpdate,
+  updateSlot
+}: RailProps): ReactElement {
   // `visible` is resolved from the app's modules, not from the current view.
   const entries: RailEntry[] = [
     { id: 'home', icon: 'home', label: '主页', visible: true },
@@ -45,6 +53,8 @@ export default function Rail({ view, onNavigate, showGacha, showUpdate }: RailPr
         ))}
 
       <div className="rail-spacer" />
+
+      {updateSlot}
 
       <button
         className={`rail-item${view === 'settings' ? ' active' : ''}`}
