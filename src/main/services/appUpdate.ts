@@ -396,8 +396,15 @@ export class AppUpdateChecker {
     // Hold on to the info for the whole run: a later (failed) check must not
     // change what is being downloaded.
     this.controller = new AbortController()
-    const megabytes = Math.round((info.installerSize || info.payloadSize) / 1048576)
-    log(`appUpdate: starting ${info.version} (~${megabytes} MB)`)
+    // Log what will actually be fetched (the payload is ~0.15 MB, the installer
+    // ~71 MB and only used when the runtime changed).
+    const runtimeChanged = !!info.electronVersion && info.electronVersion !== process.versions.electron
+    const megabytes = Math.round(
+      (runtimeChanged ? info.installerSize : info.payloadSize) / 1048576
+    )
+    log(
+      `appUpdate: starting ${info.version} (${runtimeChanged ? 'installer' : 'app payload'}, ~${megabytes} MB)`
+    )
     void this.run(info, this.controller).finally(() => {
       this.running = false
     })
