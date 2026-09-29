@@ -2928,6 +2928,13 @@ textarea:focus-visible {
   outline: none;
   border-color: var(--brand);
 }
+/* Match the input exactly (the plain .btn is 36px, the field is 44px). */
+.setup-path .btn {
+  height: 44px;
+  padding: 0 20px;
+  border-radius: 12px;
+  font-size: 14px;
+}
 .setup-note {
   max-width: 760px;
   font-size: 13.5px;
