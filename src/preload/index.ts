@@ -135,6 +135,16 @@ const api: KevinApi = {
       callback(info)
     ipcRenderer.on('app-update:available', listener)
     return () => ipcRenderer.removeListener('app-update:available', listener)
+  },
+  onAppUpdateProgress: (
+    callback: (progress: import('@shared/types').AppUpdateProgress) => void
+  ) => {
+    const listener = (
+      _e: unknown,
+      progress: import('@shared/types').AppUpdateProgress
+    ): void => callback(progress)
+    ipcRenderer.on('app-update:progress', listener)
+    return () => ipcRenderer.removeListener('app-update:progress', listener)
   }
 }
 

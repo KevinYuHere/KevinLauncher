@@ -13,8 +13,10 @@ import {
   getCloseToTray,
   isQuitting,
   markQuitting,
-  setCloseToTray
+  setCloseToTray,
+  showMainWindow
 } from './services/behavior'
+import { applyAutoStart, startedHidden } from './services/autostart'
 import { BgStore } from './services/background'
 import { BrandStore } from './services/brand'
 import { IconStore } from './services/icon'
@@ -38,6 +40,14 @@ protocol.registerSchemesAsPrivileged([
 // and packaged builds so config / icons / backgrounds stay shared.
 app.setName('kevin-launcher')
 
+// Only a single instance may run; a second launch just focuses the first one
+// (and its elevated process). Everything below is skipped in the loser.
+const singleInstance = app.requestSingleInstanceLock()
+if (!singleInstance) app.quit()
+
+/** Icon used for the window / taskbar (resolved once on startup). */
+let windowIcon: string | undefined
+
 /** Relaunch the current executable elevated (used by packaged builds). */
 function relaunchElevated(): void {
   const quote = (value: string): string => `'${value.replace(/'/g, "''")}'`
@@ -54,7 +64,7 @@ function relaunchElevated(): void {
   }
 }
 
-function createWindow(icon?: string): void {
+function createWindow(icon?: string, hidden = false): void {
   const mainWindow = new BrowserWindow({
     width: 1180,
     height: 760,
@@ -73,6 +83,8 @@ function createWindow(icon?: string): void {
   })
 
   mainWindow.on('ready-to-show', () => {
+    // Autostart in tray mode: stay hidden, the tray icon opens the window.
+    if (hidden) return
     mainWindow.show()
     mainWindow.focus()
     // Nudge to the foreground (Windows can otherwise keep another window in front).
@@ -88,7 +100,7 @@ function createWindow(icon?: string): void {
     if (getCloseToTray() && !isQuitting()) {
       event.preventDefault()
       mainWindow.hide()
-      void ensureTray(mainWindow)
+      void ensureTray()
     }
   })
 
@@ -105,6 +117,7 @@ function createWindow(icon?: string): void {
 }
 
 app.whenReady().then(async () => {
+  if (!singleInstance) return
   electronApp.setAppUserModelId('com.kevin.kevinlauncher')
 
   // Packaged builds run elevated so launching protected game clients never
@@ -148,11 +161,17 @@ app.whenReady().then(async () => {
   void isElevated().then((elevated) => log(`app: administrator=${elevated}`))
 
   registerIpc()
-  void AppStore.launcherSettings().then((settings) =>
-    setCloseToTray(settings.closeAction === 'tray')
-  )
-  createWindow((await launcherIconPaths()).png)
+
+  const launcherSettings = await AppStore.launcherSettings()
+  setCloseToTray(launcherSettings.closeAction === 'tray')
+  applyAutoStart(launcherSettings.autoStart)
+
+  windowIcon = (await launcherIconPaths()).png
+  // `startedHidden()` is true when the Run entry launched us with `--tray`.
+  createWindow(windowIcon, startedHidden())
   void applyLauncherIcon()
+  // The tray icon is always present while the launcher runs.
+  void ensureTray()
   warmUpFonts()
 
   // Check GitHub Releases shortly after launch, then every 24 hours.
@@ -188,19 +207,24 @@ app.whenReady().then(async () => {
   })()
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    if (BrowserWindow.getAllWindows().length === 0) createWindow(windowIcon)
   })
 })
 
-app.on('before-quit', () => {
-  markQuitting()
-})
+if (singleInstance) {
+  // A second launch (e.g. double-clicking the shortcut again) focuses this one.
+  app.on('second-instance', () => showMainWindow())
 
-app.on('will-quit', () => {
-  runtime.dispose()
-  destroyTray()
-})
+  app.on('before-quit', () => {
+    markQuitting()
+  })
 
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit()
-})
+  app.on('will-quit', () => {
+    runtime.dispose()
+    destroyTray()
+  })
+
+  app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') app.quit()
+  })
+}

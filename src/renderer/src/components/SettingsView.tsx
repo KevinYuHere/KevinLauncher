@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState, type CSSProperties, type ReactElement, type ReactNode } from 'react'
-import type { AfterLaunchAction, AppEntry, CloseAction, LauncherSettings } from '@shared/types'
+import type {
+  AfterLaunchAction,
+  AppEntry,
+  AutoStartMode,
+  CloseAction,
+  LauncherSettings
+} from '@shared/types'
 import { brandUrl, defaultIconUrl } from '../media'
 
 /** Project repository (shown in the "About" section). */
@@ -49,7 +55,11 @@ interface SettingsViewProps {
   onPickLauncherIcon: () => void
   onClearLauncherIcon: () => void
   onSetFont: (family: string | null) => void
-  onSetBehavior: (patch: { closeAction?: CloseAction; afterLaunch?: AfterLaunchAction }) => void
+  onSetBehavior: (patch: {
+    closeAction?: CloseAction
+    afterLaunch?: AfterLaunchAction
+    autoStart?: AutoStartMode
+  }) => void
   onExportData: () => void
   onImportData: () => void
   /** Manually check GitHub Releases for a newer launcher version. */
@@ -209,6 +219,12 @@ export default function SettingsView({
     minimize: '最小化启动器',
     tray: '隐藏启动器到托盘',
     close: '关闭启动器'
+  }
+
+  const autoStartDesc: Record<AutoStartMode, string> = {
+    off: '不随 Windows 启动',
+    window: '登录 Windows 后自动打开启动器窗口',
+    tray: '登录后静默启动到托盘（不显示窗口）'
   }
 
   return (
@@ -461,6 +477,36 @@ export default function SettingsView({
                       onPick={(v) => onSetBehavior({ afterLaunch: v as AfterLaunchAction })}
                     >
                       关闭启动器
+                    </Seg>
+                  </div>
+                }
+              />
+
+              <Row
+                name="开机自启"
+                desc={autoStartDesc[launcher.autoStart]}
+                action={
+                  <div className="segmented">
+                    <Seg
+                      value="off"
+                      current={launcher.autoStart}
+                      onPick={(v) => onSetBehavior({ autoStart: v as AutoStartMode })}
+                    >
+                      关闭
+                    </Seg>
+                    <Seg
+                      value="window"
+                      current={launcher.autoStart}
+                      onPick={(v) => onSetBehavior({ autoStart: v as AutoStartMode })}
+                    >
+                      打开窗口
+                    </Seg>
+                    <Seg
+                      value="tray"
+                      current={launcher.autoStart}
+                      onPick={(v) => onSetBehavior({ autoStart: v as AutoStartMode })}
+                    >
+                      静默托盘
                     </Seg>
                   </div>
                 }

@@ -11,6 +11,7 @@ import { AppStore } from './services/appStore'
 import { BgStore } from './services/background'
 import { BrandStore } from './services/brand'
 import { ensureTray, setCloseToTray } from './services/behavior'
+import { applyAutoStart } from './services/autostart'
 import { applyLauncherIcon } from './services/appIcon'
 import { IconStore } from './services/icon'
 import { extractAccent } from './services/theme'
@@ -359,10 +360,12 @@ export function registerIpc(): void {
       patch: {
         closeAction?: 'close' | 'tray'
         afterLaunch?: 'none' | 'minimize' | 'tray' | 'close'
+        autoStart?: 'off' | 'window' | 'tray'
       }
     ) => {
       await AppStore.setLauncher(patch)
       if (patch.closeAction) setCloseToTray(patch.closeAction === 'tray')
+      if (patch.autoStart) applyAutoStart(patch.autoStart)
       broadcast('launcher:changed')
       return AppStore.launcherSettings()
     }
@@ -926,6 +929,7 @@ export function registerIpc(): void {
 
   // --- launcher self-update (GitHub Releases) -------------------------------
   appUpdate.onUpdate((info) => broadcast('app-update:available', info))
+  appUpdate.onProgress((progress) => broadcast('app-update:progress', progress))
   ipcMain.handle('appUpdate:status', () => appUpdate.status())
   ipcMain.handle('appUpdate:check', () => appUpdate.check())
   ipcMain.handle('appUpdate:run', () => appUpdate.run())
@@ -947,7 +951,7 @@ export function registerIpc(): void {
     const win = BrowserWindow.fromWebContents(e.sender)
     if (!win) return
     win.hide()
-    void ensureTray(win)
+    void ensureTray()
   })
   ipcMain.handle('window:isMaximized', (e) => {
     return BrowserWindow.fromWebContents(e.sender)?.isMaximized() ?? false

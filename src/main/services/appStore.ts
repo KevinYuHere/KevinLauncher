@@ -16,6 +16,7 @@ export interface LauncherConfig {
     fontFamily?: string | null
     closeAction?: 'close' | 'tray'
     afterLaunch?: 'none' | 'minimize' | 'tray' | 'close'
+    autoStart?: 'off' | 'window' | 'tray'
   }
 }
 
@@ -99,13 +100,15 @@ export class AppStore {
     fontFamily: string | null
     closeAction: 'close' | 'tray'
     afterLaunch: 'none' | 'minimize' | 'tray' | 'close'
+    autoStart: 'off' | 'window' | 'tray'
   }> {
     const config = await this.load()
     return {
       iconFile: config.launcher?.iconFile ?? null,
       fontFamily: config.launcher?.fontFamily ?? null,
       closeAction: config.launcher?.closeAction ?? 'close',
-      afterLaunch: config.launcher?.afterLaunch ?? 'none'
+      afterLaunch: config.launcher?.afterLaunch ?? 'none',
+      autoStart: config.launcher?.autoStart ?? 'off'
     }
   }
 
@@ -114,6 +117,7 @@ export class AppStore {
     fontFamily?: string | null
     closeAction?: 'close' | 'tray'
     afterLaunch?: 'none' | 'minimize' | 'tray' | 'close'
+    autoStart?: 'off' | 'window' | 'tray'
   }): Promise<void> {
     const config = await this.load()
     config.launcher = { ...config.launcher, ...patch }

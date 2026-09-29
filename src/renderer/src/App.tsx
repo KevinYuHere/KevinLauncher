@@ -53,7 +53,8 @@ export default function App(): ReactElement {
     iconFile: null,
     fontFamily: null,
     closeAction: 'close',
-    afterLaunch: 'none'
+    afterLaunch: 'none',
+    autoStart: 'off'
   })
   const [fonts, setFonts] = useState<string[]>([])
   const [version, setVersion] = useState('')

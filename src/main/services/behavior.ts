@@ -26,8 +26,17 @@ export function isQuitting(): boolean {
   return quitting
 }
 
+/** Bring the main window to the foreground (creating it is the caller's job). */
+export function showMainWindow(): void {
+  const win = BrowserWindow.getAllWindows()[0]
+  if (!win) return
+  if (win.isMinimized()) win.restore()
+  win.show()
+  win.focus()
+}
+
 /** Create the tray icon (idempotent) with a show/quit menu. */
-export async function ensureTray(win: BrowserWindow): Promise<void> {
+export async function ensureTray(): Promise<void> {
   if (tray) return
   let image = trayImage
   if (!image) {
@@ -46,13 +55,7 @@ export async function ensureTray(win: BrowserWindow): Promise<void> {
   tray.setToolTip('KevinLauncher')
   tray.setContextMenu(
     Menu.buildFromTemplate([
-      {
-        label: '显示主界面',
-        click: () => {
-          win.show()
-          win.focus()
-        }
-      },
+      { label: '显示主界面', click: showMainWindow },
       { type: 'separator' },
       {
         label: '退出',
@@ -63,10 +66,7 @@ export async function ensureTray(win: BrowserWindow): Promise<void> {
       }
     ])
   )
-  tray.on('click', () => {
-    win.show()
-    win.focus()
-  })
+  tray.on('click', showMainWindow)
 }
 
 export function destroyTray(): void {

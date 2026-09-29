@@ -1,9 +1,6 @@
 import { app, shell } from 'electron'
-import { createWriteStream } from 'fs'
-import { join } from 'path'
-import { Readable } from 'stream'
-import { pipeline } from 'stream/promises'
-import type { AppUpdateInfo, AppUpdateStatus } from '@shared/types'
+import { autoUpdater } from 'electron-updater'
+import type { AppUpdateInfo, AppUpdateProgress, AppUpdateStatus } from '@shared/types'
 import { isNewerVersion } from '@shared/version'
 import { log } from './logger'
 
@@ -70,6 +67,8 @@ export class AppUpdateChecker {
   private error: string | undefined
   private announced: string | null = null
   private listeners = new Set<(info: AppUpdateInfo) => void>()
+  private progressListeners = new Set<(progress: AppUpdateProgress) => void>()
+  private updaterReady = false
 
   /** Currently installed version (from package.json). */
   current(): string {
@@ -84,6 +83,12 @@ export class AppUpdateChecker {
   onUpdate(callback: (info: AppUpdateInfo) => void): () => void {
     this.listeners.add(callback)
     return () => this.listeners.delete(callback)
+  }
+
+  /** Subscribe to the installer download progress. */
+  onProgress(callback: (progress: AppUpdateProgress) => void): () => void {
+    this.progressListeners.add(callback)
+    return () => this.progressListeners.delete(callback)
   }
 
   /** Starts the startup check and the 24-hour interval. */
@@ -114,33 +119,57 @@ export class AppUpdateChecker {
     return this.status()
   }
 
+  /** Wires the electron-updater events exactly once. */
+  private prepareUpdater(): void {
+    if (this.updaterReady) return
+    this.updaterReady = true
+    autoUpdater.autoDownload = false
+    autoUpdater.autoInstallOnAppQuit = true
+    autoUpdater.allowPrerelease = false
+    // A differential download needs the blockmap of the version we are running.
+    // GitHub cannot serve it from the "latest" release, so point the updater at
+    // the release of the current version; if that asset is missing it falls back
+    // to a full download automatically.
+    autoUpdater.previousBlockmapBaseUrlOverride =
+      `https://github.com/${GITHUB_REPO}/releases/download/v${this.current()}`
+    autoUpdater.on('download-progress', (progress) => {
+      const payload: AppUpdateProgress = {
+        percent: progress.percent,
+        transferred: progress.transferred,
+        total: progress.total,
+        bytesPerSecond: progress.bytesPerSecond
+      }
+      for (const listener of this.progressListeners) listener(payload)
+    })
+    autoUpdater.on('error', (error) => log(`appUpdate: updater error: ${error.message}`))
+  }
+
   /**
-   * Downloads the installer of the announced release into the temp folder and
-   * runs it. Falls back to opening the release page when there is no asset.
+   * Downloads the new version and restarts into its installer. The installer is
+   * fetched differentially (only the byte ranges that changed since the running
+   * version), with automatic retry and resume handled by electron-updater; if
+   * that is not possible it falls back to the full download. In dev, or when
+   * nothing installable is published, the release page is opened instead.
    */
   async run(): Promise<void> {
     const info = this.info
     if (!info) return
-    if (!info.downloadUrl || !info.fileName) {
+    if (!app.isPackaged) {
       await shell.openExternal(info.htmlUrl)
       return
     }
-    const dest = join(app.getPath('temp'), info.fileName)
-    log(`appUpdate: downloading ${info.fileName}`)
-    const response = await fetch(info.downloadUrl, {
-      headers: { 'user-agent': USER_AGENT },
-      redirect: 'follow'
-    })
-    if (!response.ok || !response.body) {
-      throw new Error(`下载安装包失败：HTTP ${response.status}`)
+    this.prepareUpdater()
+    log(`appUpdate: downloading ${info.version} (differential)`)
+    try {
+      await autoUpdater.checkForUpdates()
+      await autoUpdater.downloadUpdate()
+    } catch (error) {
+      log(`appUpdate: updater failed: ${(error as Error).message}`)
+      // Nothing installable (missing asset, no matching blockmap, …).
+      await shell.openExternal(info.htmlUrl)
+      return
     }
-    await pipeline(
-      Readable.fromWeb(response.body as Parameters<typeof Readable.fromWeb>[0]),
-      createWriteStream(dest)
-    )
-    log(`appUpdate: launching installer ${dest}`)
-    // The NSIS installer takes over from here (it offers to close this app).
-    const message = await shell.openPath(dest)
-    if (message) throw new Error(message)
+    log('appUpdate: quitting to run the installer')
+    autoUpdater.quitAndInstall(false, true)
   }
 }

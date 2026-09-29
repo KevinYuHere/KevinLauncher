@@ -14,6 +14,7 @@ KevinLauncher 使用了以下第三方组件，并在实现过程中参考了以
 | [Electron](https://github.com/electron/electron) | MIT | 应用运行时（主进程 / 渲染进程 / 预加载） |
 | [React](https://github.com/facebook/react) / [ReactDOM](https://github.com/facebook/react) | MIT | 界面渲染 |
 | [fzstd](https://github.com/101arrowz/fzstd) | MIT | zstd 解压（Sophon 清单与资源块） |
+| [electron-updater](https://github.com/electron-userland/electron-builder) | MIT | 启动器增量自更新（NSIS blockmap 差分下载） |
 | [@electron-toolkit/preload](https://github.com/alex8088/electron-toolkit) | MIT | 预加载脚本桥接 |
 | [@electron-toolkit/utils](https://github.com/alex8088/electron-toolkit) | MIT | 主进程工具函数 |
 | [electron-vite](https://github.com/alex8088/electron-vite) | MIT | 开发 / 构建工具链 |

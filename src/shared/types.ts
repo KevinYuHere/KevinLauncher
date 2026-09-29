@@ -245,6 +245,8 @@ export interface UiPrefs {
 
 export type CloseAction = 'close' | 'tray'
 export type AfterLaunchAction = 'none' | 'minimize' | 'tray' | 'close'
+/** Launch-at-login behaviour: off, show the window, or start hidden in the tray. */
+export type AutoStartMode = 'off' | 'window' | 'tray'
 
 /** Launcher-wide (global) appearance + behavior settings. */
 export interface LauncherSettings {
@@ -254,6 +256,8 @@ export interface LauncherSettings {
   closeAction: CloseAction
   /** What to do to the launcher window after a successful game launch. */
   afterLaunch: AfterLaunchAction
+  /** Whether the launcher starts with Windows (and how). */
+  autoStart: AutoStartMode
 }
 
 /** A newer release found on GitHub (self-update). */
@@ -280,6 +284,14 @@ export interface AppUpdateStatus {
   info: AppUpdateInfo | null
   /** Set when the last check failed (network / rate limit / …). */
   error?: string
+}
+
+/** Download progress of the launcher update itself. */
+export interface AppUpdateProgress {
+  percent: number
+  transferred: number
+  total: number
+  bytesPerSecond: number
 }
 
 /** API exposed on `window.api` through the preload context bridge. */
@@ -318,6 +330,7 @@ export interface KevinApi {
   setLauncherBehavior(patch: {
     closeAction?: CloseAction
     afterLaunch?: AfterLaunchAction
+    autoStart?: AutoStartMode
   }): Promise<LauncherSettings>
   hideToTray(): Promise<void>
   /** Export every setting (apps, playtime, gacha, icons, backgrounds) to a zip. */
@@ -374,6 +387,8 @@ export interface KevinApi {
   appUpdateRun(): Promise<void>
   /** Fired when a newer version is found (startup / 24h / manual check). */
   onAppUpdateAvailable(callback: (info: AppUpdateInfo) => void): () => void
+  /** Fired while the update installer is being downloaded. */
+  onAppUpdateProgress(callback: (progress: AppUpdateProgress) => void): () => void
 
   windowMinimize(): Promise<void>
   windowToggleMaximize(): Promise<boolean>
