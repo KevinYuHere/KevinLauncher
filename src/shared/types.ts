@@ -273,6 +273,12 @@ export interface AppUpdateInfo {
   /** Direct download URL of the Windows installer, if the release has one. */
   downloadUrl: string | null
   fileName: string | null
+  /** SHA-512 (base64) of the installer, from the release's `latest.yml`. */
+  sha512: string | null
+  /** Size in bytes of the installer. */
+  size: number
+  /** Block map URL used for the differential download. */
+  blockmapUrl: string | null
   publishedAt: string
 }
 

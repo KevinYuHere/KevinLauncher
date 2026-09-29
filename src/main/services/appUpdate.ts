@@ -1,7 +1,14 @@
 import { app, shell } from 'electron'
-import { autoUpdater } from 'electron-updater'
+import { spawn } from 'child_process'
+import { join } from 'path'
+import { promises as fs } from 'fs'
 import type { AppUpdateInfo, AppUpdateProgress, AppUpdateStatus } from '@shared/types'
 import { isNewerVersion } from '@shared/version'
+import {
+  downloadInstaller,
+  type CachedInstaller,
+  type InstallerSource
+} from './installerDownload'
 import { log } from './logger'
 
 /** Owner/repository used for release checks (public GitHub API). */
@@ -23,7 +30,7 @@ interface GitHubRelease {
   published_at?: string
   draft?: boolean
   prerelease?: boolean
-  assets?: { name?: string; browser_download_url?: string }[]
+  assets?: { name?: string; browser_download_url?: string; size?: number }[]
 }
 
 /** Reads the newest published release, or `null` when the repo has none. */
@@ -42,18 +49,51 @@ async function fetchLatestRelease(): Promise<AppUpdateInfo | null> {
   if (!version) throw new Error('发布信息缺少版本号')
 
   // Prefer the NSIS installer produced by electron-builder.
-  const asset =
-    (release.assets ?? []).find((item) => /\.exe$/i.test(item.name ?? '')) ??
-    (release.assets ?? [])[0]
+  const assets = release.assets ?? []
+  const installer =
+    assets.find((item) => /KevinLauncher-Setup.*\.exe$/i.test(item.name ?? '')) ??
+    assets.find((item) => /\.exe$/i.test(item.name ?? ''))
+
+  // `latest.yml` carries the SHA-512 (base64) and size used to verify the file.
+  let sha512: string | null = null
+  let size = installer?.size ?? 0
+  const meta = assets.find((item) => /(^|\/)latest\.ya?ml$/i.test(item.name ?? ''))
+  if (meta?.browser_download_url) {
+    try {
+      const fromYml = await fetchLatestYml(meta.browser_download_url)
+      sha512 = fromYml.sha512
+      if (fromYml.size) size = fromYml.size
+    } catch (error) {
+      log(`appUpdate: latest.yml unavailable (${(error as Error).message})`)
+    }
+  }
 
   return {
     version,
     name: release.name?.trim() || `v${version}`,
     notes: (release.body ?? '').trim(),
     htmlUrl: release.html_url ?? `https://github.com/${GITHUB_REPO}/releases`,
-    downloadUrl: asset?.browser_download_url ?? null,
-    fileName: asset?.name ?? null,
+    downloadUrl: installer?.browser_download_url ?? null,
+    fileName: installer?.name ?? null,
+    sha512,
+    size,
+    blockmapUrl: installer?.browser_download_url
+      ? `${installer.browser_download_url}.blockmap`
+      : null,
     publishedAt: release.published_at ?? ''
+  }
+}
+
+/** Reads the installer SHA-512 / size from a release's `latest.yml`. */
+async function fetchLatestYml(
+  url: string
+): Promise<{ sha512: string | null; size: number }> {
+  const response = await fetch(url, { headers: { 'user-agent': USER_AGENT } })
+  if (!response.ok) throw new Error(`HTTP ${response.status}`)
+  const text = await response.text()
+  return {
+    sha512: /\bsha512:\s*(\S+)/.exec(text)?.[1] ?? null,
+    size: Number(/\bsize:\s*(\d+)/.exec(text)?.[1] ?? 0)
   }
 }
 
@@ -68,7 +108,6 @@ export class AppUpdateChecker {
   private announced: string | null = null
   private listeners = new Set<(info: AppUpdateInfo) => void>()
   private progressListeners = new Set<(progress: AppUpdateProgress) => void>()
-  private updaterReady = false
 
   /** Currently installed version (from package.json). */
   current(): string {
@@ -119,57 +158,78 @@ export class AppUpdateChecker {
     return this.status()
   }
 
-  /** Wires the electron-updater events exactly once. */
-  private prepareUpdater(): void {
-    if (this.updaterReady) return
-    this.updaterReady = true
-    autoUpdater.autoDownload = false
-    autoUpdater.autoInstallOnAppQuit = true
-    autoUpdater.allowPrerelease = false
-    // A differential download needs the blockmap of the version we are running.
-    // GitHub cannot serve it from the "latest" release, so point the updater at
-    // the release of the current version; if that asset is missing it falls back
-    // to a full download automatically.
-    autoUpdater.previousBlockmapBaseUrlOverride =
-      `https://github.com/${GITHUB_REPO}/releases/download/v${this.current()}`
-    autoUpdater.on('download-progress', (progress) => {
-      const payload: AppUpdateProgress = {
-        percent: progress.percent,
-        transferred: progress.transferred,
-        total: progress.total,
-        bytesPerSecond: progress.bytesPerSecond
+  /** Directory caching downloaded installers (enables differential updates). */
+  private cacheDir(): string {
+    return join(app.getPath('userData'), 'update-cache')
+  }
+
+  /**
+   * The installer of the version we are running, if a previous update left it
+   * cached. Without it (e.g. the very first self-update) the changed blocks
+   * cannot be sourced locally, so the download is a plain full one.
+   */
+  private async previousInstaller(): Promise<CachedInstaller | null> {
+    const dir = this.cacheDir()
+    try {
+      const files = await fs.readdir(dir)
+      const candidates = files.filter((name) => /KevinLauncher-Setup-.*\.exe$/i.test(name))
+      const preferred = candidates.find((name) => name.includes(this.current())) ?? candidates[0]
+      if (!preferred) return null
+      const path = join(dir, preferred)
+      const blockmapPath = `${path}.blockmap`
+      try {
+        await fs.access(blockmapPath)
+      } catch {
+        return null
       }
-      for (const listener of this.progressListeners) listener(payload)
-    })
-    autoUpdater.on('error', (error) => log(`appUpdate: updater error: ${error.message}`))
+      return { path, blockmapPath }
+    } catch {
+      return null
+    }
+  }
+
+  private emitProgress(progress: AppUpdateProgress): void {
+    for (const listener of this.progressListeners) listener(progress)
   }
 
   /**
    * Downloads the new version and restarts into its installer. The installer is
-   * fetched differentially (only the byte ranges that changed since the running
-   * version), with automatic retry and resume handled by electron-updater; if
-   * that is not possible it falls back to the full download. In dev, or when
-   * nothing installable is published, the release page is opened instead.
+   * fetched over several connections and, when the previous installer is still
+   * cached, completed differentially (only changed byte ranges are transferred;
+   * the rest is copied from the cached file). A full download resumes from its
+   * part files and every connection retries. The file is verified against the
+   * release's SHA-512; on failure the release page is opened instead.
    */
   async run(): Promise<void> {
     const info = this.info
     if (!info) return
-    if (!app.isPackaged) {
+    if (!app.isPackaged || !info.downloadUrl || !info.fileName) {
       await shell.openExternal(info.htmlUrl)
       return
     }
-    this.prepareUpdater()
-    log(`appUpdate: downloading ${info.version} (differential)`)
+
+    const source: InstallerSource = {
+      url: info.downloadUrl,
+      blockmapUrl: info.blockmapUrl,
+      size: info.size,
+      sha512: info.sha512,
+      fileName: info.fileName
+    }
     try {
-      await autoUpdater.checkForUpdates()
-      await autoUpdater.downloadUpdate()
+      const megabytes = info.size ? `, ${Math.round(info.size / 1048576)} MB` : ''
+      log(`appUpdate: downloading ${info.version}${megabytes}`)
+      const installer = await downloadInstaller(
+        source,
+        this.cacheDir(),
+        await this.previousInstaller(),
+        (progress) => this.emitProgress(progress)
+      )
+      log(`appUpdate: verified, starting ${installer}`)
+      spawn(installer, [], { detached: true, stdio: 'ignore' }).unref()
+      app.quit()
     } catch (error) {
-      log(`appUpdate: updater failed: ${(error as Error).message}`)
-      // Nothing installable (missing asset, no matching blockmap, …).
+      log(`appUpdate: download failed: ${(error as Error).message}`)
       await shell.openExternal(info.htmlUrl)
-      return
     }
-    log('appUpdate: quitting to run the installer')
-    autoUpdater.quitAndInstall(false, true)
   }
 }
