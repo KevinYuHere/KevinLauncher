@@ -2,7 +2,7 @@ import { app, shell, BrowserWindow, protocol, net } from 'electron'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { promises as fs } from 'fs'
-import { join, basename } from 'path'
+import { join, basename, dirname } from 'path'
 import { pathToFileURL } from 'url'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { registerIpc, registerUpdatePreview, runtime, warmUpFonts, appUpdate } from './ipc'
@@ -19,7 +19,8 @@ import {
 } from './services/behavior'
 import { applyAutoStart, startedHidden } from './services/autostart'
 import { applyDataDir } from './services/dataDir'
-import { relaunchInstallerElevated } from './services/install'
+import { relaunchInstallerElevated, syncInstalledVersion } from './services/install'
+import { currentAppVersion } from './services/appVersion'
 
 const execFileAsync = promisify(execFile)
 import { BgStore } from './services/background'
@@ -264,6 +265,11 @@ app.whenReady().then(async () => {
   appUpdate.start()
   // Remove `app-<old version>` directories left over from previous updates.
   void appUpdate.cleanupOldVersions()
+  // An in-app upgrade changes the version pointer but not the uninstall entry /
+  // install marker — keep those in sync so the setup reports the right version.
+  if (app.isPackaged) {
+    void syncInstalledVersion(dirname(process.execPath), currentAppVersion())
+  }
 
   // One-shot download-UI preview: if `%userData%/simulate.json` exists, advertise
   // a fake update (and/or pre-download) for the given app(s), then remove the

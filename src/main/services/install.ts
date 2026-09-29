@@ -262,6 +262,45 @@ export function normalizeInstallDir(dir: string): string {
   return join(trimmed, 'KevinLauncher')
 }
 
+/**
+ * The version actually installed in `dir`.
+ *
+ * `resources/app-version.txt` is authoritative: the installer and the in-app
+ * upgrade both write it, while `install.json` / the registry entry are only
+ * written by the installer and therefore go stale after an in-app update.
+ */
+export async function installedVersion(dir: string): Promise<string | null> {
+  try {
+    const version = (await fs.readFile(join(dir, 'resources', 'app-version.txt'), 'utf8')).trim()
+    return version || null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Keeps the install marker and the uninstall entry in sync with the version that
+ * is actually installed (after an in-app upgrade they would still name the
+ * version that was installed by the setup).
+ */
+export async function syncInstalledVersion(installDir: string, version: string): Promise<void> {
+  try {
+    const info = await readInstallInfo(installDir)
+    if (info && info.version !== version) {
+      const updated: InstallInfo = { ...info, version }
+      await fs.writeFile(join(installDir, INFO_FILE), JSON.stringify(updated, null, 2), 'utf8')
+    }
+    const registered = await regQuery(UNINSTALL_KEY, 'DisplayVersion')
+    if (registered && registered !== version) {
+      await regAdd(UNINSTALL_KEY, [['DisplayVersion', 'REG_SZ', version]])
+      await regAdd(APP_KEY, [['Version', 'REG_SZ', version]])
+      log(`install: version entry updated to ${version}`)
+    }
+  } catch (error) {
+    log(`install: could not sync the version entry (${(error as Error).message})`)
+  }
+}
+
 /** Finds an existing installation (registry first, then the default path). */
 export async function detectInstallation(): Promise<DetectedInstall | null> {
   for (const [key, source] of [
@@ -270,14 +309,18 @@ export async function detectInstallation(): Promise<DetectedInstall | null> {
   ] as const) {
     const dir = await regQuery(key, 'InstallLocation')
     if (dir && (await pathExists(join(dir, EXE)))) {
-      return { dir, version: await regQuery(key, 'DisplayVersion'), source }
+      return {
+        dir,
+        version: (await installedVersion(dir)) ?? (await regQuery(key, 'DisplayVersion')),
+        source
+      }
     }
   }
   const fallback = defaultInstallDir()
   if (await pathExists(join(fallback, EXE))) {
     return {
       dir: fallback,
-      version: (await readInstallInfo(fallback))?.version ?? null,
+      version: (await installedVersion(fallback)) ?? (await readInstallInfo(fallback))?.version ?? null,
       source: 'default'
     }
   }
@@ -288,7 +331,7 @@ export async function detectInstallation(): Promise<DetectedInstall | null> {
     const dir = dirname(running[0])
     return {
       dir,
-      version: (await readInstallInfo(dir))?.version ?? null,
+      version: (await installedVersion(dir)) ?? (await readInstallInfo(dir))?.version ?? null,
       source: 'running'
     }
   }
@@ -305,7 +348,8 @@ export async function inspectTarget(dir: string): Promise<InstallTarget> {
     dir,
     exists,
     isInstalled,
-    version: info?.version ?? null,
+    // The version pointer wins: it is updated by in-app upgrades too.
+    version: isInstalled ? ((await installedVersion(dir)) ?? info?.version ?? null) : null,
     fileCount: files.length
   }
 }
