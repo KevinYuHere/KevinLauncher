@@ -19,6 +19,7 @@ import {
 } from './services/behavior'
 import { applyAutoStart, startedHidden } from './services/autostart'
 import { applyDataDir } from './services/dataDir'
+import { relaunchInstallerElevated } from './services/install'
 
 const execFileAsync = promisify(execFile)
 import { BgStore } from './services/background'
@@ -176,6 +177,21 @@ app.whenReady().then(async () => {
     // rights (games then ask for elevation when they are launched) rather than
     // leaving the user with no window at all.
     log('app: continuing without administrator rights')
+  }
+
+  // The installer always runs elevated: it may have to stop a launcher that runs
+  // elevated itself and to write into protected directories. Elevating up front
+  // (before any UI) means the setup never has to quit itself half way through —
+  // which looked like "the installer closed itself".
+  if (runMode === 'install' && !is.dev && !(await isElevated())) {
+    log('install: requesting administrator rights')
+    if (await relaunchInstallerElevated()) {
+      app.quit()
+      return
+    }
+    // UAC declined: keep going non-elevated rather than closing the setup, so
+    // the user is never left with a window that simply vanished.
+    log('install: continuing without administrator rights')
   }
 
   // Only a single instance of the *launcher* may run. The installer/uninstaller

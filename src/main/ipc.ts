@@ -11,22 +11,18 @@ import { AppStore } from './services/appStore'
 import { BgStore } from './services/background'
 import { BrandStore } from './services/brand'
 import { ensureTray, markQuitting, setCloseToTray } from './services/behavior'
-import { isElevated } from './services/elevation'
 import { applyAutoStart } from './services/autostart'
 import {
   applyPayload,
-  canWrite,
   closeRunningInstances,
   defaultInstallDir,
   detectInstallation,
   finishUninstall,
   freeSpace,
-  hasInstallDirArgument,
   inspectTarget,
   installDirArgument,
   installSize,
   normalizeInstallDir,
-  relaunchInstallerElevated,
   removeInstallation,
   runningInstances,
   writeShortcuts,
@@ -1003,29 +999,12 @@ export function registerIpc(): void {
       throw new Error('用户数据目录不能与安装目录相同，也不能互相包含')
     }
 
-    // A new directory that needs administrator rights: ask for UAC and continue
-    // in the elevated instance with the same target.
-    if (!(await canWrite(dir)) && !hasInstallDirArgument()) {
-      relaunchInstallerElevated()
-      markQuitting()
-      app.quit()
-      return false
-    }
-
-    // Files of a running launcher are locked — close the instance in this
-    // directory first (never the installer itself, which lives elsewhere).
+    // The installer runs elevated from the start (see index.ts), so nothing has
+    // to be relaunched here: a locked executable means the instance really could
+    // not be stopped — report that instead of quitting the setup.
     const free = await closeRunningInstances(dir)
     if (!free) {
-      // Not elevated: the running launcher may be, so retry from an elevated
-      // instance (which can also stop it).
-      if (!(await isElevated()) && !hasInstallDirArgument()) {
-        log('install: cannot stop the running launcher — retrying elevated')
-        relaunchInstallerElevated()
-        markQuitting()
-        app.quit()
-        return false
-      }
-      throw new Error(`无法关闭正在运行的 ${join(dir, 'KevinLauncher.exe')}，请先退出该实例后重试`)
+      throw new Error(`无法关闭正在运行的 ${join(dir, 'KevinLauncher.exe')}，请手动退出该实例后重试`)
     }
 
     await applyPayload(source, dir, (progress) => {

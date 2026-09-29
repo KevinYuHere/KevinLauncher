@@ -347,11 +347,12 @@ export async function canWrite(dir: string): Promise<boolean> {
 }
 
 /**
- * Restarts the installer elevated (UAC) when the chosen directory needs
- * administrator rights (e.g. `C:\Program Files`). The portable executable is
- * relaunched (not the extracted copy, which disappears with this process).
+ * Restarts the installer elevated (UAC). Returns false when the user declined
+ * or elevation was impossible, so the caller can continue without it. The
+ * portable executable is relaunched (not the extracted copy, which disappears
+ * with this process).
  */
-export function relaunchInstallerElevated(): void {
+export async function relaunchInstallerElevated(): Promise<boolean> {
   const exe = process.env.PORTABLE_EXECUTABLE_FILE ?? process.execPath
   const quote = (value: string): string => `'${value.replace(/'/g, "''")}'`
   const args = process.argv.slice(1).filter((arg) => !arg.startsWith('--install-dir'))
@@ -360,11 +361,16 @@ export function relaunchInstallerElevated(): void {
     `Start-Process -FilePath ${quote(exe)}` +
     (args.length ? ` -ArgumentList @(${args.map(quote).join(',')})` : '') +
     ' -Verb RunAs'
-  spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
-    detached: true,
-    stdio: 'ignore',
-    windowsHide: true
-  }).unref()
+  try {
+    await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      windowsHide: true,
+      timeout: 180_000
+    })
+    return true
+  } catch (error) {
+    log(`install: elevation failed (${(error as Error).message})`)
+    return false
+  }
 }
 
 /** `--install-dir <dir>` lets the elevated instance continue with the same target. */
