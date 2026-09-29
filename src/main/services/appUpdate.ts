@@ -1,10 +1,10 @@
 import { app, shell } from 'electron'
-import { dirname, join } from 'path'
+import { join } from 'path'
 import { promises as fs } from 'fs'
 import type { AppUpdateInfo, AppUpdateState, AppUpdateStatus } from '@shared/types'
 import { isNewerVersion } from '@shared/version'
 import { downloadPayload, extractPayload } from './updateDownload'
-import { applyStagedUpdate } from './updateApply'
+import { currentAppVersion } from './appVersion'
 import { log } from './logger'
 
 /** Owner/repository used for release checks (public GitHub API). */
@@ -93,14 +93,17 @@ async function fetchLatestRelease(): Promise<AppUpdateInfo | null> {
   // and the payload hash.
   let installSize = 0
   let payloadSha256: string | null = null
+  let electronVersion: string | null = null
   if (manifest) {
     try {
       const meta = JSON.parse(await fetchText(assetUrls(manifest))) as {
-        installSize?: number
+        appSize?: number
         payloadSha256?: string
+        electron?: string
       }
-      installSize = meta.installSize ?? 0
+      installSize = meta.appSize ?? 0
       payloadSha256 = meta.payloadSha256 ?? null
+      electronVersion = meta.electron ?? null
     } catch (error) {
       log(`appUpdate: manifest unreadable (${(error as Error).message})`)
     }
@@ -115,6 +118,7 @@ async function fetchLatestRelease(): Promise<AppUpdateInfo | null> {
     payloadSize: payload?.size ?? 0,
     payloadSha256,
     installSize,
+    electronVersion,
     publishedAt: release.published_at ?? ''
   }
 }
@@ -124,6 +128,15 @@ async function fileSize(path: string): Promise<number> {
     return (await fs.stat(path)).size
   } catch {
     return 0
+  }
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await fs.access(path)
+    return true
+  } catch {
+    return false
   }
 }
 
@@ -147,9 +160,9 @@ export class AppUpdateChecker {
   private controller: AbortController | null = null
   private running = false
 
-  /** Currently installed version (from package.json). */
+  /** Currently installed version (from `resources/app-version.txt`). */
   current(): string {
-    return app.getVersion()
+    return currentAppVersion()
   }
 
   status(): AppUpdateStatus {
@@ -237,8 +250,15 @@ export class AppUpdateChecker {
 
   private async run(info: AppUpdateInfo, controller: AbortController): Promise<void> {
     const staging = join(app.getPath('userData'), 'update-staging', info.version)
-    const archive = join(staging, 'payload.zip')
+    const archive = join(staging, 'app.zip')
     try {
+      // A new Electron runtime cannot be swapped while the launcher is running.
+      if (info.electronVersion && info.electronVersion !== process.versions.electron) {
+        throw new Error(
+          `本次更新需要新的运行库（Electron ${info.electronVersion}），请下载安装包进行覆盖安装`
+        )
+      }
+
       await fs.mkdir(staging, { recursive: true })
 
       // 1) download (resumes from the .part files when restarted after a pause).
@@ -271,21 +291,23 @@ export class AppUpdateChecker {
         throw new Error('更新包大小不匹配')
       }
 
-      // 2) install: unpack into the staging directory (not pausable).
+      // 2) install: unpack into a *new* version directory. Nothing in use is
+      // touched, so the launcher keeps running and showing progress.
       this.patch({ phase: 'installing', percent: 100, installPercent: 0, message: '正在安装更新…' })
-      const unpacked = join(staging, 'app')
-      await extractPayload(archive, unpacked, info.installSize, (bytes, total) => {
+      const target = join(process.resourcesPath, `app-${info.version}`)
+      await extractPayload(archive, target, info.installSize, (bytes, total) => {
         this.patch({ installPercent: total > 0 ? Math.min(100, (bytes / total) * 100) : 0 })
       })
-      await fs.rm(archive, { force: true }).catch(() => {})
+      if (!(await pathExists(join(target, 'out', 'main', 'index.js')))) {
+        throw new Error('更新包内容不完整')
+      }
 
-      // 3) hand over to the helper, which restarts the launcher afterwards.
-      this.patch({
-        phase: 'done',
-        installPercent: 100,
-        message: '更新完成，正在重启…'
-      })
-      await applyStagedUpdate(unpacked, dirname(app.getPath('exe')))
+      // 3) switch: flip the version pointer and restart into the new version.
+      this.patch({ phase: 'done', installPercent: 100, message: '更新完成，正在重启…' })
+      await this.switchTo(info.version)
+      await fs.rm(staging, { recursive: true, force: true }).catch(() => {})
+      app.relaunch()
+      app.exit(0)
     } catch (error) {
       if (controller.signal.aborted) {
         log('appUpdate: paused')
@@ -295,6 +317,36 @@ export class AppUpdateChecker {
       const message = (error as Error).message
       log(`appUpdate: failed: ${message}`)
       this.patch({ phase: 'error', message: '更新失败', error: message })
+    }
+  }
+
+  /** Atomically rewrites the version pointer read by the shell loader. */
+  private async switchTo(version: string): Promise<void> {
+    const pointer = join(process.resourcesPath, 'app-version.txt')
+    const temp = `${pointer}.tmp`
+    await fs.writeFile(temp, version, 'utf-8')
+    await fs.rename(temp, pointer)
+    log(`appUpdate: version pointer -> ${version}`)
+  }
+
+  /** Deletes leftover `app-<other version>` directories (best effort). */
+  async cleanupOldVersions(): Promise<void> {
+    if (!app.isPackaged) return
+    const keep = `app-${currentAppVersion()}`
+    try {
+      // Only directories: the version pointer (`app-version.txt`) also starts
+      // with "app-" and must never be removed.
+      const entries = await fs.readdir(process.resourcesPath, { withFileTypes: true })
+      for (const entry of entries) {
+        if (!entry.isDirectory() || !entry.name.startsWith('app-')) continue
+        if (entry.name === keep) continue
+        log(`appUpdate: removing old version directory ${entry.name}`)
+        await fs
+          .rm(join(process.resourcesPath, entry.name), { recursive: true, force: true })
+          .catch(() => {})
+      }
+    } catch {
+      /* nothing to clean */
     }
   }
 }

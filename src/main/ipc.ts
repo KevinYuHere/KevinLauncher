@@ -28,6 +28,7 @@ import { getHoYoUpdateInfo } from './update/hoyoplay'
 import { getArknightsUpdateInfo } from './update/arknightsUpdate'
 import { UpdateManager } from './update/updateManager'
 import { AppUpdateChecker } from './services/appUpdate'
+import { currentAppVersion } from './services/appVersion'
 import { log } from './services/logger'
 
 export const runtime = new Runtime()
@@ -328,7 +329,7 @@ export function registerIpc(): void {
   })
 
   ipcMain.handle('fonts:list', () => listSystemFonts())
-  ipcMain.handle('app:version', () => app.getVersion())
+  ipcMain.handle('app:version', () => currentAppVersion())
 
   ipcMain.handle('launcher:getSettings', () => AppStore.launcherSettings())
 

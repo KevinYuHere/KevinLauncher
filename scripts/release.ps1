@@ -62,7 +62,7 @@ $assets = @(
   (Join-Path $root "release\KevinLauncher-Setup-$Version.exe"),
   (Join-Path $root "release\KevinLauncher-Setup-$Version.exe.blockmap"),
   (Join-Path $root 'release\latest.yml'),
-  (Join-Path $root "release\KevinLauncher-$Version.zip"),
+  (Join-Path $root "release\KevinLauncher-$Version-app.zip"),
   (Join-Path $root 'release\update-manifest.json')
 )
 $assets | ForEach-Object {

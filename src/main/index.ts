@@ -176,6 +176,8 @@ app.whenReady().then(async () => {
 
   // Check GitHub Releases shortly after launch, then every 24 hours.
   appUpdate.start()
+  // Remove `app-<old version>` directories left over from previous updates.
+  void appUpdate.cleanupOldVersions()
 
   // One-shot download-UI preview: if `%userData%/simulate.json` exists, advertise
   // a fake update (and/or pre-download) for the given app(s), then remove the

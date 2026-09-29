@@ -277,8 +277,10 @@ export interface AppUpdateInfo {
   payloadSize: number
   /** Hex SHA-256 of the payload, from the release manifest. */
   payloadSha256: string | null
-  /** Total bytes of the unpacked app — the denominator of the install progress. */
+  /** Total bytes of the unpacked application — denominator of install progress. */
   installSize: number
+  /** Electron version the release was built with ('' when unknown). */
+  electronVersion: string | null
   publishedAt: string
 }
 

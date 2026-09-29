@@ -3,9 +3,17 @@ productName: KevinLauncher
 directories:
   output: release
   buildResources: build
+# The packaged app is a tiny, version-independent entry point (shell/) plus a
+# versioned application directory (resources/app-<version>/, provided as
+# extraResources below). An update writes a new version directory while the app
+# is running and only flips resources/app-version.txt — see docs/INSTALLER.md.
+# asar is disabled so the entry point is plain files under resources/app/.
+asar: false
 files:
-  - out/**/*
-  - package.json
+  - from: shell
+    to: .
+# Writes resources/app-version.txt (and validates the layout below).
+afterPack: scripts/afterPack.js
 extraResources:
   - from: resources/hpatchz.exe
     to: hpatchz.exe
@@ -13,10 +21,13 @@ extraResources:
     to: icon.png
   - from: resources/icon.ico
     to: icon.ico
-# Used by electron-updater: produces latest.yml + the installer blockmap so the
-# app can be updated differentially (only changed byte ranges are downloaded).
-# Nothing is uploaded here — publish with `--publish never` and attach the files
-# to a GitHub release manually, or use `gh release create`.
+  # The actual application code, one directory per version.
+  - from: out
+    to: app-${version}/out
+  - from: package.json
+    to: app-${version}/package.json
+# Used by electron-updater-style tooling and to publish latest.yml + a blockmap.
+# Nothing is uploaded here — use scripts/release.ps1.
 publish:
   provider: github
   owner: KevinYuHere
@@ -24,13 +35,16 @@ publish:
 win:
   icon: resources/icon.ico
   # Signing/resource-editing needs the winCodeSign tool (network download).
-  # We set the exe icon afterwards with the locally cached rcedit instead.
+  # scripts/release.ps1 sets the exe icon with the locally cached rcedit instead.
   signAndEditExecutable: false
   target:
     - nsis
+    - portable
   # Launcher runs elevated so game clients can be launched/tracked without
   # repeated UAC prompts.
   requestedExecutionLevel: requireAdministrator
+portable:
+  artifactName: ${productName}-Setup-${version}.${ext}
 nsis:
   oneClick: false
   perMachine: false

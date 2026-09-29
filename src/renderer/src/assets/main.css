@@ -268,10 +268,15 @@ body {
   grid-template-columns: 0fr;
   opacity: 0;
 }
+/* The collapse animation needs `overflow: hidden`, which clips at the padding
+   box — so the chips' hover shadow (0 8px 20px) is cut off at the bottom/left.
+   The padding gives the shadow room and the negative margins cancel it out
+   again, keeping the collapsed width at zero. */
 .games-collapser > .games {
   overflow: hidden;
   min-width: 0;
-  padding-right: 6px;
+  padding: 16px 28px 34px 24px;
+  margin: -16px -22px -34px -24px;
 }
 .games-toggle {
   flex: 0 0 auto;

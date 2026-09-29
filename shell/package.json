@@ -1,0 +1,7 @@
+{
+  "name": "kevin-launcher-shell",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Stable entry point that loads the versioned application directory.",
+  "main": "./out/main/index.js"
+}

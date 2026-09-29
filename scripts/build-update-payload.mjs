@@ -6,16 +6,19 @@ import { join, relative, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
 
 /**
- * Builds the update payload assets for a release from an unpacked app directory
- * (release/win-unpacked):
+ * Builds the update payload for a release.
  *
- *   release/KevinLauncher-<version>.zip   the app tree (zip, deflate)
- *   release/update-manifest.json          { version, installSize, payloadSha256 }
+ * The packaged launcher keeps its code in `resources/app-<version>/` and the
+ * current version in `resources/app-version.txt` (see docs/INSTALLER.md), so an
+ * update only ships the **application code** — a few MB instead of the whole
+ * unpacked app:
  *
- * The in-app updater downloads the zip (multi-connection, resumable, pausable),
- * unpacks it into a staging directory (the "install progress" shown in the UI)
- * and swaps the files after restarting — so the user never sees the NSIS
- * installer UI and never has to choose anything.
+ *   release/KevinLauncher-<version>-app.zip   resources/app-<version>/ of the build
+ *   release/update-manifest.json              { version, electron, appSize,
+ *                                               payloadSize, payloadSha256 }
+ *
+ * The launcher unpacks it into a fresh `resources/app-<new version>/` while it is
+ * running (nothing in use is touched), then flips `app-version.txt` and restarts.
  *
  * Usage: node scripts/build-update-payload.mjs [unpackedDir] [version]
  */
@@ -28,6 +31,17 @@ const version =
 /** Assets are written next to the unpacked directory (release/ by default). */
 const outDir = resolve(unpacked, '..')
 
+/** The application directory of this build. */
+const appSource = join(unpacked, 'resources', `app-${version}`)
+if (!(await fs.stat(appSource).catch(() => null))) {
+  throw new Error(`找不到应用目录 ${appSource}（先运行 electron-builder）`)
+}
+
+/** Electron version the app was built against (updates need a matching runtime). */
+const electron = JSON.parse(
+  await fs.readFile(join(root, 'node_modules', 'electron', 'package.json'), 'utf8')
+).version
+
 /** Recursively lists every file, relative to `base` (always `/` separated). */
 async function walk(base, dir = base, out = []) {
   for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
@@ -38,15 +52,15 @@ async function walk(base, dir = base, out = []) {
   return out
 }
 
-const files = await walk(unpacked)
-const installSize = (
-  await Promise.all(files.map(async (path) => (await fs.stat(join(unpacked, ...path.split('/')))).size))
+const files = await walk(appSource)
+const appSize = (
+  await Promise.all(files.map(async (path) => (await fs.stat(join(appSource, ...path.split('/')))).size))
 ).reduce((sum, size) => sum + size, 0)
 
 // bsdtar (shipped with Windows) picks the format from the extension.
-const zipPath = join(outDir, `KevinLauncher-${version}.zip`)
+const zipPath = join(outDir, `KevinLauncher-${version}-app.zip`)
 await fs.rm(zipPath, { force: true })
-await exec('tar', ['-a', '-cf', zipPath, '-C', unpacked, '.'], { maxBuffer: 32 * 1024 * 1024 })
+await exec('tar', ['-a', '-cf', zipPath, '-C', appSource, '.'], { maxBuffer: 32 * 1024 * 1024 })
 
 const payloadSha256 = await new Promise((resolveHash, reject) => {
   const hash = createHash('sha256')
@@ -59,12 +73,12 @@ const { size: payloadSize } = await fs.stat(zipPath)
 
 await fs.writeFile(
   join(outDir, 'update-manifest.json'),
-  JSON.stringify({ version, installSize, payloadSha256, payloadSize }, null, 2),
+  JSON.stringify({ version, electron, appSize, payloadSize, payloadSha256 }, null, 2),
   'utf8'
 )
 
 console.log(
-  `KevinLauncher-${version}.zip  ${files.length} files, ${(payloadSize / 1048576).toFixed(1)} MB packed` +
-    ` (${(installSize / 1048576).toFixed(1)} MB unpacked)`
+  `KevinLauncher-${version}-app.zip  ${files.length} files, ${(payloadSize / 1048576).toFixed(2)} MB packed` +
+    ` (${(appSize / 1048576).toFixed(2)} MB unpacked) · electron ${electron}`
 )
-console.log('update-manifest.json       written')
+console.log('update-manifest.json            written')
