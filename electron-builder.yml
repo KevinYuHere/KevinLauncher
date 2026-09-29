@@ -1,0 +1,30 @@
+appId: com.kevin.kevinlauncher
+productName: KevinLauncher
+directories:
+  output: release
+files:
+  - out/**/*
+  - package.json
+extraResources:
+  - from: resources/hpatchz.exe
+    to: hpatchz.exe
+  - from: resources/icon.png
+    to: icon.png
+  - from: resources/icon.ico
+    to: icon.ico
+win:
+  icon: resources/icon.ico
+  # Signing/resource-editing needs the winCodeSign tool (network download).
+  # We set the exe icon afterwards with the locally cached rcedit instead.
+  signAndEditExecutable: false
+  target:
+    - nsis
+  # Launcher runs elevated so game clients can be launched/tracked without
+  # repeated UAC prompts.
+  requestedExecutionLevel: requireAdministrator
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
