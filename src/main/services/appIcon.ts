@@ -75,17 +75,73 @@ export async function launcherIconPaths(): Promise<{ png: string; ico: string }>
 }
 
 /**
- * Windows caches shortcut/taskbar icons aggressively: writing a new icon into a
- * .lnk often is not visible until the cache is refreshed. `ie4uinit.exe -show`
- * is the documented way to rebuild it without restarting Explorer.
+ * Tells the shell to forget the cached bitmaps and re-read the shortcut icons.
+ *
+ * Three layers cache them and each needs its own nudge:
+ *  1. the on-disk icon database (`ie4uinit.exe -show`),
+ *  2. the shell's in-memory item cache (`SHChangeNotify(SHCNE_UPDATEITEM)` per
+ *     .lnk, plus `SHCNE_ASSOCCHANGED`),
+ *  3. the Start Menu host's own cache — only restarting
+ *     `StartMenuExperienceHost.exe` drops it (Windows starts it again by itself).
+ *
+ * `restartStartMenu` is only used for user-initiated icon changes, so a normal
+ * launch never makes the Start Menu blink.
  */
-function refreshIconCache(): void {
+function notifyShell(
+  shortcuts: string[],
+  options: { iconCache: boolean; restartStartMenu: boolean }
+): void {
+  if (options.iconCache) {
+    const list = shortcuts.map((path) => `'${path.replace(/'/g, "''")}'`).join(',')
+    const script = `
+$sig = @'
+using System;
+using System.Runtime.InteropServices;
+public static class KevinShellNotify {
+  [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+  public static extern void SHChangeNotify(int eventId, uint flags, IntPtr item1, IntPtr item2);
+}
+'@
+Add-Type -TypeDefinition $sig -ErrorAction SilentlyContinue
+foreach ($p in @(${list})) {
+  $ptr = [System.Runtime.InteropServices.Marshal]::StringToHGlobalUni($p)
+  [KevinShellNotify]::SHChangeNotify(0x2000, 0x0005, $ptr, [IntPtr]::Zero)
+  [System.Runtime.InteropServices.Marshal]::FreeHGlobal($ptr)
+}
+[KevinShellNotify]::SHChangeNotify(0x08000000, 0x1000, [IntPtr]::Zero, [IntPtr]::Zero)
+`
+    execFile(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-Command', script],
+      { windowsHide: true },
+      () => {
+        /* best effort */
+      }
+    )
+  }
+
   try {
     execFile('ie4uinit.exe', ['-show'], { windowsHide: true }, () => {
       /* best effort */
     })
   } catch {
     /* not available on every build */
+  }
+
+  if (options.restartStartMenu) {
+    execFile(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        'Get-Process StartMenuExperienceHost -ErrorAction SilentlyContinue | Stop-Process -Force'
+      ],
+      { windowsHide: true },
+      () => {
+        /* Windows starts the Start Menu again automatically */
+      }
+    )
   }
 }
 
