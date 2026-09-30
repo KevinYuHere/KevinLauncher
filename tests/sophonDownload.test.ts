@@ -4,13 +4,21 @@ import { createHash } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { zstdCompressSync } from 'node:zlib'
+import zlib from 'node:zlib'
 import {
   downloadSophonBuild,
   type SophonAsset,
   type SophonBuild,
   type SophonChunk
 } from '../src/main/update/sophon'
+
+// `zlib.zstdCompressSync` only exists on Node 22.15+/24; the fixtures need it, so
+// the suite is skipped (rather than failing) on older runtimes.
+const zstdCompressSync = (
+  zlib as unknown as { zstdCompressSync?: (data: Buffer) => Buffer }
+).zstdCompressSync
+const hasZstd = typeof zstdCompressSync === 'function'
+const zstd = (data: Buffer): Buffer => zstdCompressSync!(data)
 
 // --- tiny proto3 writer matching the reader inside sophon.ts ----------------
 
@@ -98,10 +106,10 @@ beforeAll(async () => {
       }
       if (corruptOnce.has(name)) {
         corruptOnce.delete(name)
-        res.end(zstdCompressSync(Buffer.from('corrupt')))
+        res.end(zstd(Buffer.from('corrupt')))
         return
       }
-      res.end(zstdCompressSync(body))
+      res.end(zstd(body))
     }, 10)
   })
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
@@ -141,11 +149,11 @@ function makeBuild(): SophonBuild {
 const tmpDir = (): Promise<string> => fs.mkdtemp(join(tmpdir(), 'sophon-test-'))
 const read = (p: string): Promise<Buffer> => fs.readFile(p)
 
-describe('downloadSophonBuild', () => {
+describe.skipIf(!hasZstd)('downloadSophonBuild', () => {
   it('downloads chunks concurrently and assembles the asset', async () => {
     const names = Array.from({ length: 40 }, (_, i) => `ch${String(i).padStart(3, '0')}`)
     const asset = makeAsset('big.bin', names)
-    manifestZstd = zstdCompressSync(encodeManifest([asset]))
+    manifestZstd = zstd(encodeManifest([asset]))
     const dest = await tmpDir()
 
     await downloadSophonBuild(makeBuild(), dest, () => {})
@@ -157,7 +165,7 @@ describe('downloadSophonBuild', () => {
 
   it('reports monotonically increasing progress up to the total', async () => {
     const asset = makeAsset('p.bin', ['p1', 'p2', 'p3', 'p4'])
-    manifestZstd = zstdCompressSync(encodeManifest([asset]))
+    manifestZstd = zstd(encodeManifest([asset]))
     const dest = await tmpDir()
     const seen: number[] = []
 
@@ -169,7 +177,7 @@ describe('downloadSophonBuild', () => {
 
   it('retries the asset when a chunk fails its md5 check', async () => {
     const asset = makeAsset('retry.bin', ['r1', 'r2', 'r3'])
-    manifestZstd = zstdCompressSync(encodeManifest([asset]))
+    manifestZstd = zstd(encodeManifest([asset]))
     corruptOnce.add('r2')
     const dest = await tmpDir()
 
@@ -183,7 +191,7 @@ describe('downloadSophonBuild', () => {
 
   it('throws after exhausting retries on a permanently bad chunk', async () => {
     const asset = makeAsset('bad.bin', ['b1', 'b2'])
-    manifestZstd = zstdCompressSync(encodeManifest([asset]))
+    manifestZstd = zstd(encodeManifest([asset]))
     // Always serve corrupt bytes: replace the body with something wrong.
     chunkBodies.set('b1', Buffer.from('XXXX'))
     const dest = await tmpDir()
@@ -194,7 +202,7 @@ describe('downloadSophonBuild', () => {
 
   it('skips unchanged files (resume)', async () => {
     const asset = makeAsset('keep.bin', ['k1', 'k2'])
-    manifestZstd = zstdCompressSync(encodeManifest([asset]))
+    manifestZstd = zstd(encodeManifest([asset]))
     const dest = await tmpDir()
     await fs.writeFile(join(dest, 'keep.bin'), expectedContent(['k1', 'k2']))
 
@@ -206,7 +214,7 @@ describe('downloadSophonBuild', () => {
   it('completes an update from a partially pre-downloaded build', async () => {
     const done = makeAsset('done.bin', ['d1', 'd2'])
     const partial = makeAsset('partial.bin', ['p1', 'p2'])
-    manifestZstd = zstdCompressSync(encodeManifest([done, partial]))
+    manifestZstd = zstd(encodeManifest([done, partial]))
 
     // Pre-download was cancelled halfway: done.bin is complete, partial.bin only
     // has its first chunk.

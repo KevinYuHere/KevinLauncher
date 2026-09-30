@@ -31,7 +31,9 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # Node 22.15+/24 provides zlib.zstdCompressSync, which the sophon tests
+          # use to build their fixtures (they are skipped on older runtimes).
+          node-version: 24
           cache: npm
 
       - name: Read the version
