@@ -1,15 +1,22 @@
+# dependencies
 node_modules/
-out/
-dist/
-release/
-release-*/
-logs/
+
+# build output — anchored to the repository root on purpose: shell/out/ is a
+# source file (the loader shim) and must stay tracked.
+/out/
+/dist/
+/release/
+/release-*/
+/logs/
+
 *.log
 .DS_Store
 .env
 .env.*
 !.env.example
 *.local
+
+# local scratch
 icon-candidates/
 .vscode/
 .idea/
