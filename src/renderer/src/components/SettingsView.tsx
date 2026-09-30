@@ -4,8 +4,10 @@ import type {
   AppEntry,
   AutoStartMode,
   CloseAction,
-  LauncherSettings
+  LauncherSettings,
+  UsageReport
 } from '@shared/types'
+import { formatBytes } from '../format'
 import { brandUrl, defaultIconUrl } from '../media'
 
 /** Project repository (shown in the "About" section). */
@@ -65,6 +67,9 @@ interface SettingsViewProps {
   /** Current data directory (config, playtime, gacha, icons …). */
   dataDir: string
   onChangeDataDir: () => void
+  /** Disk usage of the cleanable caches. */
+  usage: UsageReport | null
+  onCleanUsage: (kinds: ('staging' | 'thumbs' | 'logs')[]) => void
   /** Manually check GitHub Releases for a newer launcher version. */
   onCheckUpdate: () => void
   checkingUpdate: boolean
@@ -205,6 +210,8 @@ export default function SettingsView({
   onImportData,
   dataDir,
   onChangeDataDir,
+  usage,
+  onCleanUsage,
   onCheckUpdate,
   checkingUpdate,
   updateCheckText
@@ -553,6 +560,39 @@ export default function SettingsView({
               />
 
               <Row name="当前版本" desc={version} />
+
+              <div className="settings-section">
+                <div className="settings-section-title">清理与占用</div>
+                <div className="about-line">
+                  <span className="about-key">升级暂存</span>
+                  <span className="usage-value">{formatBytes(usage?.staging ?? 0)}</span>
+                </div>
+                <div className="about-line">
+                  <span className="about-key">缩略图缓存</span>
+                  <span className="usage-value">{formatBytes(usage?.thumbs ?? 0)}</span>
+                </div>
+                <div className="about-line">
+                  <span className="about-key">日志</span>
+                  <span className="usage-value">{formatBytes(usage?.logs ?? 0)}</span>
+                </div>
+                <div className="media-row" style={{ gap: 8, marginTop: 12 }}>
+                  <button className="btn sm" onClick={() => onCleanUsage(['staging'])}>
+                    清理暂存
+                  </button>
+                  <button className="btn sm" onClick={() => onCleanUsage(['thumbs'])}>
+                    清理缩略图
+                  </button>
+                  <button className="btn sm" onClick={() => onCleanUsage(['logs'])}>
+                    清理日志
+                  </button>
+                  <button
+                    className="btn sm ghost"
+                    onClick={() => onCleanUsage(['staging', 'thumbs', 'logs'])}
+                  >
+                    全部清理
+                  </button>
+                </div>
+              </div>
 
               <div className="settings-section">
                 <div className="settings-section-title">关于 · 开源与致谢</div>

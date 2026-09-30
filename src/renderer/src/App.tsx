@@ -8,7 +8,8 @@ import type {
   NewAppEntry,
   RunningApp,
   UpdateInfo,
-  UpdateStatus
+  UpdateStatus,
+  UsageReport
 } from '@shared/types'
 import Rail from './components/Rail'
 import GamesRow from './components/GamesRow'
@@ -91,6 +92,7 @@ export default function App(): ReactElement {
   const [updateCheckText, setUpdateCheckText] = useState('')
   const [dataDir, setDataDir] = useState('')
   const [programDir, setProgramDir] = useState('')
+  const [usage, setUsage] = useState<UsageReport | null>(null)
 
   const refreshApps = useCallback(async (): Promise<void> => {
     setApps(await window.api.listApps())
@@ -140,6 +142,7 @@ export default function App(): ReactElement {
       setDataDir(info.current)
       setProgramDir(info.programDir)
     })
+    void window.api.housekeepingUsage().then(setUsage)
     return window.api.onLauncherChanged(() =>
       void window.api.getLauncherSettings().then(setLauncherSettings)
     )
@@ -242,6 +245,19 @@ export default function App(): ReactElement {
       setCheckingUpdate(false)
     }
   }, [showToast])
+
+  /** Cleans the selected caches and refreshes the usage report. */
+  const handleCleanUsage = useCallback(
+    async (kinds: ('staging' | 'thumbs' | 'logs')[]): Promise<void> => {
+      try {
+        setUsage(await window.api.housekeepingClean(kinds))
+        showToast('已清理所选缓存')
+      } catch (error) {
+        showToast(`清理失败：${(error as Error).message}`)
+      }
+    },
+    [showToast]
+  )
 
   /** Moves every setting to a new data directory (the launcher restarts). */
   const handleChangeDataDir = useCallback(async (): Promise<void> => {
@@ -522,6 +538,8 @@ export default function App(): ReactElement {
         onImportData={() => void importData()}
         dataDir={dataDir}
         onChangeDataDir={() => void handleChangeDataDir()}
+        usage={usage}
+        onCleanUsage={(kinds) => void handleCleanUsage(kinds)}
         onCheckUpdate={() => void handleCheckUpdate()}
         checkingUpdate={checkingUpdate}
         updateCheckText={updateCheckText}

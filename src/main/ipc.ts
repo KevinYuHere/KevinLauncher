@@ -29,6 +29,7 @@ import {
   writeUninstallEntry
 } from './services/install'
 import { directorySize } from './services/updateDownload'
+import { clean, usage } from './services/housekeeping'
 import { directoriesOverlap } from '@shared/paths'
 import {
   currentDataDir,
@@ -62,6 +63,9 @@ import { log } from './services/logger'
 export const runtime = new Runtime()
 export const updates = new UpdateManager()
 export const appUpdate = new AppUpdateChecker()
+
+/** Single reusable image viewer window (see `gallery:openViewer`). */
+let viewerWindow: BrowserWindow | null = null
 
 function broadcast(channel: string, payload?: unknown): void {
   for (const win of BrowserWindow.getAllWindows()) {
@@ -842,6 +846,20 @@ export function registerIpc(): void {
   })
 
   ipcMain.handle('gallery:openViewer', (_e, path: string) => {
+    const hash = `viewer=${encodeURIComponent(path)}`
+    const devUrl = process.env['ELECTRON_RENDERER_URL']
+
+    // Reuse a single viewer window: opening many images must not spawn a renderer
+    // process (and a window) per image.
+    if (viewerWindow && !viewerWindow.isDestroyed()) {
+      if (devUrl) void viewerWindow.loadURL(`${devUrl}#${hash}`)
+      else void viewerWindow.loadFile(join(__dirname, '../renderer/index.html'), { hash })
+      if (viewerWindow.isMinimized()) viewerWindow.restore()
+      viewerWindow.show()
+      viewerWindow.focus()
+      return
+    }
+
     const viewer = new BrowserWindow({
       width: 1040,
       height: 740,
@@ -853,9 +871,11 @@ export function registerIpc(): void {
       title: '查看图片',
       webPreferences: { preload: join(__dirname, '../preload/index.js'), sandbox: false }
     })
+    viewerWindow = viewer
+    viewer.on('closed', () => {
+      if (viewerWindow === viewer) viewerWindow = null
+    })
     viewer.setMenuBarVisibility(false)
-    const hash = `viewer=${encodeURIComponent(path)}`
-    const devUrl = process.env['ELECTRON_RENDERER_URL']
     if (devUrl) viewer.loadURL(`${devUrl}#${hash}`)
     else viewer.loadFile(join(__dirname, '../renderer/index.html'), { hash })
   })
@@ -956,7 +976,7 @@ export function registerIpc(): void {
   appUpdate.onUpdate((info) => broadcast('app-update:available', info))
   appUpdate.onState((state) => broadcast('app-update:state', state))
   ipcMain.handle('appUpdate:status', () => appUpdate.status())
-  ipcMain.handle('appUpdate:check', () => appUpdate.check())
+  ipcMain.handle('appUpdate:check', () => appUpdate.check('manual'))
   ipcMain.handle('appUpdate:state', () => appUpdate.stateSnapshot())
   ipcMain.handle('appUpdate:start', () => appUpdate.begin())
   ipcMain.handle('appUpdate:toggle', () => appUpdate.toggle())
@@ -1023,7 +1043,15 @@ export function registerIpc(): void {
       const target = normalizeDataDir(requestedDataDir)
       const fallback = defaultDataDir()
       if (target.toLowerCase() !== fallback.toLowerCase()) {
-        if (await hasData(fallback)) await migrateData(fallback, target)
+        if (await hasData(fallback)) {
+          const { copied, failed } = await migrateData(fallback, target)
+          // Only remove the old directory when everything arrived and the new
+          // one is verifiably usable.
+          if (failed === 0 && copied > 0 && (await hasData(target))) {
+            await fs.rm(fallback, { recursive: true, force: true }).catch(() => undefined)
+            log(`install: removed the old data directory ${fallback}`)
+          }
+        }
         await writeDataDir(target)
         log(`install: data directory set to ${target}`)
       } else {
@@ -1107,6 +1135,12 @@ export function registerIpc(): void {
     markQuitting()
     app.quit()
   })
+
+  // --- disk housekeeping (settings → 清理与占用) ----------------------------
+  ipcMain.handle('housekeeping:usage', () => usage())
+  ipcMain.handle('housekeeping:clean', (_e, kinds: ('staging' | 'thumbs' | 'logs')[]) =>
+    clean(kinds)
+  )
 
   ipcMain.handle('window:minimize', (e) => {
     BrowserWindow.fromWebContents(e.sender)?.minimize()

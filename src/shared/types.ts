@@ -372,6 +372,17 @@ export interface UninstallerInfo {
   installSize: number
 }
 
+/** Disk usage of the caches the launcher can clean up. */
+export interface UsageReport {
+  /** Staged update downloads (`update-staging`). */
+  staging: number
+  /** Gallery thumbnail cache (`thumbs`). */
+  thumbs: number
+  /** Log files. */
+  logs: number
+  total: number
+}
+
 /** API exposed on `window.api` through the preload context bridge. */
 export interface KevinApi {
   listAddons(): Promise<AddonDescriptor[]>
@@ -498,6 +509,11 @@ export interface KevinApi {
   /** Moves the existing data to `dir` and restarts the launcher. */
   dataDirSet(dir: string): Promise<void>
   onDataDirProgress(callback: (progress: { step: string }) => void): () => void
+
+  /** --- disk housekeeping (settings → 清理与占用) --- */
+  housekeepingUsage(): Promise<UsageReport>
+  /** Cleans the requested caches and returns the new usage. */
+  housekeepingClean(kinds: ('staging' | 'thumbs' | 'logs')[]): Promise<UsageReport>
 
   windowMinimize(): Promise<void>
   windowToggleMaximize(): Promise<boolean>

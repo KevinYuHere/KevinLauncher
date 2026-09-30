@@ -107,25 +107,22 @@ export function isTransientEntry(name: string): boolean {
 }
 
 /**
- * Recursively copies `from` into `to`, skipping transient entries and any file
- * that is currently locked (a locked cache file must not abort the migration).
+ * Recursively copies `from` into `to`, skipping transient entries and reporting
+ * files that could not be copied (a locked cache file must not abort the
+ * migration, but it must also keep us from deleting the source).
  */
 export async function migrateData(
   from: string,
   to: string,
   onSkip?: (name: string) => void
-): Promise<{ copied: number; skipped: number }> {
-  if (from.toLowerCase() === to.toLowerCase()) return { copied: 0, skipped: 0 }
+): Promise<{ copied: number; failed: number }> {
+  if (from.toLowerCase() === to.toLowerCase()) return { copied: 0, failed: 0 }
   let copied = 0
-  let skipped = 0
+  let failed = 0
   const walk = async (dir: string, target: string, top: boolean): Promise<void> => {
     await fs.mkdir(target, { recursive: true })
     for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
-      if (top && isTransientEntry(entry.name)) {
-        skipped++
-        onSkip?.(entry.name)
-        continue
-      }
+      if (top && isTransientEntry(entry.name)) continue
       const source = join(dir, entry.name)
       const destination = join(target, entry.name)
       try {
@@ -135,14 +132,14 @@ export async function migrateData(
           copied++
         }
       } catch (error) {
-        skipped++
+        failed++
         onSkip?.(entry.name)
-        log(`dataDir: skipped ${entry.name} (${(error as Error).message})`)
+        log(`dataDir: could not copy ${entry.name} (${(error as Error).message})`)
       }
     }
   }
   await walk(from, to, true)
-  return { copied, skipped }
+  return { copied, failed }
 }
 
 /** True when `dir` holds an existing launcher configuration. */
@@ -157,7 +154,8 @@ export async function hasData(dir: string): Promise<boolean> {
 
 /**
  * Switches the data directory: moves the current contents there, remembers the
- * choice and restarts the launcher.
+ * choice and restarts the launcher. The old directory is only removed once the
+ * copy completed without errors and the new one is verifiably usable.
  */
 export async function switchDataDir(
   target: string,
@@ -166,9 +164,19 @@ export async function switchDataDir(
   const from = currentDataDir()
   await fs.mkdir(target, { recursive: true })
   onProgress?.(`正在迁移数据到 ${target}…`)
-  const { copied, skipped } = await migrateData(from, target)
+  const { copied, failed } = await migrateData(from, target)
   await writeDataDir(target)
-  log(`dataDir: switched to ${target} (${copied} files copied, ${skipped} skipped)`)
+  log(`dataDir: switched to ${target} (${copied} copied, ${failed} failed)`)
+
+  if (failed === 0 && copied > 0 && (await hasData(target))) {
+    onProgress?.('正在清理旧目录…')
+    await fs.rm(from, { recursive: true, force: true }).catch((error) => {
+      log(`dataDir: could not remove the old directory (${(error as Error).message})`)
+    })
+  } else if (failed > 0) {
+    log(`dataDir: keeping ${from} because ${failed} file(s) could not be copied`)
+  }
+
   app.relaunch()
   app.exit(0)
 }

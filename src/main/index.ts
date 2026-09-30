@@ -20,6 +20,7 @@ import {
 import { applyAutoStart, startedHidden } from './services/autostart'
 import { applyDataDir } from './services/dataDir'
 import { relaunchInstallerElevated, syncInstalledVersion } from './services/install'
+import { cleanUpdateStaging } from './services/housekeeping'
 import { currentAppVersion } from './services/appVersion'
 
 const execFileAsync = promisify(execFile)
@@ -265,6 +266,8 @@ app.whenReady().then(async () => {
   appUpdate.start()
   // Remove `app-<old version>` directories left over from previous updates.
   void appUpdate.cleanupOldVersions()
+  // Drop staged update downloads that are not for the running version.
+  void cleanUpdateStaging()
   // An in-app upgrade changes the version pointer but not the uninstall entry /
   // install marker — keep those in sync so the setup reports the right version.
   if (app.isPackaged) {

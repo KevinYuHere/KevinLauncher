@@ -2370,6 +2370,11 @@ textarea:focus-visible {
   font-weight: 600;
   opacity: 0.7;
 }
+.usage-value {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.75;
+}
 .about-deps {
   display: flex;
   flex-direction: column;

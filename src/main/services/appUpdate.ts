@@ -305,8 +305,10 @@ export class AppUpdateChecker {
   private state: AppUpdateState = { ...IDLE_STATE }
   private controller: AbortController | null = null
   private running = false
-  /** Timestamp of the last successful check (throttles manual checks). */
-  private lastCheck = 0
+  /** Timestamp of the last successful automatic check. */
+  private lastAutoCheck = 0
+  /** Timestamp of the last successful manual check (independent cooldown). */
+  private lastManualCheck = 0
   /** Timestamp of the last failed attempt (retry backoff). */
   private failedAt = 0
   /** Automatic checks are skipped until this timestamp after a 403. */
@@ -348,33 +350,36 @@ export class AppUpdateChecker {
   start(): void {
     void (async (): Promise<void> => {
       await this.loadCache()
-      setTimeout(() => void this.check(), STARTUP_DELAY)
-      setInterval(() => void this.check(), CHECK_INTERVAL)
+      setTimeout(() => void this.check('auto'), STARTUP_DELAY)
+      setInterval(() => void this.check('auto'), CHECK_INTERVAL)
     })()
   }
 
-  /** Result of the last check, cached on disk for a day. */
+  /** Result of the last checks, cached on disk for a day (per kind). */
   private async loadCache(): Promise<void> {
     try {
       const raw = JSON.parse(await fs.readFile(this.cacheFile(), 'utf8')) as {
+        /** Legacy single timestamp (treated as both kinds). */
         checkedAt?: number
+        autoCheckedAt?: number
+        manualCheckedAt?: number
         /** Version the cache was computed for (invalidate after an update). */
         forVersion?: string
         info?: AppUpdateInfo | null
       }
-      const checkedAt = raw.checkedAt ?? 0
+      const auto = raw.autoCheckedAt ?? raw.checkedAt ?? 0
+      const manual = raw.manualCheckedAt ?? raw.checkedAt ?? 0
       const current = this.current()
       const stale = raw.forVersion && raw.forVersion !== current
+      const fresh = Date.now() - Math.max(auto, manual) < CHECK_CACHE_TTL
       const usable =
-        !stale &&
-        Date.now() - checkedAt < CHECK_CACHE_TTL &&
-        !!raw.info &&
-        isNewerVersion(raw.info.version, current)
+        !stale && fresh && !!raw.info && isNewerVersion(raw.info.version, current)
       if (usable) {
-        this.lastCheck = checkedAt
+        this.lastAutoCheck = auto
+        this.lastManualCheck = manual
         this.info = raw.info ?? null
         log(
-          `appUpdate: using cached check (${Math.round((Date.now() - checkedAt) / 60000)} min old)`
+          `appUpdate: using cached check (${Math.round((Date.now() - Math.max(auto, manual)) / 60000)} min old)`
         )
       } else if (stale) {
         log(`appUpdate: cache is for ${raw.forVersion}, current is ${current} — discarding`)
@@ -388,7 +393,16 @@ export class AppUpdateChecker {
     try {
       await fs.writeFile(
         this.cacheFile(),
-        JSON.stringify({ checkedAt: Date.now(), forVersion: this.current(), info: this.info }, null, 2),
+        JSON.stringify(
+          {
+            autoCheckedAt: this.lastAutoCheck,
+            manualCheckedAt: this.lastManualCheck,
+            forVersion: this.current(),
+            info: this.info
+          },
+          null,
+          2
+        ),
         'utf8'
       )
     } catch {
@@ -401,16 +415,18 @@ export class AppUpdateChecker {
   }
 
   /**
-   * Performs a check when the cached result is older than a day (never throws).
+   * Performs a check when *this kind* of check has not run for a day.
    *
-   * Manual and automatic checks behave identically: both answer from the cache
-   * while it is fresh, and neither of them refreshes the cache timestamp just by
-   * being triggered — so clicking "检查更新" can never burn the API quota.
+   * Automatic and manual checks have independent 24-hour cooldowns, so the first
+   * manual check of the day always asks GitHub (and can therefore see a release
+   * published since the startup check), while the automatic check still runs at
+   * most once a day. Neither kind refreshes the other's timestamp.
    */
-  async check(): Promise<AppUpdateStatus> {
+  async check(kind: 'auto' | 'manual' = 'auto'): Promise<AppUpdateStatus> {
     const now = Date.now()
-    // Fresh cache (≤ 24 h) → answer from it, without touching the timestamp.
-    if (this.lastCheck && now - this.lastCheck < CHECK_CACHE_TTL) return this.status()
+    const stamp = kind === 'auto' ? this.lastAutoCheck : this.lastManualCheck
+    // Fresh for this kind (≤ 24 h) → answer from the cached result.
+    if (stamp && now - stamp < CHECK_CACHE_TTL) return this.status()
     if (this.rateLimitedUntil > now) return this.status()
     // A failed attempt is retried after a while, not on every click.
     if (this.failedAt && now - this.failedAt < FAILURE_RETRY) return this.status()
@@ -419,10 +435,13 @@ export class AppUpdateChecker {
       const latest = await fetchLatestRelease()
       this.error = undefined
       this.info = latest && isNewerVersion(latest.version, this.current()) ? latest : null
-      // Timestamp of the last *successful* check (persisted below).
-      this.lastCheck = now
+      // Timestamp of the last *successful* check of this kind (persisted below).
+      if (kind === 'auto') this.lastAutoCheck = now
+      else this.lastManualCheck = now
       log(
-        `appUpdate: ${this.info ? `v${this.info.version} available` : 'up to date'} (current ${this.current()})`
+        `appUpdate: ${kind} check → ${
+          this.info ? `v${this.info.version} available` : 'up to date'
+        } (current ${this.current()})`
       )
       const found = this.info
       if (found && this.announced !== found.version) {
@@ -440,7 +459,7 @@ export class AppUpdateChecker {
         this.rateLimitedUntil = now + RATE_LIMIT_BACKOFF
         log('appUpdate: GitHub rate limit hit — next automatic check in 30 minutes')
       }
-      log(`appUpdate: check failed: ${(error as Error).message}`)
+      log(`appUpdate: ${kind} check failed: ${(error as Error).message}`)
     }
     return this.status()
   }

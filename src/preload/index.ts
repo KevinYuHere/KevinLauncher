@@ -107,6 +107,10 @@ const api: KevinApi = {
   dataDirPick: (current: string) => ipcRenderer.invoke('dataDir:pick', current),
   dataDirSet: (dir: string) => ipcRenderer.invoke('dataDir:set', dir),
 
+  housekeepingUsage: () => ipcRenderer.invoke('housekeeping:usage'),
+  housekeepingClean: (kinds: ('staging' | 'thumbs' | 'logs')[]) =>
+    ipcRenderer.invoke('housekeeping:clean', kinds),
+
   windowMinimize: () => ipcRenderer.invoke('window:minimize'),
   windowToggleMaximize: () => ipcRenderer.invoke('window:toggleMaximize'),
   windowClose: () => ipcRenderer.invoke('window:close'),
