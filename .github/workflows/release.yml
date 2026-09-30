@@ -9,8 +9,9 @@ name: Release
 #   …or run this workflow manually from the Actions tab (it then builds the
 #   version currently in package.json on main).
 #
-# The release notes come from docs/RELEASE_NOTES.md when that file exists,
-# otherwise they are generated from the commits since the previous tag.
+# The release notes are taken from CHANGELOG.md (the section matching the version
+# being released, which must be the newest entry). Publishing is refused when the
+# file is missing or has no section for that version.
 
 on:
   push:
