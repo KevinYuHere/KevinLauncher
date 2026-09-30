@@ -1,0 +1,145 @@
+name: Release
+
+# Builds the Windows installer + the update payload on GitHub's runners and
+# publishes them as a release. Nothing has to be built or uploaded locally.
+#
+# Usage
+#   1. bump "version" in package.json and push
+#   2. push a matching tag:   git tag v1.0.3 && git push origin v1.0.3
+#   …or run this workflow manually from the Actions tab (it then builds the
+#   version currently in package.json on main).
+#
+# The release notes come from docs/RELEASE_NOTES.md when that file exists,
+# otherwise they are generated from the commits since the previous tag.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Read the version
+        id: version
+        shell: bash
+        run: |
+          version=$(node -p "require('./package.json').version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "Building v$version"
+
+      # The tag (when triggered by one) must match package.json, otherwise the
+      # release would advertise a version the payload does not contain.
+      - name: Verify the tag matches package.json
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          if [ "${{ github.ref_name }}" != "v${{ steps.version.outputs.version }}" ]; then
+            echo "tag ${{ github.ref_name }} does not match package.json (${{ steps.version.outputs.version }})" >&2
+            exit 1
+          fi
+
+      - name: Install dependencies
+        shell: bash
+        env:
+          # Runners reach the default registry reliably; the repo's .npmrc points
+          # at a mirror for local development.
+          npm_config_registry: https://registry.npmjs.org/
+        run: npm ci --no-audit --no-fund
+
+      - name: Typecheck and test
+        run: |
+          npm run typecheck
+          npm test
+
+      - name: Build the app
+        run: npm run build
+
+      # signAndEditExecutable is disabled in electron-builder.yml (it needs the
+      # winCodeSign download locally), so the exe icon is applied here instead.
+      - name: Package the app directory
+        run: npx electron-builder --win --dir
+
+      - name: Apply the exe icon
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri 'https://github.com/electron/rcedit/releases/download/v2.0.0/rcedit-x64.exe' -OutFile rcedit.exe
+          ./rcedit.exe release/win-unpacked/KevinLauncher.exe --set-icon resources/icon.ico
+
+      - name: Build the installer (portable, self-drawn UI)
+        run: npx electron-builder --win --prepackaged release/win-unpacked --publish never
+
+      - name: Build the update payload and manifest
+        run: node scripts/build-update-payload.mjs release/win-unpacked ${{ steps.version.outputs.version }}
+
+      - name: Release notes
+        shell: bash
+        run: |
+          if [ -f docs/RELEASE_NOTES.md ]; then
+            cp docs/RELEASE_NOTES.md release/RELEASE_NOTES.md
+          else
+            previous=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)
+            {
+              echo "## KevinLauncher ${{ steps.version.outputs.version }}"
+              echo
+              if [ -n "$previous" ]; then
+                git log --no-merges --pretty='- %s' "$previous"..HEAD
+              else
+                git log --no-merges --pretty='- %s' -n 30
+              fi
+            } > release/RELEASE_NOTES.md
+          fi
+
+      - name: Publish the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          tag="v$version"
+          assets=(
+            "release/KevinLauncher-Installer-$version.exe"
+            "release/KevinLauncher-$version-app.zip"
+            "release/update-manifest.json"
+          )
+          for asset in "${assets[@]}"; do
+            if [ ! -f "$asset" ]; then
+              echo "missing asset: $asset" >&2
+              exit 1
+            fi
+            ls -lh "$asset"
+          done
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "${assets[@]}" --clobber
+            gh release edit "$tag" --notes-file release/RELEASE_NOTES.md
+          else
+            gh release create "$tag" "${assets[@]}" \
+              --title "KevinLauncher $version" \
+              --notes-file release/RELEASE_NOTES.md
+          fi
+
+      - name: Upload build artifacts (for inspection)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: KevinLauncher-${{ steps.version.outputs.version }}
+          path: |
+            release/KevinLauncher-Installer-*.exe
+            release/KevinLauncher-*-app.zip
+            release/update-manifest.json
+          retention-days: 14
