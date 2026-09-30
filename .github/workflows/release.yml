@@ -92,12 +92,22 @@ jobs:
       - name: Release notes
         shell: bash
         run: |
-          if [ -f docs/RELEASE_NOTES.md ]; then
+          version="${{ steps.version.outputs.version }}"
+          # Prefer docs/RELEASE_NOTES.md, but only when it actually talks about the
+          # version being released (otherwise the previous release's notes would be
+          # reused silently).
+          if [ -f docs/RELEASE_NOTES.md ] && grep -q "$version" docs/RELEASE_NOTES.md; then
             cp docs/RELEASE_NOTES.md release/RELEASE_NOTES.md
+            echo "using docs/RELEASE_NOTES.md"
           else
+            if [ -f docs/RELEASE_NOTES.md ]; then
+              echo "docs/RELEASE_NOTES.md does not mention $version — generating from commits"
+            else
+              echo "docs/RELEASE_NOTES.md not found — generating from commits"
+            fi
             previous=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)
             {
-              echo "## KevinLauncher ${{ steps.version.outputs.version }}"
+              echo "## KevinLauncher $version"
               echo
               if [ -n "$previous" ]; then
                 git log --no-merges --pretty='- %s' "$previous"..HEAD
