@@ -20,3 +20,8 @@ node_modules/
 icon-candidates/
 .vscode/
 .idea/
+
+# 仅本地保留，不提交到 GitHub
+/AGENTS.md
+/CLAUDE.md
+/docs/
