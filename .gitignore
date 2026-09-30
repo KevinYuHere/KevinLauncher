@@ -26,4 +26,6 @@ icon-candidates/
 /CLAUDE.md
 /docs/
 /.npmrc
+/.nvmrc
+/.gitattributes
 /scripts/verify.ps1

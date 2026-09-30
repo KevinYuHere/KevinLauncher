@@ -1,7 +1,0 @@
-# Normalise line endings to LF for text files, keep binaries untouched.
-* text=auto eol=lf
-*.png binary
-*.ico binary
-*.jpg binary
-*.exe binary
-*.zip binary
