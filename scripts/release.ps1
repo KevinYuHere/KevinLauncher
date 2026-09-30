@@ -59,17 +59,11 @@ npx.cmd electron-builder --win --prepackaged (Join-Path $root 'release\win-unpac
 if ($LASTEXITCODE -ne 0) { throw 'electron-builder failed' }
 
 # --------------------------------------- 4. update payload assets
-# The notes are embedded into the manifest as well, so the free
-# `releases/latest/download/update-manifest.json` path can show them without an
-# API call. They are always read from / written to a FILE: passing multi-line
-# text through `-File` gets word-split and the leftovers bind to other
-# parameters (which once sent release notes into $Version).
-$notesFile = Join-Path $root 'release\RELEASE_NOTES.md'
-if ($Notes) {
-  Set-Content -LiteralPath $notesFile -Value $Notes -Encoding UTF8
-} elseif (-not (Test-Path $notesFile)) {
-  Set-Content -LiteralPath $notesFile -Value "KevinLauncher $Version" -Encoding UTF8
-}
+# The release notes come from CHANGELOG.md (newest version first). Publishing is
+# refused when the file is missing or has no section for this version — the same
+# rule the CI workflow enforces.
+node scripts/extract-changelog.mjs $Version (Join-Path $root 'release\RELEASE_NOTES.md')
+if ($LASTEXITCODE -ne 0) { throw "CHANGELOG.md 缺少 $Version 的段落，已拒绝发布" }
 if ($FakeElectron) {
   node scripts/build-update-payload.mjs (Join-Path $root 'release\win-unpacked') $Version $FakeElectron
 } else {

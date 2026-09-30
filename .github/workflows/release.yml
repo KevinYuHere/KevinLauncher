@@ -89,34 +89,12 @@ jobs:
       - name: Build the update payload and manifest
         run: node scripts/build-update-payload.mjs release/win-unpacked ${{ steps.version.outputs.version }}
 
-      - name: Release notes
+      - name: Release notes from CHANGELOG.md
         shell: bash
         run: |
-          version="${{ steps.version.outputs.version }}"
-          # docs/RELEASE_NOTES.md is the single source of truth for the release
-          # body. It is only accepted when it mentions the version being released,
-          # so a forgotten update falls back to the commit log instead of
-          # silently reusing the previous release's notes.
-          if [ -f docs/RELEASE_NOTES.md ] && grep -q "$version" docs/RELEASE_NOTES.md; then
-            cp docs/RELEASE_NOTES.md release/RELEASE_NOTES.md
-            echo "using docs/RELEASE_NOTES.md"
-          else
-            if [ -f docs/RELEASE_NOTES.md ]; then
-              echo "docs/RELEASE_NOTES.md does not mention $version — generating from commits"
-            else
-              echo "docs/RELEASE_NOTES.md not found — generating from commits"
-            fi
-            previous=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)
-            {
-              echo "## KevinLauncher $version"
-              echo
-              if [ -n "$previous" ]; then
-                git log --no-merges --pretty='- %s' "$previous"..HEAD
-              else
-                git log --no-merges --pretty='- %s' -n 30
-              fi
-            } > release/RELEASE_NOTES.md
-          fi
+          # Refuses to continue when CHANGELOG.md is missing or has no section for
+          # this version (the script exits non-zero), so nothing is published.
+          node scripts/extract-changelog.mjs "${{ steps.version.outputs.version }}" release/RELEASE_NOTES.md
 
       - name: Publish the release
         shell: bash
