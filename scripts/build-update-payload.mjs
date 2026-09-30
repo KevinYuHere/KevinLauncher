@@ -9,7 +9,7 @@ import { promisify } from 'node:util'
  * Builds the update payload for a release.
  *
  * The packaged launcher keeps its code in `resources/app-<version>/` and the
- * current version in `resources/app-version.txt` (see docs/INSTALLER.md), so an
+ * current version in `resources/app-version.txt`, so an
  * update only ships the **application code** — a few MB instead of the whole
  * unpacked app:
  *
