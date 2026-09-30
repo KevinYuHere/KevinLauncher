@@ -25,3 +25,5 @@ icon-candidates/
 /AGENTS.md
 /CLAUDE.md
 /docs/
+/.npmrc
+/scripts/verify.ps1

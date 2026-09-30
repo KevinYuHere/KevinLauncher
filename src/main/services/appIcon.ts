@@ -17,7 +17,7 @@ function bundledIcon(name: string): string {
  * Shortcut locations to keep in sync.
  *
  * The desktop path must come from `app.getPath('desktop')`: the folder is often
- * redirected (OneDrive, or a moved desktop like `D:\account\desktop`), in which
+ * redirected (OneDrive, or a desktop that was moved to another drive), in which
  * case `%USERPROFILE%\Desktop` does not exist and its shortcut was never
  * updated — which is exactly why the desktop icon did not change.
  */
