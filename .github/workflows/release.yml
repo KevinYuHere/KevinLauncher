@@ -93,14 +93,12 @@ jobs:
         shell: bash
         run: |
           version="${{ steps.version.outputs.version }}"
-          # Prefer docs/RELEASE_NOTES.md, but only when it actually talks about the
-          # version being released (otherwise the previous release's notes would be
-          # reused silently).
+          # docs/RELEASE_NOTES.md is the single source of truth for the release
+          # body. It is only accepted when it mentions the version being released,
+          # so a forgotten update falls back to the commit log instead of
+          # silently reusing the previous release's notes.
           if [ -f docs/RELEASE_NOTES.md ] && grep -q "$version" docs/RELEASE_NOTES.md; then
-            # Anything from a line starting with `<!-- maintainer` onwards is kept
-            # out of the published body, so the file may carry reminders for the
-            # maintainer right next to the content.
-            sed '/^<!-- maintainer/,$d' docs/RELEASE_NOTES.md > release/RELEASE_NOTES.md
+            cp docs/RELEASE_NOTES.md release/RELEASE_NOTES.md
             echo "using docs/RELEASE_NOTES.md"
           else
             if [ -f docs/RELEASE_NOTES.md ]; then
