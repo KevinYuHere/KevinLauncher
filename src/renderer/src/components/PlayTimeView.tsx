@@ -122,12 +122,11 @@ export default function PlayTimeView({ entry, onBack }: PlayTimeViewProps): Reac
               <div className="heatmap" style={heatmapStyle}>
                 {cells.map((day, index) =>
                   day ? (
-                    <button
+                    <div
                       key={index}
-                      type="button"
                       className={`hm-cell${selected?.date === day.date ? ' selected' : ''}`}
                       style={{ background: colorOf(levelOf(day.sec)) }}
-                      onClick={() => setSelected(day)}
+                      onMouseEnter={() => setSelected(day)}
                     />
                   ) : (
                     <div key={index} className="hm-cell empty" />
@@ -141,7 +140,7 @@ export default function PlayTimeView({ entry, onBack }: PlayTimeViewProps): Reac
                   日期 <b>{selected.date}</b> · 使用 <b>{formatHours(selected.sec)}</b>
                 </>
               ) : (
-                '点击方格查看当日日期与使用时长'
+                '将鼠标移到方格上查看当日日期与使用时长'
               )}
             </div>
             <div className="hm-legend">

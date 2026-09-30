@@ -2279,7 +2279,9 @@ textarea:focus-visible {
 .heatmap-wrap {
   overflow-x: auto;
   overflow-y: hidden;
-  padding: 0 4px 4px;
+  /* Room for the cell outline: it is drawn outside the cell and would otherwise
+     be clipped by `overflow` (worst on the top row). */
+  padding: 4px;
 }
 .heatmap {
   display: grid;
@@ -2296,7 +2298,8 @@ textarea:focus-visible {
   background: rgba(255, 255, 255, 0.06);
   border: none;
   padding: 0;
-  cursor: pointer;
+  /* Selection follows the pointer (see PlayTimeView), so no pointer cursor. */
+  cursor: default;
   transition: outline-color 0.12s var(--ease);
   outline: 1px solid transparent;
   outline-offset: 0;
