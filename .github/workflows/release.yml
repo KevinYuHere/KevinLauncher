@@ -97,7 +97,10 @@ jobs:
           # version being released (otherwise the previous release's notes would be
           # reused silently).
           if [ -f docs/RELEASE_NOTES.md ] && grep -q "$version" docs/RELEASE_NOTES.md; then
-            cp docs/RELEASE_NOTES.md release/RELEASE_NOTES.md
+            # Anything from a line starting with `<!-- maintainer` onwards is kept
+            # out of the published body, so the file may carry reminders for the
+            # maintainer right next to the content.
+            sed '/^<!-- maintainer/,$d' docs/RELEASE_NOTES.md > release/RELEASE_NOTES.md
             echo "using docs/RELEASE_NOTES.md"
           else
             if [ -f docs/RELEASE_NOTES.md ]; then
