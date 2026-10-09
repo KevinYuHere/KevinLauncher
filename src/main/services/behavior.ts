@@ -34,6 +34,16 @@ export function showMainWindow(): void {
   if (win.isMinimized()) win.restore()
   win.show()
   win.focus()
+  notifyWindowShown(win)
+}
+
+/**
+ * Tell the renderer the window just became visible, so it can run the "first
+ * time today" game-update check (tray summons do not reload the renderer).
+ */
+export function notifyWindowShown(win: BrowserWindow): void {
+  if (win.isDestroyed()) return
+  win.webContents.send('window:shown')
 }
 
 /**

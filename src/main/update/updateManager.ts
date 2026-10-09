@@ -9,6 +9,7 @@ import { downloadFile } from '../services/downloader'
 import { getGameBranches, readGameVersion } from './hoyoplay'
 import { getArknightsLatest, readLocalVersion, type AkPack } from './arknightsUpdate'
 import sophonWorkerPath from '../workers/sophonWorker?modulePath'
+import arknightsWorkerPath from '../workers/arknightsWorker?modulePath'
 import { Worker } from 'worker_threads'
 import { log } from '../services/logger'
 
@@ -19,7 +20,14 @@ interface Job {
   status: UpdateStatus
   simulated?: boolean
   simulatedStopAt?: number
+  /** Timestamp of the last progress broadcast (download throttling). */
+  lastProgressEmit: number
+  /** Pending trailing broadcast that guarantees the newest value is shown. */
+  progressTimer?: ReturnType<typeof setTimeout>
 }
+
+/** Progress broadcasts are throttled to this interval so the UI can be read. */
+const PROGRESS_INTERVAL_MS = 1000
 
 const IDLE = (appId: string): UpdateStatus => ({
   appId,
@@ -41,6 +49,36 @@ export class UpdateManager {
 
   private emit(status: UpdateStatus): void {
     for (const listener of this.listeners) listener({ ...status })
+  }
+
+  /**
+   * Broadcast a download-progress update at most once per second. Downloads
+   * report progress far more often than a human can read; without this the
+   * percentage / ring jumps around. A trailing timer makes sure the final value
+   * still lands (and phase changes keep using `emit` directly).
+   */
+  private emitProgress(status: UpdateStatus): void {
+    const job = this.jobs.get(status.appId)
+    if (!job) return
+    const elapsed = Date.now() - job.lastProgressEmit
+    if (elapsed >= PROGRESS_INTERVAL_MS) {
+      job.lastProgressEmit = Date.now()
+      this.emit(status)
+      return
+    }
+    if (job.progressTimer) return
+    job.progressTimer = setTimeout(() => {
+      job.progressTimer = undefined
+      job.lastProgressEmit = Date.now()
+      this.emit(job.status)
+    }, PROGRESS_INTERVAL_MS - elapsed)
+  }
+
+  private clearProgressTimer(job: Job): void {
+    if (job.progressTimer) {
+      clearTimeout(job.progressTimer)
+      job.progressTimer = undefined
+    }
   }
 
   status(appId: string): UpdateStatus {
@@ -72,7 +110,8 @@ export class UpdateManager {
       mode,
       message: mode === 'preDownload' ? '正在预下载…' : '正在下载更新…'
     }
-    this.jobs.set(appId, { controller, status })
+    const job: Job = { controller, status, lastProgressEmit: 0 }
+    this.jobs.set(appId, job)
     this.emit(status)
     log(`update: start ${mode} for ${appId} (${this.jobs.size} job(s) running)`)
 
@@ -82,10 +121,12 @@ export class UpdateManager {
       } else {
         await this.runHoYo(appId, mode, game, gameDir, controller, status)
       }
+      this.clearProgressTimer(job)
       status.phase = 'done'
       status.progress = 1
       this.emit(status)
     } catch (error) {
+      this.clearProgressTimer(job)
       // A user cancellation is a pause, not an error.
       if (controller.signal.aborted) {
         status.phase = 'paused'
@@ -119,7 +160,13 @@ export class UpdateManager {
       mode,
       message: mode === 'preDownload' ? '正在预下载…' : '正在下载更新…'
     }
-    const job: Job = { controller, status, simulated: true, simulatedStopAt: stopAt ?? existing?.simulatedStopAt }
+    const job: Job = {
+      controller,
+      status,
+      simulated: true,
+      simulatedStopAt: stopAt ?? existing?.simulatedStopAt,
+      lastProgressEmit: 0
+    }
     this.jobs.set(appId, job)
     this.emit(status)
     log(`update: simulate ${mode} for ${appId} (${this.jobs.size} job(s) running)`)
@@ -133,7 +180,7 @@ export class UpdateManager {
         return
       }
       const speed = (26 + Math.random() * 22) * 1024 * 1024 // ~26–48 MB/s
-      status.downloadedBytes = Math.min(total, status.downloadedBytes + speed * 0.5)
+      status.downloadedBytes = Math.min(total, status.downloadedBytes + speed)
       status.progress = status.downloadedBytes / total
       this.emit(status)
       // Optional one-shot auto-pause (used to stage a "half finished" preview).
@@ -151,7 +198,7 @@ export class UpdateManager {
         status.progress = 1
         this.emit(status)
       }
-    }, 500)
+    }, PROGRESS_INTERVAL_MS)
   }
 
   private async downloadList(
@@ -173,7 +220,7 @@ export class UpdateManager {
         onProgress: (downloaded) => {
           status.downloadedBytes = base + downloaded
           status.progress = total > 0 ? Math.min(1, (base + downloaded) / total) : 0
-          this.emit(status)
+          this.emitProgress(status)
         }
       })
       base += file.size
@@ -226,7 +273,44 @@ export class UpdateManager {
 
     // The heavy download/decompress/assembly runs in a worker thread so the
     // main process (and the UI) never blocks.
-    const worker = new Worker(sophonWorkerPath)
+    await this.runWorker(
+      sophonWorkerPath,
+      {
+        type: 'start',
+        branch: target,
+        destDir,
+        mode,
+        skipUnchanged: true,
+        localVersion,
+        hpatchzPath,
+        promoteFrom
+      },
+      controller,
+      status
+    )
+
+    if (mode === 'preDownload') {
+      await fs.writeFile(
+        join(destDir, 'state.json'),
+        JSON.stringify({ version: target.tag, ready: true, finishedAt: new Date().toISOString() }, null, 2),
+        'utf-8'
+      )
+    }
+    status.message = mode === 'preDownload' ? '预下载完成' : '更新完成'
+  }
+
+  /**
+   * Run a download/apply job in a worker thread, translating its messages into
+   * `UpdateStatus` updates. Progress is throttled (see `emitProgress`) so the
+   * UI updates about once per second instead of on every chunk.
+   */
+  private async runWorker(
+    workerPath: string,
+    startMessage: Record<string, unknown>,
+    controller: AbortController,
+    status: UpdateStatus
+  ): Promise<void> {
+    const worker = new Worker(workerPath)
     const onAbort = (): void => worker.postMessage({ type: 'cancel' })
     controller.signal.addEventListener('abort', onAbort)
 
@@ -251,6 +335,13 @@ export class UpdateManager {
               message.total && message.total > 0
                 ? Math.min(1, (message.downloaded ?? 0) / message.total)
                 : 0
+            this.emitProgress(status)
+          } else if (message.type === 'extracting') {
+            status.phase = 'extracting'
+            status.progress = 0
+            status.downloadedBytes = 0
+            status.totalBytes = 0
+            status.message = message.message ?? '正在应用更新…'
             this.emit(status)
           } else if (message.type === 'phase') {
             status.message = message.message ?? status.message
@@ -265,30 +356,12 @@ export class UpdateManager {
         worker.on('exit', (code) => {
           if (code !== 0) finish(() => reject(new Error(`下载进程异常退出 (${code})`)))
         })
-        worker.postMessage({
-          type: 'start',
-          branch: target,
-          destDir,
-          mode,
-          skipUnchanged: true,
-          localVersion,
-          hpatchzPath,
-          promoteFrom
-        })
+        worker.postMessage(startMessage)
       })
     } finally {
       controller.signal.removeEventListener('abort', onAbort)
       void worker.terminate()
     }
-
-    if (mode === 'preDownload') {
-      await fs.writeFile(
-        join(destDir, 'state.json'),
-        JSON.stringify({ version: target.tag, ready: true, finishedAt: new Date().toISOString() }, null, 2),
-        'utf-8'
-      )
-    }
-    status.message = mode === 'preDownload' ? '预下载完成' : '更新完成'
   }
 
   private async runArknights(
@@ -304,11 +377,44 @@ export class UpdateManager {
       status.message = '已是最新版本'
       return
     }
+
+    // Preferred path: the incremental ("v2") package — ~0.8 GB instead of the
+    // full game package (tens of GB).
+    if (latest.patch) {
+      log(
+        `update: arknights delta ${local}→${latest.version} (` +
+          `${Math.round(latest.patch.size / 1048576)} MB, ${latest.patch.parts.length} part(s))`
+      )
+      status.phase = 'downloading'
+      status.progress = 0
+      status.message = '正在下载更新…'
+      this.emit(status)
+
+      const hpatchzPath = app.isPackaged
+        ? join(process.resourcesPath, 'hpatchz.exe')
+        : join(app.getAppPath(), 'resources', 'hpatchz.exe')
+      await this.runWorker(
+        arknightsWorkerPath,
+        {
+          type: 'start',
+          gameDir,
+          targetVersion: latest.version,
+          patch: latest.patch,
+          hpatchzPath
+        },
+        controller,
+        status
+      )
+      status.message = '更新完成'
+      return
+    }
+
     if (latest.packs.length === 0) {
       status.message = '暂无可用更新包（请使用官方启动器更新）'
       return
     }
 
+    // Fallback: full package (fresh installs / servers without a delta).
     const diffDir = join(gameDir, 'Diffs')
     await fs.mkdir(diffDir, { recursive: true })
 

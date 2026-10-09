@@ -525,6 +525,8 @@ export interface KevinApi {
   onPlayTimeChanged(callback: () => void): () => void
   onGachaProgress(callback: (progress: GachaProgress) => void): () => void
   onWindowMaximized(callback: (maximized: boolean) => void): () => void
+  /** Fired whenever the main window becomes visible (startup / tray / re-open). */
+  onWindowShown(callback: () => void): () => void
   onLauncherChanged(callback: () => void): () => void
   onUpdateProgress(callback: (status: UpdateStatus) => void): () => void
 }

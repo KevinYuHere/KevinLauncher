@@ -14,6 +14,7 @@ import {
   getCloseToTray,
   isQuitting,
   markQuitting,
+  notifyWindowShown,
   setCloseToTray,
   showMainWindow
 } from './services/behavior'
@@ -132,6 +133,7 @@ function createWindow(icon?: string, hidden = false, mode: RunMode = 'app'): voi
     setTimeout(() => {
       if (!mainWindow.isDestroyed()) mainWindow.setAlwaysOnTop(false)
     }, 150)
+    notifyWindowShown(mainWindow)
   })
   mainWindow.on('maximize', () => mainWindow.webContents.send('window:maximized', true))
   mainWindow.on('unmaximize', () => mainWindow.webContents.send('window:maximized', false))

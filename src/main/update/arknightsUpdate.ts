@@ -26,16 +26,43 @@ export interface AkPack {
   name: string
 }
 
+/**
+ * The incremental ("v2") update package: a set of (possibly split) AES
+ * encrypted zip volumes plus the plaintext `patch.json` manifest URL and the
+ * decryption key. Applying it only downloads the changed data (~0.8 GB) instead
+ * of the full package (~20 GB).
+ */
+export interface AkPatch {
+  parts: AkPack[]
+  /** WinZip AES password for the archive (from `patch.cd_key`). */
+  cdKey?: string
+  infoUrl?: string
+  infoMd5?: string
+  /** Total bytes to download. */
+  size: number
+}
+
 export interface AkLatest {
   action: number
   version: string
   packs: AkPack[]
+  patch: AkPatch | null
 }
 
 interface RawPack {
   url?: string
   md5?: string
   package_size?: string
+}
+
+interface RawPatch {
+  url?: string
+  md5?: string
+  package_size?: string
+  patches?: RawPack[]
+  cd_key?: string
+  v2_patch_info_url?: string
+  v2_patch_info_md5?: string
 }
 
 interface RawResponse {
@@ -48,6 +75,7 @@ interface RawResponse {
       version?: string
       request_version?: string
       pkg?: { packs?: RawPack[] }
+      patch?: RawPatch | null
     }
   }[]
 }
@@ -100,11 +128,28 @@ export async function getArknightsLatest(localVersion: string): Promise<AkLatest
   if (!rsp) {
     const message = json.message ?? ''
     if (!res.ok || /patchExist|not\s*found/i.test(message)) {
-      return { action: 0, version: localVersion, packs: [] }
+      return { action: 0, version: localVersion, packs: [], patch: null }
     }
     throw new Error(message || '鹰角接口返回异常')
   }
-  const packs: AkPack[] = (rsp.pkg?.packs ?? [])
+  const packs = toPacks(rsp.pkg?.packs)
+  const parts = toPacks(rsp.patch?.patches)
+  const patch: AkPatch | null =
+    rsp.patch && parts.length > 0
+      ? {
+          parts,
+          cdKey: rsp.patch.cd_key,
+          infoUrl: rsp.patch.v2_patch_info_url,
+          infoMd5: rsp.patch.v2_patch_info_md5,
+          size: parts.reduce((sum, part) => sum + part.size, 0)
+        }
+      : null
+  return { action: rsp.action ?? 0, version: rsp.version ?? '', packs, patch }
+}
+
+/** Map the raw `packs` array to `AkPack`s, deriving a file name from the URL. */
+function toPacks(raw: RawPack[] | undefined): AkPack[] {
+  return (raw ?? [])
     .filter((p) => p.url)
     .map((p) => {
       const url = p.url as string
@@ -116,7 +161,6 @@ export async function getArknightsLatest(localVersion: string): Promise<AkLatest
       }
       return { url, md5: p.md5, size: Number(p.package_size ?? 0), name }
     })
-  return { action: rsp.action ?? 0, version: rsp.version ?? '', packs }
 }
 
 export async function getArknightsUpdateInfo(gameDir: string): Promise<UpdateInfo> {
@@ -135,8 +179,11 @@ export async function getArknightsUpdateInfo(gameDir: string): Promise<UpdateInf
     info.currentVersion = local || null
     const latest = await getArknightsLatest(local)
     info.latestVersion = latest.version || null
-    info.mainSizeBytes = latest.packs.reduce((sum, pack) => sum + pack.size, 0)
-    info.hasUpdate = latest.action === 1 && latest.packs.length > 0
+    // Prefer the (much smaller) incremental package when the server offers one.
+    info.mainSizeBytes = latest.patch
+      ? latest.patch.size
+      : latest.packs.reduce((sum, pack) => sum + pack.size, 0)
+    info.hasUpdate = latest.action === 1 && (latest.patch !== null || latest.packs.length > 0)
     if (!info.hasUpdate) info.message = '已是最新版本'
   } catch (error) {
     info.message = (error as Error).message

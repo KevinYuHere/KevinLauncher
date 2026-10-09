@@ -33,6 +33,12 @@ import { applyTheme } from './theme'
 
 type DialogState = { mode: 'add' } | { mode: 'edit'; entry: AppEntry } | null
 
+/** Local calendar date as `YYYY-MM-DD` (used to run daily update checks). */
+function localDate(): string {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
 /** No upgrade running (mirrors the main process' idle state). */
 const IDLE_APP_UPDATE: AppUpdateState = {
   phase: 'idle',
@@ -84,7 +90,8 @@ export default function App(): ReactElement {
   } | null>(null)
   const animRef = useRef<HTMLDivElement>(null)
   const prevViewRef = useRef<ViewId>('home')
-  const checkedUpdates = useRef<Set<string>>(new Set())
+  /** Last date (local `YYYY-MM-DD`) each app was checked, so a check runs once a day. */
+  const checkedUpdateDate = useRef<Map<string, string>>(new Map())
   const [appUpdate, setAppUpdate] = useState<AppUpdateInfo | null>(null)
   const [appUpdateState, setAppUpdateState] = useState<AppUpdateState>(IDLE_APP_UPDATE)
   const [dismissedUpdate, setDismissedUpdate] = useState<string | null>(null)
@@ -295,16 +302,32 @@ export default function App(): ReactElement {
     }
   }, [])
 
-  // On startup (and whenever the app list changes), check every supported game
-  // for updates in the background.
+  /** Latest app list, so the window-shown handler always sees fresh data. */
+  const appsRef = useRef<AppEntry[]>([])
   useEffect(() => {
-    for (const app of apps) {
-      if (!app.addonId) continue
-      if (checkedUpdates.current.has(app.id)) continue
-      checkedUpdates.current.add(app.id)
-      void checkUpdate(app.id)
-    }
-  }, [apps, checkUpdate])
+    appsRef.current = apps
+  }, [apps])
+
+  // Check every supported game for updates once per day. Runs when the app list
+  // loads/changes and whenever the window becomes visible (startup or tray).
+  const runDailyChecks = useCallback(
+    (list?: AppEntry[]): void => {
+      const date = localDate()
+      for (const app of list ?? appsRef.current) {
+        if (!app.addonId) continue
+        if (checkedUpdateDate.current.get(app.id) === date) continue
+        checkedUpdateDate.current.set(app.id, date)
+        void checkUpdate(app.id)
+      }
+    },
+    [checkUpdate]
+  )
+
+  useEffect(() => {
+    runDailyChecks(apps)
+  }, [apps, runDailyChecks])
+
+  useEffect(() => window.api.onWindowShown(() => runDailyChecks()), [runDailyChecks])
 
   const applyMedia = useCallback(
     async (appId: string, media: AppFormMedia): Promise<void> => {
@@ -379,8 +402,18 @@ export default function App(): ReactElement {
   useEffect(() => {
     return window.api.onUpdateProgress((status) => {
       setUpdateStatuses((prev) => ({ ...prev, [status.appId]: status }))
+      // Once an update finishes, drop the stale "hasUpdate" flag so the button
+      // falls back from "开始更新" to "启动" immediately, then re-check for the
+      // authoritative version.
+      if (status.phase === 'done') {
+        setUpdateInfos((prev) => {
+          const cur = prev[status.appId]
+          return cur ? { ...prev, [status.appId]: { ...cur, hasUpdate: false } } : prev
+        })
+        void checkUpdate(status.appId)
+      }
     })
-  }, [])
+  }, [checkUpdate])
 
   useEffect(() => {
     if (!currentId) return

@@ -70,6 +70,7 @@ export default function UpdateView({
   )
 
   const running = status.phase === 'downloading' || status.phase === 'extracting'
+  const extracting = status.phase === 'extracting'
   const paused = status.phase === 'paused'
   const busyDownload = running || paused
   const speed = useDownloadSpeed(status)
@@ -173,8 +174,12 @@ export default function UpdateView({
                     <div className="dl-row-info">
                       <div className="dl-row-percent">{running ? `${percent}%` : '已暂停'}</div>
                       <div className="dl-row-sub">
-                        {running ? formatSpeed(speed) : '点击继续'} ·{' '}
-                        {formatBytes(status.downloadedBytes)} / {formatBytes(status.totalBytes)}
+                        {running
+                          ? extracting
+                            ? (status.message ?? '正在应用更新…')
+                            : formatSpeed(speed)
+                          : '点击继续'}{' '}
+                        · {formatBytes(status.downloadedBytes)} / {formatBytes(status.totalBytes)}
                       </div>
                     </div>
                     <div className="dl-row-eta">{running ? formatEta(remaining) : ''}</div>

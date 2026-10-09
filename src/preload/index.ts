@@ -142,6 +142,11 @@ const api: KevinApi = {
     ipcRenderer.on('window:maximized', listener)
     return () => ipcRenderer.removeListener('window:maximized', listener)
   },
+  onWindowShown: (callback: () => void) => {
+    const listener = (): void => callback()
+    ipcRenderer.on('window:shown', listener)
+    return () => ipcRenderer.removeListener('window:shown', listener)
+  },
   onLauncherChanged: (callback: () => void) => {
     const listener = (): void => callback()
     ipcRenderer.on('launcher:changed', listener)

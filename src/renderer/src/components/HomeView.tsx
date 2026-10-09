@@ -65,6 +65,7 @@ export default function HomeView({
 
   const status = updateStatus
   const active = !!status && (status.phase === 'downloading' || status.phase === 'extracting')
+  const extracting = status?.phase === 'extracting'
   const paused = status?.phase === 'paused'
   const progress = status?.progress ?? 0
   const preActive = (active || paused) && status?.mode === 'preDownload'
@@ -79,7 +80,9 @@ export default function HomeView({
 
   const popup = (
     <div className="dl-pop">
-      <div className="dl-pop-speed">{formatSpeed(speed)}</div>
+      <div className="dl-pop-speed">
+        {extracting ? (status?.message ?? '正在应用更新…') : formatSpeed(speed)}
+      </div>
       <div className="dl-pop-row">
         <span>
           {formatBytes(status?.downloadedBytes ?? 0)} / {formatBytes(status?.totalBytes ?? 0)}
