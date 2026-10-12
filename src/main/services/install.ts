@@ -6,6 +6,8 @@ import { promisify } from 'util'
 import { directorySize } from './updateDownload'
 import { removeAutoStartTask } from './autostart'
 import { currentAppVersion } from './appVersion'
+import { writeFileAtomic } from './atomicFile'
+import { psQuote, runPowerShell } from './powershell'
 import { log } from './logger'
 
 /**
@@ -149,21 +151,14 @@ export async function readInstallInfo(dir: string): Promise<InstallInfo | null> 
 
 async function writeInstallInfo(dir: string, version: string, files: string[]): Promise<void> {
   const info: InstallInfo = { version, installedAt: new Date().toISOString(), files }
-  await fs.writeFile(join(dir, INFO_FILE), JSON.stringify(info, null, 2), 'utf8')
+  await writeFileAtomic(join(dir, INFO_FILE), JSON.stringify(info, null, 2))
 }
 
 /** Paths of every running KevinLauncher.exe that is not this process. */
 export async function runningInstances(): Promise<string[]> {
   try {
-    const { stdout } = await exec(
-      'powershell.exe',
-      [
-        '-NoProfile',
-        '-NonInteractive',
-        '-Command',
-        'Get-Process KevinLauncher -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Path'
-      ],
-      { windowsHide: true, maxBuffer: 8 * 1024 * 1024 }
+    const stdout = await runPowerShell(
+      'Get-Process KevinLauncher -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Path'
     )
     const self = process.execPath.toLowerCase()
     return stdout
@@ -178,18 +173,11 @@ export async function runningInstances(): Promise<string[]> {
 
 /** PIDs running the given executable (empty when the path cannot be read). */
 async function pidsUsing(exe: string): Promise<number[]> {
-  const target = `'${exe.replace(/'/g, "''")}'`
+  const target = psQuote(exe)
   try {
-    const { stdout } = await exec(
-      'powershell.exe',
-      [
-        '-NoProfile',
-        '-NonInteractive',
-        '-Command',
-        `Get-Process KevinLauncher -ErrorAction SilentlyContinue | ` +
-          `Where-Object { $_.Path -ieq ${target} } | Select-Object -ExpandProperty Id`
-      ],
-      { windowsHide: true, maxBuffer: 8 * 1024 * 1024 }
+    const stdout = await runPowerShell(
+      `Get-Process KevinLauncher -ErrorAction SilentlyContinue | ` +
+        `Where-Object { $_.Path -ieq ${target} } | Select-Object -ExpandProperty Id`
     )
     return stdout
       .split(/\r?\n/)
@@ -228,16 +216,7 @@ export async function closeRunningInstances(targetDir: string): Promise<boolean>
   if (pids.length) {
     log(`install: closing launcher instance(s) ${pids.join(', ')} at ${targetDir}`)
     try {
-      await exec(
-        'powershell.exe',
-        [
-          '-NoProfile',
-          '-NonInteractive',
-          '-Command',
-          `Stop-Process -Id ${pids.join(',')} -Force -ErrorAction SilentlyContinue`
-        ],
-        { windowsHide: true }
-      )
+      await runPowerShell(`Stop-Process -Id ${pids.join(',')} -Force -ErrorAction SilentlyContinue`)
     } catch {
       /* reported through the return value */
     }
@@ -288,7 +267,7 @@ export async function syncInstalledVersion(installDir: string, version: string):
     const info = await readInstallInfo(installDir)
     if (info && info.version !== version) {
       const updated: InstallInfo = { ...info, version }
-      await fs.writeFile(join(installDir, INFO_FILE), JSON.stringify(updated, null, 2), 'utf8')
+      await writeFileAtomic(join(installDir, INFO_FILE), JSON.stringify(updated, null, 2))
     }
     const registered = await regQuery(UNINSTALL_KEY, 'DisplayVersion')
     if (registered && registered !== version) {
@@ -364,11 +343,7 @@ export async function freeSpace(dir: string): Promise<number> {
   const letter = /^([a-zA-Z]):/.exec(dir)?.[1]
   if (!letter) return 0
   try {
-    const { stdout } = await exec(
-      'powershell.exe',
-      ['-NoProfile', '-NonInteractive', '-Command', `(Get-PSDrive -Name ${letter}).Free`],
-      { windowsHide: true }
-    )
+    const stdout = await runPowerShell(`(Get-PSDrive -Name ${letter}).Free`)
     return Number(stdout.trim()) || 0
   } catch {
     return 0
@@ -398,18 +373,14 @@ export async function canWrite(dir: string): Promise<boolean> {
  */
 export async function relaunchInstallerElevated(): Promise<boolean> {
   const exe = process.env.PORTABLE_EXECUTABLE_FILE ?? process.execPath
-  const quote = (value: string): string => `'${value.replace(/'/g, "''")}'`
   const args = process.argv.slice(1).filter((arg) => !arg.startsWith('--install-dir'))
   // `-ArgumentList @()` is rejected by Start-Process — omit it when empty.
   const script =
-    `Start-Process -FilePath ${quote(exe)}` +
-    (args.length ? ` -ArgumentList @(${args.map(quote).join(',')})` : '') +
+    `Start-Process -FilePath ${psQuote(exe)}` +
+    (args.length ? ` -ArgumentList @(${args.map(psQuote).join(',')})` : '') +
     ' -Verb RunAs'
   try {
-    await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
-      windowsHide: true,
-      timeout: 180_000
-    })
+    await runPowerShell(script, { timeout: 180_000 })
     return true
   } catch (error) {
     log(`install: elevation failed (${(error as Error).message})`)

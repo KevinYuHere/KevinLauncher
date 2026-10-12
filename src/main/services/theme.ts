@@ -53,7 +53,7 @@ export function extractAccent(filePath: string): string | null {
     const image = nativeImage.createFromPath(filePath)
     if (image.isEmpty()) return null
     const small = image.resize({ width: 64, height: 64, quality: 'good' })
-    const bitmap = small.getBitmap() // BGRA
+    const bitmap = small.toBitmap() // BGRA
 
     let best = { sat: -1, r: 0, g: 0, b: 0 }
     let sumR = 0

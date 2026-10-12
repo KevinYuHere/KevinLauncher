@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
+import { useOpenOrigin } from './useOpenOrigin'
+import ModalBackdrop from './ModalBackdrop'
 
 interface IconCropperProps {
   source: string
@@ -20,6 +22,14 @@ export default function IconCropper({
   const [natural, setNatural] = useState<{ w: number; h: number } | null>(null)
   const [zoom, setZoom] = useState(1)
   const [offset, setOffset] = useState({ x: 0, y: 0 })
+  const [closing, setClosing] = useState(false)
+  const modalRef = useRef<HTMLDivElement>(null)
+  useOpenOrigin(modalRef)
+  const requestCancel = (): void => {
+    if (closing) return
+    setClosing(true)
+    window.setTimeout(onCancel, 180)
+  }
   const dragRef = useRef<{ x: number; y: number; ox: number; oy: number } | null>(null)
   const imgRef = useRef<HTMLImageElement>(null)
   const stageRef = useRef<HTMLDivElement>(null)
@@ -120,11 +130,17 @@ export default function IconCropper({
   const imgTop = STAGE / 2 + offset.y - dispH / 2
 
   return (
-    <div className="modal-mask">
-      <div className="modal" style={{ width: 'min(460px, 92vw)' }} onClick={(e) => e.stopPropagation()}>
+    <div className={`modal-mask${closing ? ' closing' : ''}`}>
+      <ModalBackdrop />
+      <div
+        ref={modalRef}
+        className={`modal${closing ? ' closing' : ''}`}
+        style={{ width: 'min(460px, 92vw)' }}
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="modal-header">
           <h2>框选图标（正方形）</h2>
-          <button className="modal-close" onClick={onCancel}>
+          <button className="modal-close" onClick={requestCancel}>
             ✕
           </button>
         </div>
@@ -186,7 +202,7 @@ export default function IconCropper({
           <div className="crop-hint">拖动图片调整位置，滚轮或滑块缩放</div>
         </div>
         <div className="modal-footer">
-          <button className="btn" onClick={onCancel}>
+          <button className="btn" onClick={requestCancel}>
             取消
           </button>
           <button className="btn primary" onClick={confirm}>

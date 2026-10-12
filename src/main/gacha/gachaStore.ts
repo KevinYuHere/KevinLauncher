@@ -1,7 +1,8 @@
 import { app } from 'electron'
 import { join } from 'path'
-import { promises as fs } from 'fs'
 import type { GachaRecord, GachaStats, GachaPoolStat } from '@shared/types'
+import { writeFileAtomic } from '../services/atomicFile'
+import { openJsonStore } from '../services/jsonStore'
 import { topRankFor, secondRankFor, poolGroup, poolName } from './metadata'
 
 interface StoreShape {
@@ -37,6 +38,8 @@ function compareAscending(a: GachaRecord, b: GachaRecord): number {
 export class GachaStore {
   private readonly cache = new Map<string, GachaRecord[]>()
   private readonly saveTimers = new Map<string, NodeJS.Timeout>()
+  /** App ids whose store file could not be read — writes are refused for them. */
+  private readonly saveBlocked = new Set<string>()
 
   private dir(): string {
     return join(app.getPath('userData'), 'gacha')
@@ -49,14 +52,14 @@ export class GachaStore {
   async load(appId: string): Promise<GachaRecord[]> {
     const cached = this.cache.get(appId)
     if (cached) return cached
-    let records: GachaRecord[] = []
-    try {
-      const raw = await fs.readFile(this.file(appId), 'utf-8')
-      const parsed = JSON.parse(raw) as StoreShape
-      records = Array.isArray(parsed.records) ? parsed.records : []
-    } catch {
-      records = []
-    }
+    const { data, writable } = await openJsonStore<StoreShape>(
+      this.file(appId),
+      () => ({ version: CURRENT_VERSION, records: [] }),
+      `gacha:${appId}`
+    )
+    const records = Array.isArray(data.records) ? data.records : []
+    if (writable) this.saveBlocked.delete(appId)
+    else this.saveBlocked.add(appId)
     this.cache.set(appId, records)
     return records
   }
@@ -259,16 +262,9 @@ export class GachaStore {
   }
 
   private async save(appId: string): Promise<void> {
+    if (this.saveBlocked.has(appId)) return
     const records = this.cache.get(appId) ?? []
     const data: StoreShape = { version: CURRENT_VERSION, records }
-    try {
-      await fs.mkdir(this.dir(), { recursive: true })
-      const file = this.file(appId)
-      const tmp = `${file}.tmp`
-      await fs.writeFile(tmp, JSON.stringify(data), 'utf-8')
-      await fs.rename(tmp, file)
-    } catch {
-      /* ignore persistence failures */
-    }
+    await writeFileAtomic(this.file(appId), JSON.stringify(data)).catch(() => undefined)
   }
 }

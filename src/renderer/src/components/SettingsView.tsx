@@ -1,14 +1,31 @@
-import { useEffect, useRef, useState, type CSSProperties, type ReactElement, type ReactNode } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactElement,
+  type ReactNode
+} from 'react'
 import type {
   AfterLaunchAction,
   AppEntry,
   AutoStartMode,
   CloseAction,
+  GlassAppearance,
+  GlassMaterial,
+  GlassPatch,
   LauncherSettings,
   UsageReport
 } from '@shared/types'
+import { DEFAULT_GLASS_APPEARANCE, MATERIAL_DEFAULTS } from '@shared/types'
 import { formatBytes } from '../format'
 import { brandUrl, defaultIconUrl } from '../media'
+import { applyGlass } from '../theme'
+import ColorPicker from './ColorPicker'
+import GlassPopup from './GlassPopup'
+import Segmented from './Segmented'
+import Switch from './Switch'
 
 /** Project repository (shown in the "About" section). */
 const REPO_URL = 'https://github.com/KevinYuHere/KevinLauncher'
@@ -38,6 +55,21 @@ const REFERENCED_PROJECTS: { name: string; note: string; url: string }[] = [
   }
 ]
 
+/** Short label + description for each glass material. */
+const GLASS_MATERIAL_LABEL: Record<GlassMaterial, string> = {
+  blur: '毛玻璃',
+  mica: '云母',
+  liquid: '液态',
+  shine: '高光'
+}
+
+const GLASS_MATERIAL_DESC: Record<GlassMaterial, string> = {
+  blur: '毛玻璃：经典磨砂质感',
+  mica: '云母：更致密的磨砂质感',
+  liquid: '液态玻璃：外轮廓膨胀折射',
+  shine: '高光：液态玻璃 + 随环境着色的边缘高光'
+}
+
 // Settings page with two tabs that slide on the card itself (so the frosted
 // glass behind stays put): per-app appearance/background, and launcher-wide
 // icon/font/behavior/backup. All values are controlled by App.tsx.
@@ -61,6 +93,7 @@ interface SettingsViewProps {
     closeAction?: CloseAction
     afterLaunch?: AfterLaunchAction
     autoStart?: AutoStartMode
+    sidebarMaterial?: boolean
   }) => void
   onExportData: () => void
   onImportData: () => void
@@ -75,6 +108,8 @@ interface SettingsViewProps {
   checkingUpdate: boolean
   /** Result hint of the last manual check (empty until one ran). */
   updateCheckText: string
+  /** Copy the launcher logs to a directory the user chooses. */
+  onExportLogs: () => void
 }
 
 function Row({
@@ -97,30 +132,13 @@ function Row({
   )
 }
 
-function Seg({
-  value,
-  current,
-  onPick,
-  children
-}: {
-  value: string
-  current: string
-  onPick: (value: string) => void
-  children: ReactNode
-}): ReactElement {
-  return (
-    <button className={`seg${current === value ? ' active' : ''}`} onClick={() => onPick(value)}>
-      {children}
-    </button>
-  )
-}
-
 function RangeRow({
   name,
   value,
   min,
   max,
   suffix,
+  hint,
   onChange
 }: {
   name: string
@@ -128,12 +146,14 @@ function RangeRow({
   min: number
   max: number
   suffix: string
+  /** Short explanation of what this setting does (shown above the value). */
+  hint?: string
   onChange: (value: number) => void
 }): ReactElement {
   return (
     <Row
       name={name}
-      desc={`${value}${suffix}`}
+      desc={hint ? `${hint}｜当前 ${value}${suffix}` : `${value}${suffix}`}
       action={
         <input
           className="slider"
@@ -214,17 +234,70 @@ export default function SettingsView({
   onCleanUsage,
   onCheckUpdate,
   checkingUpdate,
-  updateCheckText
+  updateCheckText,
+  onExportLogs
 }: SettingsViewProps): ReactElement {
   const [tab, setTab] = useState<'game' | 'launcher'>('game')
   const [dir, setDir] = useState(1)
+  const [showColor, setShowColor] = useState(false)
   const autoTheme = entry.autoTheme ?? true
+  // Live glass editing: apply immediately (so dragging feels instant) and
+  // persist once the user stops (debounced), without re-rendering the whole app.
+  const [glass, setGlass] = useState<GlassAppearance>(entry.glass ?? DEFAULT_GLASS_APPEARANCE)
+  const glassRef = useRef<GlassAppearance>(entry.glass ?? DEFAULT_GLASS_APPEARANCE)
+  const glassTimer = useRef<number | undefined>(undefined)
+
+  useEffect(() => {
+    const next = entry.glass ?? DEFAULT_GLASS_APPEARANCE
+    glassRef.current = next
+    setGlass(next)
+  }, [entry.id])
+
+  const updateGlass = useCallback(
+    (patch: GlassPatch): void => {
+      // Switching material loads that material's recommended parameters.
+      const next =
+        patch.material && patch.material !== glassRef.current.material
+          ? { ...MATERIAL_DEFAULTS[patch.material] }
+          : { ...DEFAULT_GLASS_APPEARANCE, ...glassRef.current, ...patch }
+      glassRef.current = next
+      setGlass(next)
+      applyGlass(next)
+      if (glassTimer.current) window.clearTimeout(glassTimer.current)
+      const id = entry.id
+      glassTimer.current = window.setTimeout(() => {
+        void window.api.setGlass(id, glassRef.current)
+      }, 200)
+    },
+    [entry.id]
+  )
+
+  const tabPanelRef = useRef<HTMLDivElement>(null)
+  const pageRef = useRef<HTMLDivElement>(null)
+  const colorBtnRef = useRef<HTMLButtonElement>(null)
+  const tabAnimMounted = useRef(false)
 
   const switchTab = (next: 'game' | 'launcher'): void => {
     if (next === tab) return
     setDir(next === 'launcher' ? 1 : -1)
     setTab(next)
   }
+
+  // Slide the panel on tab change — the same translate-only transition the top
+  // views use. Not `opacity`, which would make the glass card (backdrop-filter)
+  // flash; a stable element also avoids the layout drift seen after repeat use.
+  useEffect(() => {
+    const el = tabPanelRef.current
+    if (!el) return
+    if (!tabAnimMounted.current) {
+      tabAnimMounted.current = true
+      return
+    }
+    el.classList.remove('tab-anim-run')
+    void el.offsetWidth
+    el.classList.add('tab-anim-run')
+    pageRef.current?.scrollTo({ top: 0 })
+  }, [tab])
 
   const afterLaunchDesc: Record<AfterLaunchAction, string> = {
     none: '无操作（启动器保持现状）',
@@ -240,7 +313,7 @@ export default function SettingsView({
   }
 
   return (
-    <div className="page">
+    <div className="page" ref={pageRef}>
       <div className="page-header">
         <div>
           <h1 className="page-title">设置</h1>
@@ -259,25 +332,24 @@ export default function SettingsView({
       </div>
 
       <div className="page-body">
-        <div className="tabs">
-          <button className={`tab${tab === 'game' ? ' active' : ''}`} onClick={() => switchTab('game')}>
-            应用设置
-          </button>
-          <button
-            className={`tab${tab === 'launcher' ? ' active' : ''}`}
-            onClick={() => switchTab('launcher')}
-          >
-            启动器设置
-          </button>
-        </div>
+        <Segmented
+          variant="tab"
+          value={tab}
+          onChange={(value) => switchTab(value as 'game' | 'launcher')}
+          options={[
+            { value: 'game', label: '应用设置' },
+            { value: 'launcher', label: '启动器设置' }
+          ]}
+        />
 
         <div
-          key={tab}
+          ref={tabPanelRef}
           className="tab-panel"
-          style={{ '--tab-x': `${dir * 22}px` } as CSSProperties}
+          style={{ '--tab-x': `${dir * 26}px` } as CSSProperties}
         >
           {tab === 'game' ? (
             <div className="settings">
+              <div className="settings-group-title">外观</div>
               <Row
                 name="背景"
                 desc={entry.backgroundFile ? '已设置自定义背景' : '默认（桌面壁纸）'}
@@ -289,63 +361,6 @@ export default function SettingsView({
                     <button className="btn sm ghost" onClick={onResetBackground}>
                       恢复默认
                     </button>
-                  </div>
-                }
-              />
-              <Row
-                name="主题色"
-                desc={autoTheme ? '自动从背景提取' : (entry.themeColor ?? '默认（品牌蓝）')}
-                action={
-                  <div className="media-row" style={{ gap: 8 }}>
-                    <label className="switch" title="自动从背景提取主题色">
-                      <input
-                        type="checkbox"
-                        checked={autoTheme}
-                        onChange={(e) => void window.api.setAutoTheme(entry.id, e.target.checked)}
-                      />
-                      <span>自动</span>
-                    </label>
-                    {!autoTheme && (
-                      <>
-                        <input
-                          className="color-input"
-                          type="color"
-                          value={entry.themeColor ?? '#3778e5'}
-                          onChange={(e) => void window.api.setThemeColor(entry.id, e.target.value)}
-                          title="选择主题色"
-                        />
-                        <button
-                          className="btn sm"
-                          disabled={!entry.backgroundFile}
-                          onClick={() => void window.api.extractThemeColor(entry.id)}
-                          title={entry.backgroundFile ? '从背景图提取主题色' : '请先设置背景'}
-                        >
-                          从背景提取
-                        </button>
-                        <button
-                          className="btn sm ghost"
-                          onClick={() => void window.api.setThemeColor(entry.id, null)}
-                        >
-                          重置
-                        </button>
-                      </>
-                    )}
-                  </div>
-                }
-              />
-              <Row
-                name="界面玻璃风格"
-                desc={
-                  (entry.glassStyle ?? 'dark') === 'light' ? '亮色玻璃：清爽通透' : '暗色玻璃：沉稳内敛'
-                }
-                action={
-                  <div className="segmented">
-                    <Seg value="dark" current={entry.glassStyle ?? 'dark'} onPick={() => void window.api.setGlassStyle(entry.id, 'dark')}>
-                      暗色
-                    </Seg>
-                    <Seg value="light" current={entry.glassStyle ?? 'dark'} onPick={() => void window.api.setGlassStyle(entry.id, 'light')}>
-                      亮色
-                    </Seg>
                   </div>
                 }
               />
@@ -366,6 +381,199 @@ export default function SettingsView({
                 onChange={(dim) => onBgTuning(bgBlur, dim)}
               />
               <Row
+                name="主题色"
+                desc={autoTheme ? '自动从背景提取' : (entry.themeColor ?? '默认（品牌蓝）')}
+                action={
+                  <div className="media-row" style={{ gap: 8 }}>
+                    <Switch
+                      checked={autoTheme}
+                      label="自动"
+                      title="自动从背景提取主题色"
+                      onChange={(value) => void window.api.setAutoTheme(entry.id, value)}
+                    />
+                    {!autoTheme && (
+                      <>
+                        <button
+                          ref={colorBtnRef}
+                          type="button"
+                          className="color-trigger"
+                          title="自定义主题色"
+                          onClick={() => setShowColor((v) => !v)}
+                        >
+                          <span
+                            className="color-trigger-fill"
+                            style={{ background: entry.themeColor ?? '#3778e5' }}
+                          />
+                        </button>
+                        <button
+                          className="btn sm"
+                          disabled={!entry.backgroundFile}
+                          onClick={() => void window.api.extractThemeColor(entry.id)}
+                          title={entry.backgroundFile ? '从背景图提取主题色' : '请先设置背景'}
+                        >
+                          从背景提取
+                        </button>
+                        <button
+                          className="btn sm ghost"
+                          onClick={() => void window.api.setThemeColor(entry.id, null)}
+                        >
+                          重置
+                        </button>
+                      </>
+                    )}
+                  </div>
+                }
+              />
+              {!autoTheme && (
+                <GlassPopup
+                  anchorRef={colorBtnRef}
+                  boundsRef={pageRef}
+                  visible={showColor}
+                  className="color-popup"
+                  onDismiss={() => setShowColor(false)}
+                >
+                  <ColorPicker
+                    value={entry.themeColor}
+                    onChange={(hex) => void window.api.setThemeColor(entry.id, hex)}
+                  />
+                </GlassPopup>
+              )}
+              <div className="settings-group-title">玻璃材质</div>
+              <Row
+                name="玻璃材质"
+                desc={GLASS_MATERIAL_DESC[glass.material]}
+                action={
+                  <div className="media-row" style={{ gap: 8 }}>
+                    <Segmented
+                      value={glass.material}
+                      onChange={(value) => updateGlass({ material: value as GlassMaterial })}
+                      options={(['blur', 'mica', 'liquid', 'shine'] as GlassMaterial[]).map(
+                        (material) => ({ value: material, label: GLASS_MATERIAL_LABEL[material] })
+                      )}
+                    />
+                    <button
+                      className="btn sm ghost"
+                      title="把当前材质的各项参数恢复为推荐默认值"
+                      onClick={() => updateGlass({ ...MATERIAL_DEFAULTS[glass.material] })}
+                    >
+                      重置
+                    </button>
+                  </div>
+                }
+              />
+              <RangeRow
+                name="玻璃亮度"
+                value={glass.brightness}
+                hint="玻璃底色：0 偏黑，100 偏白"
+                min={0}
+                max={100}
+                suffix=""
+                onChange={(brightness) => updateGlass({ brightness })}
+              />
+              <RangeRow
+                name="玻璃透明度"
+                value={glass.opacity}
+                hint="底色的透明程度：100 完全不叠加底色（清透）"
+                min={0}
+                max={100}
+                suffix=" %"
+                onChange={(opacity) => updateGlass({ opacity })}
+              />
+              <RangeRow
+                name="玻璃模糊"
+                value={glass.blur}
+                hint="玻璃磨砂的模糊半径"
+                min={0}
+                max={60}
+                suffix=" px"
+                onChange={(blur) => updateGlass({ blur })}
+              />
+              {(glass.material === 'blur' || glass.material === 'mica') && (
+                <RangeRow
+                  name="背景饱和度"
+                  value={glass.saturation}
+                  hint="背景色彩的浓淡（毛玻璃 / 云母）"
+                  min={50}
+                  max={200}
+                  suffix=" %"
+                  onChange={(saturation) => updateGlass({ saturation })}
+                />
+              )}
+              {glass.material === 'mica' && (
+                <RangeRow
+                  name="颗粒"
+                  value={glass.grain}
+                  hint="云母表面的颗粒质感"
+                  min={0}
+                  max={100}
+                  suffix=""
+                  onChange={(grain) => updateGlass({ grain })}
+                />
+              )}
+              {(glass.material === 'liquid' || glass.material === 'shine') && (
+                <>
+                  <RangeRow
+                    name="折射强度（控件）"
+                    value={glass.refraction}
+                    hint="按钮/小控件的边缘折射强度"
+                    min={0}
+                    max={200}
+                    suffix=" %"
+                    onChange={(refraction) => updateGlass({ refraction })}
+                  />
+                  <RangeRow
+                    name="折射强度（面板）"
+                    value={glass.panelRefraction}
+                    hint="卡片/弹窗的边缘折射强度"
+                    min={0}
+                    max={200}
+                    suffix=" %"
+                    onChange={(panelRefraction) => updateGlass({ panelRefraction })}
+                  />
+                  <RangeRow
+                    name="边缘宽度"
+                    value={glass.edgeWidth}
+                    hint="边缘折射扭曲的影响范围"
+                    min={4}
+                    max={100}
+                    suffix=" px"
+                    onChange={(edgeWidth) => updateGlass({ edgeWidth })}
+                  />
+                  <RangeRow
+                    name="色散"
+                    value={glass.dispersion}
+                    min={0}
+                    max={100}
+                    suffix=""
+                    hint="边缘彩虹分光的强度"
+                    onChange={(dispersion) => updateGlass({ dispersion })}
+                  />
+                </>
+              )}
+              {glass.material === 'shine' && (
+                <>
+                  <RangeRow
+                    name="高光强度"
+                    value={glass.highlight}
+                    min={0}
+                    max={100}
+                    suffix=" %"
+                    hint="边缘镜面高光的亮度"
+                    onChange={(highlight) => updateGlass({ highlight })}
+                  />
+                  <RangeRow
+                    name="高光角度"
+                    value={glass.highlightAngle}
+                    min={0}
+                    max={360}
+                    suffix="°"
+                    hint="高光来自的方向"
+                    onChange={(highlightAngle) => updateGlass({ highlightAngle })}
+                  />
+                </>
+              )}
+              <div className="settings-group-title">危险操作</div>
+              <Row
                 name="移除应用"
                 desc="从启动器中删除该应用，不会删除磁盘上的文件"
                 action={
@@ -377,6 +585,58 @@ export default function SettingsView({
             </div>
           ) : (
             <div className="settings">
+              <div className="settings-group-title">启动行为</div>
+              <Row
+                name="点击关闭按钮（×）"
+                desc={
+                  launcher.closeAction === 'tray' ? '隐藏到托盘（点托盘图标可重新打开）' : '关闭启动器'
+                }
+                action={
+                  <Segmented
+                    value={launcher.closeAction}
+                    onChange={(value) => onSetBehavior({ closeAction: value as CloseAction })}
+                    options={[
+                      { value: 'close', label: '关闭启动器' },
+                      { value: 'tray', label: '隐藏到托盘' }
+                    ]}
+                  />
+                }
+              />
+
+              <Row
+                name="启动应用后"
+                desc={afterLaunchDesc[launcher.afterLaunch]}
+                action={
+                  <Segmented
+                    value={launcher.afterLaunch}
+                    onChange={(value) => onSetBehavior({ afterLaunch: value as AfterLaunchAction })}
+                    options={[
+                      { value: 'none', label: '无操作' },
+                      { value: 'minimize', label: '最小化' },
+                      { value: 'tray', label: '隐藏到托盘' },
+                      { value: 'close', label: '关闭启动器' }
+                    ]}
+                  />
+                }
+              />
+
+              <Row
+                name="开机自启"
+                desc={autoStartDesc[launcher.autoStart]}
+                action={
+                  <Segmented
+                    value={launcher.autoStart}
+                    onChange={(value) => onSetBehavior({ autoStart: value as AutoStartMode })}
+                    options={[
+                      { value: 'off', label: '关闭' },
+                      { value: 'window', label: '打开窗口' },
+                      { value: 'tray', label: '静默托盘' }
+                    ]}
+                  />
+                }
+              />
+
+              <div className="settings-group-title">外观</div>
               <div className="launcher-brand">
               <button
                 className="launcher-icon has-image"
@@ -433,97 +693,23 @@ export default function SettingsView({
               </div>
 
               <Row
-                name="点击关闭按钮（×）"
+                name="侧边栏应用材质"
                 desc={
-                  launcher.closeAction === 'tray' ? '隐藏到托盘（点托盘图标可重新打开）' : '关闭启动器'
+                  launcher.sidebarMaterial
+                    ? '侧边栏使用当前应用的玻璃材质'
+                    : '侧边栏使用主题色'
                 }
                 action={
-                  <div className="segmented">
-                    <Seg
-                      value="close"
-                      current={launcher.closeAction}
-                      onPick={(v) => onSetBehavior({ closeAction: v as CloseAction })}
-                    >
-                      关闭启动器
-                    </Seg>
-                    <Seg
-                      value="tray"
-                      current={launcher.closeAction}
-                      onPick={(v) => onSetBehavior({ closeAction: v as CloseAction })}
-                    >
-                      隐藏到托盘
-                    </Seg>
-                  </div>
+                  <Switch
+                    checked={launcher.sidebarMaterial}
+                    label="应用"
+                    title="侧边栏是否应用当前应用的玻璃材质"
+                    onChange={(value) => onSetBehavior({ sidebarMaterial: value })}
+                  />
                 }
               />
 
-              <Row
-                name="启动应用后"
-                desc={afterLaunchDesc[launcher.afterLaunch]}
-                action={
-                  <div className="segmented">
-                    <Seg
-                      value="none"
-                      current={launcher.afterLaunch}
-                      onPick={(v) => onSetBehavior({ afterLaunch: v as AfterLaunchAction })}
-                    >
-                      无操作
-                    </Seg>
-                    <Seg
-                      value="minimize"
-                      current={launcher.afterLaunch}
-                      onPick={(v) => onSetBehavior({ afterLaunch: v as AfterLaunchAction })}
-                    >
-                      最小化
-                    </Seg>
-                    <Seg
-                      value="tray"
-                      current={launcher.afterLaunch}
-                      onPick={(v) => onSetBehavior({ afterLaunch: v as AfterLaunchAction })}
-                    >
-                      隐藏到托盘
-                    </Seg>
-                    <Seg
-                      value="close"
-                      current={launcher.afterLaunch}
-                      onPick={(v) => onSetBehavior({ afterLaunch: v as AfterLaunchAction })}
-                    >
-                      关闭启动器
-                    </Seg>
-                  </div>
-                }
-              />
-
-              <Row
-                name="开机自启"
-                desc={autoStartDesc[launcher.autoStart]}
-                action={
-                  <div className="segmented">
-                    <Seg
-                      value="off"
-                      current={launcher.autoStart}
-                      onPick={(v) => onSetBehavior({ autoStart: v as AutoStartMode })}
-                    >
-                      关闭
-                    </Seg>
-                    <Seg
-                      value="window"
-                      current={launcher.autoStart}
-                      onPick={(v) => onSetBehavior({ autoStart: v as AutoStartMode })}
-                    >
-                      打开窗口
-                    </Seg>
-                    <Seg
-                      value="tray"
-                      current={launcher.autoStart}
-                      onPick={(v) => onSetBehavior({ autoStart: v as AutoStartMode })}
-                    >
-                      静默托盘
-                    </Seg>
-                  </div>
-                }
-              />
-
+              <div className="settings-group-title">数据</div>
               <Row
                 name="备份与恢复"
                 desc="导出 / 导入全部设置（应用、使用时长、抽卡记录、图标、背景）"
@@ -540,16 +726,6 @@ export default function SettingsView({
               />
 
               <Row
-                name="检查更新"
-                desc={updateCheckText || '检查 GitHub Releases 上是否有新版本'}
-                action={
-                  <button className="btn sm" disabled={checkingUpdate} onClick={onCheckUpdate}>
-                    {checkingUpdate ? '检查中…' : '检查更新'}
-                  </button>
-                }
-              />
-
-              <Row
                 name="数据目录"
                 desc={dataDir || '…'}
                 action={
@@ -558,8 +734,6 @@ export default function SettingsView({
                   </button>
                 }
               />
-
-              <Row name="当前版本" desc={version} />
 
               <div className="settings-section">
                 <div className="settings-section-title">清理与占用</div>
@@ -593,6 +767,29 @@ export default function SettingsView({
                   </button>
                 </div>
               </div>
+
+              <div className="settings-group-title">更新与帮助</div>
+              <Row
+                name="检查更新"
+                desc={updateCheckText || '检查 GitHub Releases 上是否有新版本'}
+                action={
+                  <button className="btn sm" disabled={checkingUpdate} onClick={onCheckUpdate}>
+                    {checkingUpdate ? '检查中…' : '检查更新'}
+                  </button>
+                }
+              />
+
+              <Row name="当前版本" desc={version} />
+
+              <Row
+                name="导出日志"
+                desc="把运行日志复制到你选择的目录，便于反馈问题"
+                action={
+                  <button className="btn sm" onClick={onExportLogs}>
+                    导出日志
+                  </button>
+                }
+              />
 
               <div className="settings-section">
                 <div className="settings-section-title">关于 · 开源与致谢</div>

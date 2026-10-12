@@ -1,7 +1,4 @@
-import { execFile } from 'child_process'
-import { promisify } from 'util'
-
-const exec = promisify(execFile)
+import { runPowerShell } from './powershell'
 
 let cached: Promise<boolean> | null = null
 
@@ -17,11 +14,7 @@ export function isElevated(): Promise<boolean> {
 async function detect(): Promise<boolean> {
   if (process.platform !== 'win32') return true
   try {
-    const { stdout } = await exec(
-      'powershell.exe',
-      ['-NoProfile', '-NonInteractive', '-Command', PS_CHECK],
-      { windowsHide: true, timeout: 10000 }
-    )
+    const stdout = await runPowerShell(PS_CHECK, { timeout: 10_000 })
     return stdout.trim().toLowerCase() === 'true'
   } catch {
     return false

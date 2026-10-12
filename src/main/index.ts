@@ -1,9 +1,7 @@
-import { app, shell, BrowserWindow, protocol, net } from 'electron'
-import { execFile } from 'child_process'
-import { promisify } from 'util'
+import { app, shell, BrowserWindow, protocol } from 'electron'
 import { promises as fs } from 'fs'
 import { join, basename, dirname } from 'path'
-import { pathToFileURL } from 'url'
+import { serveMediaFile } from './services/mediaProtocol'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { registerIpc, registerUpdatePreview, runtime, warmUpFonts, appUpdate } from './ipc'
 import { AppStore } from './services/appStore'
@@ -23,12 +21,12 @@ import { applyDataDir } from './services/dataDir'
 import { relaunchInstallerElevated, syncInstalledVersion } from './services/install'
 import { cleanUpdateStaging } from './services/housekeeping'
 import { currentAppVersion } from './services/appVersion'
-
-const execFileAsync = promisify(execFile)
+import { flushBeforeShutdown } from './services/shutdown'
 import { BgStore } from './services/background'
 import { BrandStore } from './services/brand'
 import { IconStore } from './services/icon'
 import { isElevated } from './services/elevation'
+import { psQuote, runPowerShell } from './services/powershell'
 import { log } from './services/logger'
 
 protocol.registerSchemesAsPrivileged([
@@ -39,7 +37,10 @@ protocol.registerSchemesAsPrivileged([
       secure: true,
       supportFetchAPI: true,
       stream: true,
-      bypassCSP: true
+      bypassCSP: true,
+      // So the renderer can draw these images to a canvas without tainting it
+      // (used to sample the background's average colour for the foreground).
+      corsEnabled: true
     }
   }
 ])
@@ -81,20 +82,15 @@ let windowIcon: string | undefined
  * double-clicking the shortcut appeared to do nothing.
  */
 async function relaunchElevated(): Promise<boolean> {
-  const quote = (value: string): string => `'${value.replace(/'/g, "''")}'`
-  const args = process.argv.slice(1).map(quote)
+  const args = process.argv.slice(1).map(psQuote)
   // `-ArgumentList @()` is rejected by Start-Process, so only pass it when there
   // actually are arguments (this used to make every elevation attempt fail).
   const script =
-    `Start-Process -FilePath ${quote(process.execPath)}` +
+    `Start-Process -FilePath ${psQuote(process.execPath)}` +
     (args.length ? ` -ArgumentList @(${args.join(',')})` : '') +
     ' -Verb RunAs'
   try {
-    await execFileAsync(
-      'powershell.exe',
-      ['-NoProfile', '-NonInteractive', '-Command', script],
-      { windowsHide: true, timeout: 180_000 }
-    )
+    await runPowerShell(script, { timeout: 180_000 })
     return true
   } catch (error) {
     log(`app: elevation failed (${(error as Error).message})`)
@@ -216,29 +212,30 @@ app.whenReady().then(async () => {
     optimizer.watchWindowShortcuts(window)
   })
 
-  // Serves images from the launcher's `bg` / `icons` directories, and any
-  // absolute file path (for the gallery): kevin-media://file/<base64url>.
+  // Serves images / videos from the launcher's `bg` / `icons` / `brand` dirs, the
+  // bundled defaults, and any absolute file path (gallery):
+  // kevin-media://file/<base64url>. Range support keeps large video backgrounds
+  // playable, and CORS lets the renderer draw them to a canvas (untainted).
   protocol.handle('kevin-media', (request) => {
     const url = new URL(request.url)
     if (url.hostname === 'file') {
       const encoded = decodeURIComponent(url.pathname.replace(/^\//, ''))
       const filePath = Buffer.from(encoded, 'base64url').toString('utf8')
-      return net.fetch(pathToFileURL(filePath).toString())
-    }
-    if (url.hostname === 'default') {
-      // Bundled assets (default launcher icon) next to the app resources.
-      const name = basename(decodeURIComponent(url.pathname))
-      const root = app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'resources')
-      return net.fetch(pathToFileURL(join(root, name)).toString())
+      return serveMediaFile(filePath, request)
     }
     const name = basename(decodeURIComponent(url.pathname))
+    if (url.hostname === 'default') {
+      // Bundled assets (default launcher icon) next to the app resources.
+      const root = app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'resources')
+      return serveMediaFile(join(root, name), request)
+    }
     const dir =
       url.hostname === 'icon'
         ? IconStore.dir()
         : url.hostname === 'brand'
           ? BrandStore.dir()
           : BgStore.bgDir()
-    return net.fetch(pathToFileURL(join(dir, name)).toString())
+    return serveMediaFile(join(dir, name), request)
   })
 
   void isElevated().then((elevated) => log(`app: administrator=${elevated}`))
@@ -311,8 +308,17 @@ app.whenReady().then(async () => {
 })
 
 if (holdsLock || runMode !== 'app') {
-  app.on('before-quit', () => {
+  let shutdownFlushed = false
+  app.on('before-quit', (event) => {
     markQuitting()
+    // Flush play-time (and close out running sessions) before exiting. The
+    // handler prevents the first quit, flushes, then quits for real.
+    if (shutdownFlushed) return
+    event.preventDefault()
+    void flushBeforeShutdown().finally(() => {
+      shutdownFlushed = true
+      app.quit()
+    })
   })
 
   app.on('will-quit', () => {

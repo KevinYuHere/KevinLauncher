@@ -19,6 +19,10 @@ import HomeView from './components/HomeView'
 import GachaView from './components/GachaView'
 import UpdateView from './components/UpdateView'
 import SettingsView from './components/SettingsView'
+import ModuleManagerView from './components/ModuleManagerView'
+import LaunchTransition from './components/LaunchTransition'
+import Toaster, { showToast } from './components/toast'
+import { installPressJelly } from './drag/pressJelly'
 import GalleryView from './components/GalleryView'
 import PlayTimeView from './components/PlayTimeView'
 import AppFormDialog, { type AppFormMedia } from './components/AppFormDialog'
@@ -29,7 +33,8 @@ import IconCropper from './components/IconCropper'
 import type { ViewId } from './viewTypes'
 import { backgroundUrl, brandUrl, defaultIconUrl, VIDEO_RE } from './media'
 import { directoriesOverlap } from '@shared/paths'
-import { applyTheme } from './theme'
+import { updateChromeContrast } from './contrast'
+import { applyGlass, applyTheme } from './theme'
 
 type DialogState = { mode: 'add' } | { mode: 'edit'; entry: AppEntry } | null
 
@@ -61,7 +66,7 @@ export default function App(): ReactElement {
   const [totals, setTotals] = useState<Record<string, number>>({})
   const [updateInfos, setUpdateInfos] = useState<Record<string, UpdateInfo>>({})
   const [updateStatuses, setUpdateStatuses] = useState<Record<string, UpdateStatus>>({})
-  const [toast, setToast] = useState<string | null>(null)
+
   const [gamesHidden, setGamesHidden] = useState(false)
   const [peeking, setPeeking] = useState(false)
   const [bgDisplay, setBgDisplay] = useState<{
@@ -76,7 +81,8 @@ export default function App(): ReactElement {
     fontFamily: null,
     closeAction: 'close',
     afterLaunch: 'none',
-    autoStart: 'off'
+    autoStart: 'off',
+    sidebarMaterial: true
   })
   const [fonts, setFonts] = useState<string[]>([])
   const [version, setVersion] = useState('')
@@ -96,6 +102,12 @@ export default function App(): ReactElement {
   const [appUpdateState, setAppUpdateState] = useState<AppUpdateState>(IDLE_APP_UPDATE)
   const [dismissedUpdate, setDismissedUpdate] = useState<string | null>(null)
   const [checkingUpdate, setCheckingUpdate] = useState(false)
+  const [launchFx, setLaunchFx] = useState<{
+    effect: AppEntry['launchEffect']
+    key: number
+    originX: number
+    originY: number
+  } | null>(null)
   const [updateCheckText, setUpdateCheckText] = useState('')
   const [dataDir, setDataDir] = useState('')
   const [programDir, setProgramDir] = useState('')
@@ -120,6 +132,16 @@ export default function App(): ReactElement {
     setPeeking(false)
     setGamesHidden(next)
     await window.api.setGamesRowHidden(next)
+  }, [gamesHidden])
+
+  const gamesWrapRef = useRef<HTMLDivElement>(null)
+  // After a chip drag settles: if the row was only peeking and the pointer is no
+  // longer over it, collapse it again.
+  const handleGamesDragEnd = useCallback((): void => {
+    window.setTimeout(() => {
+      const el = gamesWrapRef.current
+      if (el && gamesHidden && !el.matches(':hover')) setPeeking(false)
+    }, 120)
   }, [gamesHidden])
 
   useEffect(() => {
@@ -224,10 +246,7 @@ export default function App(): ReactElement {
     [current, running]
   )
 
-  const showToast = useCallback((message: string): void => {
-    setToast(message)
-    window.setTimeout(() => setToast(null), 3200)
-  }, [])
+
 
   /** Manual "check for updates": report the outcome as a toast. */
   const handleCheckUpdate = useCallback(async (): Promise<void> => {
@@ -350,7 +369,6 @@ export default function App(): ReactElement {
         await window.api.updateApp({
           ...entry,
           name: input.name,
-          moduleLabel: input.moduleLabel ?? null,
           targetPath: input.targetPath,
           arguments: input.arguments ?? '',
           workingDirectory: input.workingDirectory ?? '',
@@ -376,6 +394,17 @@ export default function App(): ReactElement {
 
   const handleLaunch = useCallback(
     async (id: string): Promise<void> => {
+      const entry = apps.find((a) => a.id === id)
+      if (entry && entry.launchEffect !== 'none') {
+        const wrap = document.querySelector('.home .start-wrap') as HTMLElement | null
+        const r = wrap?.getBoundingClientRect()
+        setLaunchFx({
+          effect: entry.launchEffect,
+          key: Date.now(),
+          originX: r ? (r.left + r.width / 2) / window.innerWidth : 0.5,
+          originY: r ? 1 - (r.top + r.height / 2) / window.innerHeight : 0.4
+        })
+      }
       const result = await window.api.launchApp(id)
       if (!result.ok) {
         showToast(`启动失败：${result.error ?? '未知错误'}`)
@@ -387,7 +416,7 @@ export default function App(): ReactElement {
       else if (action === 'tray') await window.api.hideToTray()
       else if (action === 'close') await window.api.windowClose()
     },
-    [showToast, launcherSettings.afterLaunch]
+    [apps, showToast, launcherSettings.afterLaunch]
   )
 
   const handleStop = useCallback(
@@ -547,6 +576,22 @@ export default function App(): ReactElement {
         />
       )
     }
+    if (view === 'modules') {
+      return (
+        <ModuleManagerView
+          entry={entry}
+          onBack={back}
+          onSetModule={(moduleId, patch) =>
+            void window.api.setHomeModule(entry.id, moduleId, patch)
+          }
+          onResetModulePosition={(moduleId) =>
+            void window.api.setHomeModule(entry.id, moduleId, { x: null, y: null })
+          }
+          onSetModuleLabel={(label) => void window.api.setModuleLabel(entry.id, label)}
+          onSetLaunchEffect={(effect) => void window.api.setLaunchEffect(entry.id, effect)}
+        />
+      )
+    }
     return (
       <SettingsView
         entry={entry}
@@ -576,6 +621,11 @@ export default function App(): ReactElement {
         onCheckUpdate={() => void handleCheckUpdate()}
         checkingUpdate={checkingUpdate}
         updateCheckText={updateCheckText}
+        onExportLogs={() =>
+          void window.api.exportLogs().then((p) => {
+            if (p) showToast(`已导出日志到 ${p}`)
+          })
+        }
       />
     )
   }
@@ -632,12 +682,60 @@ export default function App(): ReactElement {
     [current?.id]
   )
 
+  // Apply the current app's glass. Live edits in the settings page call
+  // `applyGlass` themselves (immediate, no App re-render); this keeps other
+  // views / app switches in sync.
   useEffect(() => {
-    document.documentElement.classList.toggle(
-      'glass-light',
-      (current?.glassStyle ?? 'dark') === 'light'
-    )
-  }, [current?.glassStyle])
+    applyGlass(current?.glass)
+  }, [current?.glass])
+
+  // The sidebar material is a launcher-wide setting.
+  useEffect(() => {
+    document.documentElement.dataset.sidebarMaterial = launcherSettings.sidebarMaterial
+      ? 'true'
+      : 'false'
+  }, [launcherSettings.sidebarMaterial])
+
+  // Expose the user-facing background dimming for the contrast calculation.
+  useEffect(() => {
+    const dim = (bgDisplay?.dim ?? current?.backgroundDim ?? 0) / 100
+    document.documentElement.style.setProperty('--bg-dim', dim.toFixed(3))
+  }, [bgDisplay, current?.backgroundDim])
+
+  // Global press-jelly for plain controls (buttons / selects / fonts / …).
+  useEffect(() => installPressJelly(), [])
+
+  // Remember where the last click was (offset from the window centre) so dialogs
+  // can expand-in from it.
+  useEffect(() => {
+    const onDown = (event: PointerEvent): void => {
+      const root = document.documentElement.style
+      root.setProperty('--dx', `${Math.round(event.clientX - window.innerWidth / 2)}px`)
+      root.setProperty('--dy', `${Math.round(event.clientY - window.innerHeight / 2)}px`)
+    }
+    window.addEventListener('pointerdown', onDown, true)
+    return () => window.removeEventListener('pointerdown', onDown, true)
+  }, [])
+
+  // Over-background text/icons: black or white from the local background colour.
+  useEffect(() => {
+    let raf = 0
+    const run = (): void => {
+      cancelAnimationFrame(raf)
+      raf = requestAnimationFrame(() => updateChromeContrast())
+    }
+    run()
+    const settle = window.setTimeout(run, 150)
+    const video = document.querySelector('.bg-layer')
+    video?.addEventListener('loadeddata', run)
+    window.addEventListener('resize', run)
+    return () => {
+      cancelAnimationFrame(raf)
+      window.clearTimeout(settle)
+      video?.removeEventListener('loadeddata', run)
+      window.removeEventListener('resize', run)
+    }
+  }, [bgDisplay, view, currentId, launcherSettings.sidebarMaterial, current?.backgroundDim])
 
   // Retrigger the transition on view / app change. The background lives inside
   // this animated element so backdrop-filter keeps blurring during the animation.
@@ -661,6 +759,7 @@ export default function App(): ReactElement {
           key={bgDisplay.src}
           className="bg-layer"
           src={bgDisplay.src}
+          crossOrigin="anonymous"
           alt=""
           style={bgDisplay.blur > 0 ? { filter: `blur(${bgDisplay.blur}px)` } : undefined}
         />
@@ -670,6 +769,7 @@ export default function App(): ReactElement {
           key={bgDisplay.src}
           className="bg-layer"
           src={bgDisplay.src}
+          crossOrigin="anonymous"
           autoPlay
           muted
           loop
@@ -697,6 +797,7 @@ export default function App(): ReactElement {
 
       <div className="topbar">
         <div
+          ref={gamesWrapRef}
           className={`games-wrap${gamesHidden && !peeking ? ' collapsed' : ''}`}
           onMouseEnter={() => {
             if (gamesHidden) setPeeking(true)
@@ -712,6 +813,7 @@ export default function App(): ReactElement {
               onSelect={(id) => setCurrentId(id)}
               onAdd={() => setDialog({ mode: 'add' })}
               onReorder={(ids) => void handleReorder(ids)}
+              onDragEnd={handleGamesDragEnd}
             />
           </div>
           <button
@@ -759,6 +861,12 @@ export default function App(): ReactElement {
               onUpdateToggle={() => void handleUpdate(current.id, 'update')}
               onPreDownloadToggle={() => void handleUpdate(current.id, 'preDownload')}
               onShowStats={() => setView('playtime')}
+              onMoveModule={(moduleId, x, y) =>
+                void window.api.setHomeModule(current.id, moduleId, { x, y })
+              }
+              onModuleUnplaceable={(moduleId) =>
+                void window.api.setHomeModule(current.id, moduleId, { visible: false })
+              }
             />
           ) : (
             renderSubView(current)
@@ -785,9 +893,11 @@ export default function App(): ReactElement {
         />
       )}
 
-      {toast && <div className="toast">{toast}</div>}
+      <Toaster />
 
       <ConfirmHost />
+
+      <LaunchTransition trigger={launchFx} onDone={() => setLaunchFx(null)} />
 
       {gachaNotice && (
         <div className="gacha-toast">

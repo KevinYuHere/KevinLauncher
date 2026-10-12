@@ -3,8 +3,11 @@ import { join } from 'path'
 import { promises as fs } from 'fs'
 import type { AppUpdateInfo, AppUpdateState, AppUpdateStatus } from '@shared/types'
 import { isNewerVersion } from '@shared/version'
-import { downloadPayload, extractPayload, sha256File } from './updateDownload'
+import { downloadPayload, extractPayload } from './updateDownload'
+import { sha256File } from './hash'
 import { currentAppVersion } from './appVersion'
+import { writeFileAtomic } from './atomicFile'
+import { flushBeforeShutdown } from './shutdown'
 import { markQuitting } from './behavior'
 import { log } from './logger'
 
@@ -391,7 +394,7 @@ export class AppUpdateChecker {
 
   private async saveCache(): Promise<void> {
     try {
-      await fs.writeFile(
+      await writeFileAtomic(
         this.cacheFile(),
         JSON.stringify(
           {
@@ -402,8 +405,7 @@ export class AppUpdateChecker {
           },
           null,
           2
-        ),
-        'utf8'
+        )
       )
     } catch {
       /* caching is best effort */
@@ -468,6 +470,17 @@ export class AppUpdateChecker {
   begin(): void {
     const info = this.info
     if (!info || this.running) return
+    // A new Electron runtime cannot be swapped in place: always use the full
+    // installer. If the release manifest did not carry its asset, fall back to
+    // the standard GitHub asset name so the launcher can still download it
+    // (and open it) instead of kicking the user to the release page.
+    const runtimeChanged =
+      !!info.electronVersion && info.electronVersion !== process.versions.electron
+    if (runtimeChanged && !info.installerUrls.length) {
+      const name = info.installerName ?? `KevinLauncher-Installer-${info.version}.exe`
+      info.installerName = name
+      info.installerUrls = [`${LATEST_DOWNLOAD_BASE}/${name}`]
+    }
     if (!app.isPackaged || (!info.payloadUrls.length && !info.installerUrls.length)) {
       void shell.openExternal(info.htmlUrl)
       return
@@ -478,7 +491,6 @@ export class AppUpdateChecker {
     this.controller = new AbortController()
     // Log what will actually be fetched (the payload is ~0.15 MB, the installer
     // ~71 MB and only used when the runtime changed).
-    const runtimeChanged = !!info.electronVersion && info.electronVersion !== process.versions.electron
     const megabytes = Math.round(
       (runtimeChanged ? info.installerSize : info.payloadSize) / 1048576
     )
@@ -567,6 +579,7 @@ export class AppUpdateChecker {
       this.patch({ phase: 'done', installPercent: 100, message: '更新完成，正在重启…' })
       await this.switchTo(info.version)
       await fs.rm(staging, { recursive: true, force: true }).catch(() => {})
+      await flushBeforeShutdown()
       app.relaunch()
       app.exit(0)
     } catch (error) {

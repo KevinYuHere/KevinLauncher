@@ -1,7 +1,8 @@
 import { app } from 'electron'
 import { join } from 'path'
-import { promises as fs } from 'fs'
-import type { AppEntry } from '@shared/types'
+import { DEFAULT_GLASS_APPEARANCE, type AppEntry, type GlassAppearance } from '@shared/types'
+import { writeFileAtomic } from './atomicFile'
+import { openJsonStore } from './jsonStore'
 
 export interface LauncherConfig {
   version: number
@@ -17,14 +18,24 @@ export interface LauncherConfig {
     closeAction?: 'close' | 'tray'
     afterLaunch?: 'none' | 'minimize' | 'tray' | 'close'
     autoStart?: 'off' | 'window' | 'tray'
+    sidebarMaterial?: boolean
   }
 }
 
-/** v2: admin. v3: glass tone. v4: bg blur/dim. v5: auto theme. v6: module label. */
-const CURRENT_VERSION = 6
+/**
+ * v2: admin. v3: glass tone. v4: bg blur/dim. v5: auto theme. v6: module label.
+ * v7: glass tone → glass appearance { color, material, blur }.
+ * v9: glass `color` → `brightness`; per-app gacha option; sidebar material toggle.
+ * v10: glass gains `opacity` + per-material params (saturation/grain/refraction/
+ *      edgeWidth/highlight/highlightAngle/dispersion).
+ * v11: glass gains `panelRefraction`; per-app home-module state.
+ */
+const CURRENT_VERSION = 12
 const DEFAULT_CONFIG: LauncherConfig = { version: CURRENT_VERSION, apps: [] }
 
 let cache: LauncherConfig | null = null
+/** Set when the config file could not be read — writes are refused for the session. */
+let saveBlocked = false
 
 /** Persisted `config.json` store (apps + UI + global launcher settings). */
 export class AppStore {
@@ -34,54 +45,81 @@ export class AppStore {
 
   static async load(): Promise<LauncherConfig> {
     if (cache) return cache
-    try {
-      const raw = await fs.readFile(this.file(), 'utf-8')
-      const parsed = JSON.parse(raw) as LauncherConfig
-      parsed.apps = Array.isArray(parsed.apps) ? parsed.apps : []
-      parsed.version = parsed.version ?? 1
-      cache = parsed
-      await this.migrate(cache)
-    } catch {
-      cache = structuredClone(DEFAULT_CONFIG)
-    }
+    const { data, writable } = await openJsonStore<LauncherConfig>(
+      this.file(),
+      () => structuredClone(DEFAULT_CONFIG),
+      'appStore'
+    )
+    data.apps = Array.isArray(data.apps) ? data.apps : []
+    data.version = data.version ?? 1
+    cache = data
+    saveBlocked = !writable
+    await this.migrate(cache)
     return cache
   }
 
   /** Runs version migrations and persists them once. */
   private static async migrate(config: LauncherConfig): Promise<void> {
     if (config.version >= CURRENT_VERSION) return
-    if (config.version < 2) {
-      // Everything launched through the launcher runs as administrator by
-      // default now, so bring existing entries up to date.
-      for (const entry of config.apps) entry.runAsAdmin = true
-    }
-    if (config.version < 3) {
-      for (const entry of config.apps) entry.glassStyle = entry.glassStyle ?? 'dark'
-    }
-    if (config.version < 4) {
-      for (const entry of config.apps) {
-        entry.backgroundBlur = entry.backgroundBlur ?? 0
-        entry.backgroundDim = entry.backgroundDim ?? 25
+    const { version } = config
+    for (const entry of config.apps) {
+      // The pre-v7 binary tone, read only while upgrading an old config.
+      const legacy = entry as AppEntry & { glassStyle?: 'dark' | 'light' }
+      // v2: everything launched through the launcher runs as administrator now.
+      if (version < 2) entry.runAsAdmin = true
+      if (version < 3) legacy.glassStyle ??= 'dark'
+      if (version < 4) {
+        entry.backgroundBlur ??= 0
+        entry.backgroundDim ??= 25
       }
-    }
-    if (config.version < 5) {
-      for (const entry of config.apps) {
-        if (entry.autoTheme === undefined) entry.autoTheme = entry.themeColor == null
+      if (version < 5) {
+        entry.autoTheme ??= entry.themeColor == null
         // The old default dimming was 100; the new default is 25.
         if (entry.backgroundDim === 100) entry.backgroundDim = 25
       }
+      if (version < 6) entry.moduleLabel ??= null
+      if (version < 7) {
+        // Binary dark/light becomes a brightness (0 dark … 100 light) plus a
+        // material (毛玻璃 by default) and its own blur radius.
+        entry.glass = {
+          ...DEFAULT_GLASS_APPEARANCE,
+          brightness: legacy.glassStyle === 'light' ? 100 : 0
+        }
+        delete legacy.glassStyle
+      }
+      if (version < 9) {
+        // `color` was a misleading name for the brightness; the earlier
+        // distortion/edge/highlight fields were dropped.
+        const glass = entry.glass as (Partial<GlassAppearance> & { color?: number }) | undefined
+        entry.glass = {
+          ...DEFAULT_GLASS_APPEARANCE,
+          brightness: glass?.brightness ?? glass?.color ?? 0,
+          material: glass?.material ?? 'blur',
+          blur: glass?.blur ?? 18
+        }
+        entry.gachaShowSecond ??= true
+      }
+      if (version < 10) {
+        // Fill the new opacity + per-material fields (keep existing values).
+        entry.glass = { ...DEFAULT_GLASS_APPEARANCE, ...entry.glass }
+      }
+      if (version < 11) {
+        // panelRefraction + home-module state.
+        entry.glass = { ...DEFAULT_GLASS_APPEARANCE, ...entry.glass }
+        entry.homeModules = entry.homeModules ?? {}
+      }
+      if (version < 12) entry.launchEffect ??= 'none'
     }
-    if (config.version < 6) {
-      for (const entry of config.apps) entry.moduleLabel = entry.moduleLabel ?? null
+    if (version < 9) {
+      config.launcher = { ...config.launcher, sidebarMaterial: config.launcher?.sidebarMaterial ?? true }
     }
     config.version = CURRENT_VERSION
     await this.save()
   }
 
   static async save(): Promise<void> {
-    if (!cache) return
-    await fs.mkdir(app.getPath('userData'), { recursive: true })
-    await fs.writeFile(this.file(), JSON.stringify(cache, null, 2), 'utf-8')
+    if (!cache || saveBlocked) return
+    await writeFileAtomic(this.file(), JSON.stringify(cache, null, 2))
   }
 
   /** Drop the in-memory copy and read from disk again. */
@@ -101,6 +139,7 @@ export class AppStore {
     closeAction: 'close' | 'tray'
     afterLaunch: 'none' | 'minimize' | 'tray' | 'close'
     autoStart: 'off' | 'window' | 'tray'
+    sidebarMaterial: boolean
   }> {
     const config = await this.load()
     return {
@@ -108,7 +147,8 @@ export class AppStore {
       fontFamily: config.launcher?.fontFamily ?? null,
       closeAction: config.launcher?.closeAction ?? 'close',
       afterLaunch: config.launcher?.afterLaunch ?? 'none',
-      autoStart: config.launcher?.autoStart ?? 'off'
+      autoStart: config.launcher?.autoStart ?? 'off',
+      sidebarMaterial: config.launcher?.sidebarMaterial ?? true
     }
   }
 
@@ -118,6 +158,7 @@ export class AppStore {
     closeAction?: 'close' | 'tray'
     afterLaunch?: 'none' | 'minimize' | 'tray' | 'close'
     autoStart?: 'off' | 'window' | 'tray'
+    sidebarMaterial?: boolean
   }): Promise<void> {
     const config = await this.load()
     config.launcher = { ...config.launcher, ...patch }

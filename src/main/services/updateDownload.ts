@@ -1,5 +1,4 @@
 import { createWriteStream, createReadStream, promises as fs } from 'fs'
-import { createHash } from 'crypto'
 import { spawn } from 'child_process'
 import { dirname, join } from 'path'
 
@@ -42,17 +41,6 @@ async function fileSize(path: string): Promise<number> {
   } catch {
     return 0
   }
-}
-
-/** Hex SHA-256 of a file (used to verify the downloaded installer). */
-export function sha256File(path: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const hash = createHash('sha256')
-    const stream = createReadStream(path)
-    stream.on('data', (chunk) => hash.update(chunk))
-    stream.on('end', () => resolve(hash.digest('hex')))
-    stream.on('error', reject)
-  })
 }
 
 /** Bytes currently stored under `dir` (used as the install progress). */

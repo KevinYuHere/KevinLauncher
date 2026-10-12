@@ -1,7 +1,7 @@
-import { promises as fs, createReadStream } from 'fs'
+import { promises as fs } from 'fs'
 import { join, dirname } from 'path'
-import { createHash } from 'crypto'
 import { decompress } from 'fzstd'
+import { md5File } from '../services/hash'
 
 const CHUNK_API = 'https://downloader-api.mihoyo.com/downloader/sophon_chunk/api'
 const CONCURRENCY = 16
@@ -168,16 +168,6 @@ export async function fetchChunk(prefix: string, name: string, signal?: AbortSig
   const res = await fetch(`${prefix}/${name}`, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal })
   if (!res.ok) throw new Error(`download chunk failed HTTP ${res.status}`)
   return Buffer.from(decompress(new Uint8Array(await res.arrayBuffer())))
-}
-
-function md5File(path: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const hash = createHash('md5')
-    const stream = createReadStream(path)
-    stream.on('data', (d) => hash.update(d))
-    stream.on('end', () => resolve(hash.digest('hex')))
-    stream.on('error', reject)
-  })
 }
 
 async function fileMatches(path: string, size: number, md5: string): Promise<boolean> {

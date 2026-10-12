@@ -9,7 +9,9 @@ const MIN_ZOOM = 0.1
 const MAX_ZOOM = 12
 
 export default function Viewer({ path }: ViewerProps): ReactElement {
-  const name = path.split(/[\\/]/).pop() ?? path
+  const [navPath, setNavPath] = useState<string | null>(null)
+  const shown = navPath ?? path
+  const name = shown.split(/[\\/]/).pop() ?? shown
   const stageRef = useRef<HTMLDivElement>(null)
   const dragRef = useRef<{ x: number; y: number; ox: number; oy: number } | null>(null)
 
@@ -24,7 +26,42 @@ export default function Viewer({ path }: ViewerProps): ReactElement {
     setNatural(null)
     setZoom(1)
     setOffset({ x: 0, y: 0 })
-  }, [path])
+  }, [shown])
+
+  // Previous / next image (wraps), via the side buttons or the arrow keys.
+  const navigate = useCallback((delta: number): void => {
+    void window.api.galleryViewerNav(delta).then((next) => {
+      if (next) setNavPath(next)
+    })
+  }, [])
+
+  // Prev/next buttons fade out after 1s of no pointer movement; any move or a
+  // hover shows them again.
+  const [controls, setControls] = useState(true)
+  const idleTimer = useRef(0)
+  const poke = useCallback((): void => {
+    setControls(true)
+    window.clearTimeout(idleTimer.current)
+    idleTimer.current = window.setTimeout(() => setControls(false), 1000)
+  }, [])
+  useEffect(() => {
+    poke()
+    window.addEventListener('mousemove', poke)
+    return () => {
+      window.removeEventListener('mousemove', poke)
+      window.clearTimeout(idleTimer.current)
+    }
+  }, [poke])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'ArrowLeft') navigate(-1)
+      else if (e.key === 'ArrowRight') navigate(1)
+      else if (e.key === 'Escape') void window.api.windowClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [navigate])
 
   // Track the stage size.
   useEffect(() => {
@@ -95,7 +132,7 @@ export default function Viewer({ path }: ViewerProps): ReactElement {
           <button
             className="win-btn"
             title="在文件资源管理器中打开 / 复制"
-            onClick={() => void window.api.galleryContextMenu(path)}
+            onClick={() => void window.api.galleryContextMenu(shown)}
           >
             ⋯
           </button>
@@ -116,12 +153,28 @@ export default function Viewer({ path }: ViewerProps): ReactElement {
         onDoubleClick={reset}
         onContextMenu={(e) => {
           e.preventDefault()
-          void window.api.galleryContextMenu(path)
+          void window.api.galleryContextMenu(shown)
         }}
       >
+        <button
+          className={`viewer-nav prev${controls ? '' : ' hidden'}`}
+          title="上一张（←）"
+          onMouseEnter={poke}
+          onClick={() => navigate(-1)}
+        >
+          ‹
+        </button>
+        <button
+          className={`viewer-nav next${controls ? '' : ' hidden'}`}
+          title="下一张（→）"
+          onMouseEnter={poke}
+          onClick={() => navigate(1)}
+        >
+          ›
+        </button>
         <img
           className="viewer-img"
-          src={fileUrl(path)}
+          src={fileUrl(shown)}
           alt={name}
           draggable={false}
           onLoad={(e) => {

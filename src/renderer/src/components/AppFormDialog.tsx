@@ -1,4 +1,6 @@
-import { useEffect, useState, type ReactElement } from 'react'
+import { useEffect, useRef, useState, type ReactElement } from 'react'
+import { useOpenOrigin } from './useOpenOrigin'
+import ModalBackdrop from './ModalBackdrop'
 import type { AddonDescriptor, AddonId, AppEntry, NewAppEntry } from '@shared/types'
 import { iconUrl } from '../media'
 import Select from './Select'
@@ -40,7 +42,6 @@ export default function AppFormDialog({
   const editing = !!initial
 
   const [name, setName] = useState(initial?.name ?? '')
-  const [moduleLabel, setModuleLabel] = useState(initial?.moduleLabel ?? '')
   const [targetPath, setTargetPath] = useState(initial?.targetPath ?? '')
   const [arguments_, setArguments] = useState(initial?.arguments ?? '')
   const [workingDirectory, setWorkingDirectory] = useState(initial?.workingDirectory ?? '')
@@ -57,6 +58,14 @@ export default function AppFormDialog({
 
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [closing, setClosing] = useState(false)
+  const modalRef = useRef<HTMLDivElement>(null)
+  useOpenOrigin(modalRef)
+  const requestClose = (): void => {
+    if (closing) return
+    setClosing(true)
+    window.setTimeout(onClose, 180)
+  }
 
   /** Fill name / working dir / game dir from a chosen target — only if empty. */
   const applyTargetDefaults = (path: string): void => {
@@ -125,7 +134,6 @@ export default function AppFormDialog({
       await onSubmit(
         {
           name: name.trim() || '未命名应用',
-          moduleLabel: moduleLabel.trim() || null,
           targetPath: targetPath.trim(),
           arguments: arguments_,
           workingDirectory: workingDirectory.trim(),
@@ -167,16 +175,22 @@ export default function AppFormDialog({
   const preview = iconSource ?? (clearIcon ? defaultIcon : currentIcon)
 
   return (
-    <div className="modal-mask">
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+    <div className={`modal-mask${closing ? ' closing' : ''}`}>
+      <ModalBackdrop />
+      <div
+        ref={modalRef}
+        className={`modal${closing ? ' closing' : ''}`}
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="modal-header">
           <h2>{editing ? '编辑应用' : '添加应用'}</h2>
-          <button className="modal-close" onClick={onClose}>
+          <button className="modal-close" onClick={requestClose}>
             ✕
           </button>
         </div>
 
         <div className="modal-body">
+          <div className="settings-group-title">基本信息</div>
           <div className="media-row">
             <div className="media-preview">
               {preview ? <img src={preview} alt="" /> : (name[0] ?? '?').toUpperCase()}
@@ -201,6 +215,16 @@ export default function AppFormDialog({
           </div>
 
           <div className="field">
+            <label className="label">显示名称</label>
+            <input
+              className="input"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="我的应用"
+            />
+          </div>
+
+          <div className="field">
             <label className="label">
               目标文件<span className="req">*</span>
             </label>
@@ -217,67 +241,22 @@ export default function AppFormDialog({
             </div>
           </div>
 
-          <div className="form-grid">
-            <div className="field">
-              <label className="label">显示名称</label>
-              <input
-                className="input"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="我的应用"
-              />
-            </div>
-            <div className="field">
-              <label className="label">绑定游戏模块</label>
-              <Select
-                value={addonId}
-                placeholder="（不绑定，普通应用）"
-                options={[
-                  { value: '', label: '（不绑定，普通应用）' },
-                  ...addons.map((a) => ({ value: a.id as string, label: a.name }))
-                ]}
-                onChange={(value) => {
-                  const next = value as AddonId | ''
-                  setAddonId(next)
-                  applyAddonDefaults(next)
-                }}
-              />
-            </div>
-          </div>
-
+          <div className="settings-group-title">游戏模块（可选）</div>
           <div className="field">
-            <label className="label">模块文字</label>
-            <input
-              className="input"
-              value={moduleLabel}
-              onChange={(e) => setModuleLabel(e.target.value)}
-              placeholder="主页左下第二行显示，留空则用绑定的游戏模块名（例如：原神）"
+            <label className="label">绑定游戏模块</label>
+            <Select
+              value={addonId}
+              placeholder="（不绑定，普通应用）"
+              options={[
+                { value: '', label: '（不绑定，普通应用）' },
+                ...addons.map((a) => ({ value: a.id as string, label: a.name }))
+              ]}
+              onChange={(value) => {
+                const next = value as AddonId | ''
+                setAddonId(next)
+                applyAddonDefaults(next)
+              }}
             />
-          </div>
-
-          <div className="field">
-            <label className="label">启动参数</label>
-            <input
-              className="input"
-              value={arguments_}
-              onChange={(e) => setArguments(e.target.value)}
-              placeholder='--example "quoted value"'
-            />
-          </div>
-
-          <div className="field">
-            <label className="label">工作目录</label>
-            <div className="row">
-              <input
-                className="input"
-                value={workingDirectory}
-                onChange={(e) => setWorkingDirectory(e.target.value)}
-                placeholder="留空则使用目标文件所在目录"
-              />
-              <button className="btn" onClick={pickWorkDir}>
-                浏览
-              </button>
-            </div>
           </div>
 
           <div className="field">
@@ -293,6 +272,7 @@ export default function AppFormDialog({
                 浏览
               </button>
             </div>
+            <span className="field-hint">游戏安装根目录，用于版本检测与更新（可选）</span>
           </div>
 
           <div className="field">
@@ -308,6 +288,35 @@ export default function AppFormDialog({
                 浏览
               </button>
             </div>
+            <span className="field-hint">游戏截图所在目录，用于「图库」浏览（可选）</span>
+          </div>
+
+          <div className="settings-group-title">高级</div>
+          <div className="field">
+            <label className="label">启动参数</label>
+            <input
+              className="input"
+              value={arguments_}
+              onChange={(e) => setArguments(e.target.value)}
+              placeholder='--example "quoted value"'
+            />
+            <span className="field-hint">启动时传给目标程序的命令行参数；含空格请用引号</span>
+          </div>
+
+          <div className="field">
+            <label className="label">工作目录</label>
+            <div className="row">
+              <input
+                className="input"
+                value={workingDirectory}
+                onChange={(e) => setWorkingDirectory(e.target.value)}
+                placeholder="留空则使用目标文件所在目录"
+              />
+              <button className="btn" onClick={pickWorkDir}>
+                浏览
+              </button>
+            </div>
+            <span className="field-hint">程序运行时的工作目录，部分程序需要正确设置</span>
           </div>
 
           <div className="field">
@@ -327,7 +336,7 @@ export default function AppFormDialog({
         </div>
 
         <div className="modal-footer">
-          <button className="btn" onClick={onClose} disabled={busy}>
+          <button className="btn" onClick={requestClose} disabled={busy}>
             取消
           </button>
           <button className="btn primary" onClick={submit} disabled={busy}>

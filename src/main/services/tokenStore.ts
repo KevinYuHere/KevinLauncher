@@ -1,6 +1,7 @@
 import { app, safeStorage } from 'electron'
 import { join } from 'path'
-import { promises as fs } from 'fs'
+import { writeFileAtomic } from './atomicFile'
+import { openJsonStore } from './jsonStore'
 
 interface TokenFile {
   [key: string]: string
@@ -12,6 +13,8 @@ interface TokenFile {
  */
 export class TokenStore {
   private cache: TokenFile | null = null
+  /** Set when the store file could not be read — writes are refused. */
+  private saveBlocked = false
 
   private file(): string {
     return join(app.getPath('userData'), 'auth.json')
@@ -19,11 +22,9 @@ export class TokenStore {
 
   private async load(): Promise<TokenFile> {
     if (this.cache) return this.cache
-    try {
-      this.cache = JSON.parse(await fs.readFile(this.file(), 'utf-8')) as TokenFile
-    } catch {
-      this.cache = {}
-    }
+    const { data, writable } = await openJsonStore<TokenFile>(this.file(), () => ({}), 'tokens')
+    this.cache = data && typeof data === 'object' ? data : {}
+    this.saveBlocked = !writable
     return this.cache
   }
 
@@ -42,15 +43,15 @@ export class TokenStore {
   async set(key: string, value: string): Promise<void> {
     if (!safeStorage.isEncryptionAvailable()) return
     const data = await this.load()
+    if (this.saveBlocked) return
     data[key] = safeStorage.encryptString(value).toString('base64')
-    await fs.mkdir(app.getPath('userData'), { recursive: true })
-    await fs.writeFile(this.file(), JSON.stringify(data), 'utf-8')
+    await writeFileAtomic(this.file(), JSON.stringify(data)).catch(() => undefined)
   }
 
   async remove(key: string): Promise<void> {
     const data = await this.load()
-    if (!(key in data)) return
+    if (this.saveBlocked || !(key in data)) return
     delete data[key]
-    await fs.writeFile(this.file(), JSON.stringify(data), 'utf-8')
+    await writeFileAtomic(this.file(), JSON.stringify(data)).catch(() => undefined)
   }
 }

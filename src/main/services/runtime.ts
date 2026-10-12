@@ -123,6 +123,24 @@ export class Runtime {
     }))
   }
 
+  /**
+   * Ends every tracked session and returns the records. Called on shutdown so a
+   * game still running when the launcher exits is not silently dropped.
+   */
+  endAll(): PlaySessionRecord[] {
+    const records: PlaySessionRecord[] = []
+    for (const entry of [...this.running.values()]) {
+      this.running.delete(entry.appId)
+      if (!entry.armed) continue
+      const endUtc = new Date().toISOString()
+      const durationSec = Math.round((Date.now() - new Date(entry.startedAt).getTime()) / 1000)
+      if (durationSec > 0) {
+        records.push({ appId: entry.appId, startUtc: entry.startedAt, endUtc, durationSec })
+      }
+    }
+    return records
+  }
+
   dispose(): void {
     if (this.timer) clearInterval(this.timer)
     this.timer = null

@@ -1,4 +1,6 @@
-import type { ReactElement } from 'react'
+import { useRef, useState, type ReactElement } from 'react'
+import { useOpenOrigin } from './useOpenOrigin'
+import ModalBackdrop from './ModalBackdrop'
 import type { AppUpdateInfo } from '@shared/types'
 
 interface AppUpdateDialogProps {
@@ -19,9 +21,22 @@ export default function AppUpdateDialog({
   onStart,
   onDismiss
 }: AppUpdateDialogProps): ReactElement {
+  const [closing, setClosing] = useState(false)
+  const modalRef = useRef<HTMLDivElement>(null)
+  useOpenOrigin(modalRef)
+  const run = (fn: () => void): void => {
+    if (closing) return
+    setClosing(true)
+    window.setTimeout(fn, 180)
+  }
   return (
-    <div className="modal-mask">
-      <div className="modal update-modal" onClick={(e) => e.stopPropagation()}>
+    <div className={`modal-mask${closing ? ' closing' : ''}`}>
+      <ModalBackdrop />
+      <div
+        ref={modalRef}
+        className={`modal update-modal${closing ? ' closing' : ''}`}
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="modal-header">
           <h2>检测到新版本 {info.version}</h2>
         </div>
@@ -29,10 +44,10 @@ export default function AppUpdateDialog({
           <div className="update-notes">{info.notes || '该版本没有提供更新说明。'}</div>
         </div>
         <div className="modal-footer">
-          <button className="btn" onClick={onDismiss}>
+          <button className="btn" onClick={() => run(onDismiss)}>
             暂不更新
           </button>
-          <button className="btn primary" onClick={onStart}>
+          <button className="btn primary" onClick={() => run(onStart)}>
             立即更新
           </button>
         </div>

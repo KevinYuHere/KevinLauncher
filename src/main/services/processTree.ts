@@ -1,7 +1,4 @@
-import { execFile } from 'child_process'
-import { promisify } from 'util'
-
-const exec = promisify(execFile)
+import { runPowerShell } from './powershell'
 
 export interface ProcInfo {
   pid: number
@@ -16,11 +13,7 @@ const PS_CMD =
 export class ProcessTree {
   /** Snapshot of all processes. Uses CIM so parent pids are available. */
   static async snapshot(): Promise<ProcInfo[]> {
-    const { stdout } = await exec(
-      'powershell.exe',
-      ['-NoProfile', '-NonInteractive', '-Command', PS_CMD],
-      { maxBuffer: 64 * 1024 * 1024, windowsHide: true }
-    )
+    const stdout = await runPowerShell(PS_CMD, { maxBuffer: 64 * 1024 * 1024 })
     if (!stdout.trim()) return []
     const parsed = JSON.parse(stdout) as unknown
     const list = Array.isArray(parsed) ? parsed : [parsed]

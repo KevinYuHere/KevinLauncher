@@ -2,6 +2,7 @@ import { app } from 'electron'
 import { execFile, execFileSync } from 'child_process'
 import { promises as fs } from 'fs'
 import { join } from 'path'
+import { flushBeforeShutdown } from './shutdown'
 import { log } from './logger'
 
 /**
@@ -153,6 +154,36 @@ export async function hasData(dir: string): Promise<boolean> {
 }
 
 /**
+ * Seed a *fresh* data directory from the default one.
+ *
+ * A re-run of the installer points `target` at the directory the launcher is
+ * already using; the default directory may still exist from an earlier install
+ * (and hold older data). Migrating it over the target in that case would
+ * silently destroy the newer data (this wiped play-time history once), so the
+ * existing target is always kept as-is.
+ */
+export async function seedDataDir(
+  target: string,
+  fallback: string
+): Promise<{ copied: number; failed: number; keptExisting: boolean }> {
+  if (target.toLowerCase() === fallback.toLowerCase()) {
+    return { copied: 0, failed: 0, keptExisting: false }
+  }
+  // The chosen directory already holds the user's data — never overwrite it.
+  if (await hasData(target)) return { copied: 0, failed: 0, keptExisting: true }
+  if (!(await hasData(fallback))) return { copied: 0, failed: 0, keptExisting: false }
+
+  const { copied, failed } = await migrateData(fallback, target)
+  // Only remove the old directory when everything arrived and the new one is
+  // verifiably usable.
+  if (failed === 0 && copied > 0 && (await hasData(target))) {
+    await fs.rm(fallback, { recursive: true, force: true }).catch(() => undefined)
+    log(`dataDir: removed the default data directory ${fallback}`)
+  }
+  return { copied, failed, keptExisting: false }
+}
+
+/**
  * Switches the data directory: moves the current contents there, remembers the
  * choice and restarts the launcher. The old directory is only removed once the
  * copy completed without errors and the new one is verifiably usable.
@@ -177,6 +208,7 @@ export async function switchDataDir(
     log(`dataDir: keeping ${from} because ${failed} file(s) could not be copied`)
   }
 
+  await flushBeforeShutdown()
   app.relaunch()
   app.exit(0)
 }

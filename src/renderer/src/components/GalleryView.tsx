@@ -13,7 +13,15 @@ interface GalleryViewProps {
 
 // One grid cell: shows the cached thumbnail if present and otherwise registers
 // with the shared IntersectionObserver so the JPEG is produced on demand.
-function GalleryTile({ item }: { item: GalleryItem }): ReactElement {
+function GalleryTile({
+  item,
+  paths,
+  index
+}: {
+  item: GalleryItem
+  paths: string[]
+  index: number
+}): ReactElement {
   const ref = useRef<HTMLButtonElement>(null)
   const [thumb, setThumb] = useState<Thumb | undefined>(() => getThumb(item.path))
 
@@ -29,7 +37,7 @@ function GalleryTile({ item }: { item: GalleryItem }): ReactElement {
       className="gallery-thumb"
       style={{ aspectRatio: thumb ? String(thumb.aspect) : '16 / 9' }}
       title={item.name}
-      onClick={() => void window.api.galleryOpenViewer(item.path)}
+      onClick={() => void window.api.galleryOpenViewer(paths, index)}
       onContextMenu={(e) => {
         e.preventDefault()
         void window.api.galleryContextMenu(item.path)
@@ -107,8 +115,13 @@ export default function GalleryView({ entry, onBack, onEdit }: GalleryViewProps)
           </div>
         ) : (
           <div className="gallery-grid">
-            {items.map((item) => (
-              <GalleryTile key={item.path} item={item} />
+            {items.map((item, index) => (
+              <GalleryTile
+                key={item.path}
+                item={item}
+                paths={items.map((i) => i.path)}
+                index={index}
+              />
             ))}
           </div>
         )}

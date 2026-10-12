@@ -15,6 +15,7 @@ export default function Ring({ value, size = 36, stroke = 3 }: RingProps): React
   return (
     <svg className="ring" width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
       <circle
+        className="ring-track"
         cx={size / 2}
         cy={size / 2}
         r={r}

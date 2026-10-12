@@ -21,9 +21,19 @@ export default function Select({
   placeholder
 }: SelectProps): ReactElement {
   const [open, setOpen] = useState(false)
+  const [closing, setClosing] = useState(false)
   const [rect, setRect] = useState<{ left: number; top: number; width: number } | null>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
+
+  // Play an exit animation before unmounting the menu.
+  const requestClose = useCallback((): void => {
+    setClosing(true)
+    window.setTimeout(() => {
+      setOpen(false)
+      setClosing(false)
+    }, 150)
+  }, [])
 
   const toggle = useCallback((): void => {
     const el = triggerRef.current
@@ -38,9 +48,9 @@ export default function Select({
     const onDown = (e: MouseEvent): void => {
       const target = e.target as Node
       if (triggerRef.current?.contains(target) || menuRef.current?.contains(target)) return
-      setOpen(false)
+      requestClose()
     }
-    const close = (): void => setOpen(false)
+    const close = (): void => requestClose()
     window.addEventListener('mousedown', onDown)
     window.addEventListener('resize', close)
     window.addEventListener('wheel', close, { passive: true })
@@ -49,7 +59,7 @@ export default function Select({
       window.removeEventListener('resize', close)
       window.removeEventListener('wheel', close)
     }
-  }, [open])
+  }, [open, requestClose])
 
   const current = options.find((o) => o.value === value)
 
@@ -64,12 +74,12 @@ export default function Select({
         <span className="select-value">{current ? current.label : (placeholder ?? '请选择')}</span>
         <span className="select-caret">▾</span>
       </button>
-      {open &&
+      {(open || closing) &&
         rect &&
         createPortal(
           <div
             ref={menuRef}
-            className="select-menu"
+            className={`select-menu${closing ? ' closing' : ''}`}
             style={{ left: rect.left, top: rect.top, width: rect.width }}
           >
             {options.map((o) => (
@@ -79,7 +89,7 @@ export default function Select({
                 className={`select-option${o.value === value ? ' active' : ''}`}
                 onClick={() => {
                   onChange(o.value)
-                  setOpen(false)
+                  requestClose()
                 }}
               >
                 {o.label}

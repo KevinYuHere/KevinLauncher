@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState, type ReactElement } from 're
 import type { AddonDescriptor, AppEntry, GachaRecord, GachaStats } from '@shared/types'
 import { displayRank, rankClass } from '../format'
 import { confirm } from './confirm'
+import Switch from './Switch'
 
 // Gacha history for the current app: a per-banner breakdown with 5★/4★ stats,
 // pity counters and the raw record list. Records are fetched outside the render
@@ -28,7 +29,8 @@ export default function GachaView({
   const [stats, setStats] = useState<GachaStats | null>(null)
   const [url, setUrl] = useState('')
   const [busy, setBusy] = useState(false)
-  const [showSecond, setShowSecond] = useState(true)
+  // Per-app (persisted): whether the second-highest rarity is shown.
+  const showSecond = entry.gachaShowSecond ?? true
 
   const refresh = useCallback(async (): Promise<void> => {
     setRecords(await window.api.gachaList(entry.id))
@@ -201,14 +203,11 @@ export default function GachaView({
 
         <div className="pools-bar">
           <div className="panel-title">各卡池（独立计算）</div>
-          <label className="switch">
-            <input
-              type="checkbox"
-              checked={showSecond}
-              onChange={(e) => setShowSecond(e.target.checked)}
-            />
-            <span>显示次高品级</span>
-          </label>
+          <Switch
+            checked={showSecond}
+            label="显示次高品级"
+            onChange={(value) => void window.api.setGachaShowSecond(entry.id, value)}
+          />
         </div>
 
         {stats && stats.pools.length === 0 ? (

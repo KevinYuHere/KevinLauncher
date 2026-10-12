@@ -1,8 +1,8 @@
-import { promises as fs, createReadStream } from 'fs'
+import { promises as fs } from 'fs'
 import { join, dirname, relative, sep, basename } from 'path'
-import { createHash } from 'crypto'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
+import { md5File } from '../services/hash'
 
 const exec = promisify(execFile)
 
@@ -60,16 +60,6 @@ async function listFiles(dir: string): Promise<string[]> {
 async function copyFile(source: string, dest: string): Promise<void> {
   await fs.mkdir(dirname(dest), { recursive: true })
   await fs.copyFile(source, dest)
-}
-
-function md5File(path: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const hash = createHash('md5')
-    const stream = createReadStream(path)
-    stream.on('data', (chunk) => hash.update(chunk))
-    stream.on('end', () => resolve(hash.digest('hex')))
-    stream.on('error', reject)
-  })
 }
 
 /**

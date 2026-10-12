@@ -5,8 +5,166 @@
 
 export type AddonId = 'genshin' | 'starrail' | 'zzz' | 'arknights'
 
-/** Frosted-glass tone used across an app's UI. */
-export type GlassStyle = 'dark' | 'light'
+/**
+ * Glass material used across an app's UI.
+ * - `blur` 毛玻璃（经典模糊）
+ * - `mica` 云母（更致密、带细微颗粒的磨砂）
+ * - `liquid` 液态玻璃（边缘折射）
+ * - `shine` 高光（液态玻璃 + 高光反射）
+ */
+export type GlassMaterial = 'blur' | 'mica' | 'liquid' | 'shine'
+
+/**
+ * Appearance of the glass across an app. Two independent perceptual axes:
+ * - `brightness`
+ *   the surface tint (0 black … 100 white);
+ * - `opacity`
+ *   how much the background shows through / refracts (0 = opaque, no background
+ *   influence; 100 = fully see-through).
+ * Plus the shared `blur` and the per-material parameters below.
+ */
+export interface GlassAppearance {
+  /** 底色：0 = 黑，100 = 白（只影响材质内部，不影响页面背景）。 */
+  brightness: number
+  /** 背景影响：0 = 完全实心（无视背景），100 = 完全透出/折射背景。 */
+  opacity: number
+  material: GlassMaterial
+  /** 材质自身的模糊半径（px）。 */
+  blur: number
+  /** 背景饱和度（%，毛玻璃 / 云母）。 */
+  saturation: number
+  /** 颗粒强度（0-100，云母）。 */
+  grain: number
+  /** 折射强度（%，控件档：按钮/滑块/小药丸，液态 / 高光）。 */
+  refraction: number
+  /** 折射强度（%，大面板档：卡片/弹窗，液态 / 高光）。 */
+  panelRefraction: number
+  /** 折射边缘宽度（px，液态 / 高光）。 */
+  edgeWidth: number
+  /** 轮廓高光强度（%，液态 / 高光）。 */
+  highlight: number
+  /** 高光方向角度（deg，高光）。 */
+  highlightAngle: number
+  /** 色散强度（0-100，液态 / 高光）。 */
+  dispersion: number
+}
+
+/** Partial update for an app's glass appearance. */
+export type GlassPatch = Partial<GlassAppearance>
+
+/**
+ * Recommended parameters per material. Used when a new app is created, when the
+ * material is first switched to, and by the "重置材质参数" button.
+ */
+export const MATERIAL_DEFAULTS: Record<GlassMaterial, GlassAppearance> = {
+  // 毛玻璃 (per the 原神 preset)
+  blur: {
+    brightness: 0,
+    opacity: 100,
+    material: 'blur',
+    blur: 60,
+    saturation: 100,
+    grain: 30,
+    refraction: 100,
+    panelRefraction: 127,
+    edgeWidth: 40,
+    highlight: 42,
+    highlightAngle: 60,
+    dispersion: 0
+  },
+  // 云母 (per the 崩坏：星穹铁道 preset)
+  mica: {
+    brightness: 0,
+    opacity: 100,
+    material: 'mica',
+    blur: 32,
+    saturation: 110,
+    grain: 30,
+    refraction: 100,
+    panelRefraction: 55,
+    edgeWidth: 16,
+    highlight: 40,
+    highlightAngle: 60,
+    dispersion: 15
+  },
+  // 液态 (per the 绝区零 preset)
+  liquid: {
+    brightness: 0,
+    opacity: 95,
+    material: 'liquid',
+    blur: 0,
+    saturation: 120,
+    grain: 30,
+    refraction: 100,
+    panelRefraction: 55,
+    edgeWidth: 40,
+    highlight: 0,
+    highlightAngle: 60,
+    dispersion: 15
+  },
+  // 高光 (per the 明日方舟 preset)
+  shine: {
+    brightness: 0,
+    opacity: 95,
+    material: 'shine',
+    blur: 0,
+    saturation: 120,
+    grain: 30,
+    refraction: 100,
+    panelRefraction: 55,
+    edgeWidth: 40,
+    highlight: 35,
+    highlightAngle: 61,
+    dispersion: 8
+  }
+}
+
+/** Defaults for a new app / the fallback when a field is missing. */
+export const DEFAULT_GLASS_APPEARANCE: GlassAppearance = { ...MATERIAL_DEFAULTS.blur }
+
+/** Home-screen modules (per app). */
+export type HomeModuleId = 'info' | 'playtime' | 'launch'
+
+/** Per-module state on the home screen. `x`/`y` are stage fractions (null = default). */
+export interface HomeModuleState {
+  visible: boolean
+  draggable: boolean
+  x: number | null
+  y: number | null
+}
+
+/** Registry of home modules (extend here to add more later). */
+export const HOME_MODULES: {
+  id: HomeModuleId
+  name: string
+  desc: string
+  /** Whether the module may be hidden (the launch button may not). */
+  hideable: boolean
+}[] = [
+  { id: 'info', name: '信息卡片', desc: '左下角的应用信息与总时长', hideable: true },
+  { id: 'playtime', name: '使用时长', desc: '右下角的使用时长药丸按钮', hideable: true },
+  { id: 'launch', name: '启动按钮', desc: '启动 / 更新 / 停止按钮（不可隐藏）', hideable: false }
+]
+
+export const DEFAULT_HOME_MODULE: HomeModuleState = {
+  visible: true,
+  draggable: true,
+  x: null,
+  y: null
+}
+
+/** Full-screen transition played when a game is launched. */
+export type LaunchEffect = 'none' | 'shockwave' | 'melt' | 'glitch'
+
+/** Registry of launch effects (label + description). */
+export const LAUNCH_EFFECTS: { id: LaunchEffect; label: string; desc: string }[] = [
+  { id: 'none', label: '无', desc: '不播放启动特效' },
+  { id: 'shockwave', label: '折射激波', desc: '带色散的激波扫过整个窗口' },
+  { id: 'melt', label: '液态熔蚀', desc: '液态融化 + 方块故障' },
+  { id: 'glitch', label: '赛博故障', desc: '撕裂 / 方块 / RGB 故障' }
+]
+
+export const DEFAULT_LAUNCH_EFFECT: LaunchEffect = 'none'
 
 export interface AddonCapabilities {
   gacha: boolean
@@ -54,8 +212,8 @@ export interface AppEntry {
   backgroundFile: string | null
   /** Accent/theme colour for this app (hex), or null for the default. */
   themeColor: string | null
-  /** Frosted-glass tone (dark or light) used across the UI for this app. */
-  glassStyle: GlassStyle
+  /** Glass appearance (colour / material / blur) used across the UI for this app. */
+  glass: GlassAppearance
   /** Auto-extract the theme colour from the background whenever it changes. */
   autoTheme: boolean
   /** Background Gaussian blur radius in px (0 = sharp). */
@@ -70,6 +228,12 @@ export interface AppEntry {
    * launcher/script whose process names we cannot predict.
    */
   monitorProcessNames: string[]
+  /** 抽卡记录里是否显示次高品级（每个应用独立）。 */
+  gachaShowSecond: boolean
+  /** Home-screen module state (per app). Missing modules use the defaults. */
+  homeModules?: Partial<Record<HomeModuleId, HomeModuleState>>
+  /** Full-screen launch transition played when this app starts. */
+  launchEffect: LaunchEffect
   createdAt: string
   updatedAt: string
 }
@@ -78,6 +242,8 @@ export interface NewAppEntry {
   name: string
   /** Optional custom subtitle for the home screen (defaults to the add-on name). */
   moduleLabel?: string | null
+  /** Launch transition (defaults to none). */
+  launchEffect?: LaunchEffect
   targetPath: string
   arguments?: string
   workingDirectory?: string
@@ -258,6 +424,8 @@ export interface LauncherSettings {
   afterLaunch: AfterLaunchAction
   /** Whether the launcher starts with Windows (and how). */
   autoStart: AutoStartMode
+  /** 侧边栏是否应用当前应用的玻璃材质（否则用主题色）。 */
+  sidebarMaterial: boolean
 }
 
 /** A newer release found on GitHub (self-update). */
@@ -420,16 +588,28 @@ export interface KevinApi {
     closeAction?: CloseAction
     afterLaunch?: AfterLaunchAction
     autoStart?: AutoStartMode
+    sidebarMaterial?: boolean
   }): Promise<LauncherSettings>
+  /** 抽卡记录里是否显示次高品级（每个应用独立）。 */
+  setGachaShowSecond(appId: string, value: boolean): Promise<AppEntry>
   hideToTray(): Promise<void>
   /** Export every setting (apps, playtime, gacha, icons, backgrounds) to a zip. */
   exportData(): Promise<string | null>
   /** Restore a previously exported zip (overwrites everything). */
   importData(): Promise<{ apps: number } | null>
   setThemeColor(appId: string, color: string | null): Promise<AppEntry>
-  setGlassStyle(appId: string, style: GlassStyle): Promise<AppEntry>
+  /** Update the app's glass appearance (colour / material / blur). */
+  setGlass(appId: string, patch: GlassPatch): Promise<AppEntry>
   /** Set background blur (px) and dimming (0-100) for an app. */
   setBgTuning(appId: string, tuning: { blur: number; dim: number }): Promise<AppEntry>
+  /** Update one home-screen module's state (visibility / draggable / position). */
+  setHomeModule(appId: string, moduleId: HomeModuleId, patch: Partial<HomeModuleState>): Promise<AppEntry>
+  /** Set the full-screen launch transition for an app. */
+  setLaunchEffect(appId: string, effect: LaunchEffect): Promise<AppEntry>
+  /** Set the home information card's subtitle text ('' clears it). */
+  setModuleLabel(appId: string, label: string | null): Promise<AppEntry>
+  /** Ask for a directory and copy the launcher logs there; returns it (or null). */
+  exportLogs(): Promise<string | null>
   /** Extract a theme colour from the app's background image. */
   extractThemeColor(appId: string): Promise<AppEntry | null>
 
@@ -458,7 +638,9 @@ export interface KevinApi {
   updateSimulate(appId: string, mode: UpdateMode): Promise<void>
 
   galleryList(appId: string): Promise<GalleryItem[]>
-  galleryOpenViewer(path: string): Promise<void>
+  galleryOpenViewer(paths: string[], index: number): Promise<void>
+  /** Move the open viewer to the previous/next image (wraps); returns its path. */
+  galleryViewerNav(delta: number): Promise<string | null>
   galleryContextMenu(path: string): Promise<void>
 
   pickExecutable(): Promise<string | null>

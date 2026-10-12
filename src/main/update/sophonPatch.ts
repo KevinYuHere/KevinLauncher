@@ -1,9 +1,9 @@
-import { promises as fs, createReadStream } from 'fs'
+import { promises as fs } from 'fs'
 import { join, dirname } from 'path'
-import { createHash } from 'crypto'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { decompress } from 'fzstd'
+import { md5File } from '../services/hash'
 import {
   fetchChunk,
   fetchManifest,
@@ -197,16 +197,6 @@ function parsePatchProto(buf: Uint8Array): PatchProto {
     }
   }
   return proto
-}
-
-function md5File(path: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const hash = createHash('md5')
-    const stream = createReadStream(path)
-    stream.on('data', (d) => hash.update(d))
-    stream.on('end', () => resolve(hash.digest('hex')))
-    stream.on('error', reject)
-  })
 }
 
 async function fileMatches(path: string, size: number, md5: string): Promise<boolean> {

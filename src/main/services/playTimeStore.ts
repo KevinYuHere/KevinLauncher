@@ -1,7 +1,8 @@
 import { app } from 'electron'
 import { join } from 'path'
-import { promises as fs } from 'fs'
 import type { PlayTimeDay, PlayTimeTotals } from '@shared/types'
+import { writeFileAtomic } from './atomicFile'
+import { openJsonStore } from './jsonStore'
 
 export interface PlaySessionRecord {
   appId: string
@@ -36,6 +37,8 @@ export class PlayTimeStore {
   private sessions: PlaySessionRecord[] = []
   private loaded = false
   private saveTimer: NodeJS.Timeout | null = null
+  /** Set when the store file could not be read — writes are refused. */
+  private saveBlocked = false
 
   static instance(): PlayTimeStore {
     if (!singleton) singleton = new PlayTimeStore()
@@ -48,13 +51,13 @@ export class PlayTimeStore {
 
   async load(): Promise<void> {
     if (this.loaded) return
-    try {
-      const raw = await fs.readFile(this.file(), 'utf-8')
-      const parsed = JSON.parse(raw) as StoreShape
-      this.sessions = Array.isArray(parsed.sessions) ? parsed.sessions : []
-    } catch {
-      this.sessions = []
-    }
+    const { data, writable } = await openJsonStore<StoreShape>(
+      this.file(),
+      () => ({ version: CURRENT_VERSION, sessions: [] }),
+      'playTime'
+    )
+    this.sessions = Array.isArray(data.sessions) ? data.sessions : []
+    this.saveBlocked = !writable
     this.loaded = true
   }
 
@@ -70,6 +73,15 @@ export class PlayTimeStore {
     this.loaded = false
     this.sessions = []
     await this.load()
+  }
+
+  /** Persist any pending change immediately (used on shutdown). */
+  async flush(): Promise<void> {
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer)
+      this.saveTimer = null
+    }
+    await this.save()
   }
 
   totalForApp(appId: string): number {
@@ -128,14 +140,8 @@ export class PlayTimeStore {
   }
 
   private async save(): Promise<void> {
+    if (this.saveBlocked) return
     const data: StoreShape = { version: CURRENT_VERSION, sessions: this.sessions }
-    try {
-      await fs.mkdir(app.getPath('userData'), { recursive: true })
-      const tmp = `${this.file()}.tmp`
-      await fs.writeFile(tmp, JSON.stringify(data), 'utf-8')
-      await fs.rename(tmp, this.file())
-    } catch {
-      /* ignore persistence failures */
-    }
+    await writeFileAtomic(this.file(), JSON.stringify(data)).catch(() => undefined)
   }
 }

@@ -1,4 +1,6 @@
-import { useEffect, useState, type ReactElement } from 'react'
+import { useEffect, useRef, useState, type ReactElement } from 'react'
+import { useOpenOrigin } from './useOpenOrigin'
+import ModalBackdrop from './ModalBackdrop'
 
 interface ConfirmState {
   message: string
@@ -21,9 +23,15 @@ export function confirm(message: string): Promise<boolean> {
 /** Mount once (in App). Renders the current confirmation, if any. */
 export function ConfirmHost(): ReactElement | null {
   const [state, setState] = useState<ConfirmState | null>(null)
+  const [closing, setClosing] = useState(false)
+  const modalRef = useRef<HTMLDivElement>(null)
+  useOpenOrigin(modalRef)
 
   useEffect(() => {
-    show = setState
+    show = (next) => {
+      setClosing(false)
+      setState(next)
+    }
     return () => {
       show = null
     }
@@ -32,13 +40,22 @@ export function ConfirmHost(): ReactElement | null {
   if (!state) return null
 
   const close = (value: boolean): void => {
-    state.resolve(value)
-    setState(null)
+    if (closing) return
+    setClosing(true)
+    window.setTimeout(() => {
+      state.resolve(value)
+      setState(null)
+    }, 180)
   }
 
   return (
-    <div className="modal-mask">
-      <div className="modal confirm-modal" onClick={(e) => e.stopPropagation()}>
+    <div className={`modal-mask${closing ? ' closing' : ''}`}>
+      <ModalBackdrop />
+      <div
+        ref={modalRef}
+        className={`modal confirm-modal${closing ? ' closing' : ''}`}
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="modal-header">
           <h2>确认</h2>
         </div>

@@ -26,14 +26,31 @@
   --fg-3: rgba(255, 255, 255, 0.5);
   --fg-4: rgba(255, 255, 255, 0.32);
 
+  /* Over-background foreground (page titles, rail, top bar): black or white,
+     chosen by the theme colour. `applyTheme` overrides these. */
+  --chrome-fg: #ffffff;
+  --chrome-fg-2: rgba(255, 255, 255, 0.72);
+  --chrome-fg-3: rgba(255, 255, 255, 0.5);
+
   --line: rgba(255, 255, 255, 0.14);
   --line-strong: rgba(255, 255, 255, 0.26);
+  /* Backdrop scrim colour (dark veil for a dark UI, light veil for a light UI). */
+  --scrim-rgb: 8, 10, 15;
 
   --glass: rgba(18, 20, 26, 0.44);
   --glass-2: rgba(18, 20, 26, 0.62);
   --glass-overlay: rgba(18, 20, 26, 0.5);
   --glass-hover: rgba(255, 255, 255, 0.12);
   --field-bg: rgba(0, 0, 0, 0.28);
+
+  /* Material system (overridden per app by applyGlass + [data-material]). */
+  --glass-blur: 18px;
+  --glass-saturate: 120%;
+  --glass-backdrop: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  --glass-rim: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  --glass-sheen: none;
+  --glass-repeat: no-repeat;
+  --glass-size: auto;
 
   --ease: cubic-bezier(0.4, 0, 0.2, 1);
   color-scheme: dark;
@@ -50,11 +67,43 @@ body,
   margin: 0;
 }
 
-/* Per-app light frosted glass (toggled by adding `.glass-light` to <html>). */
-.glass-light {
-  --glass: linear-gradient(160deg, rgba(255, 255, 255, 0.15), rgba(255, 255, 255, 0.05));
-  --glass-2: linear-gradient(160deg, rgba(255, 255, 255, 0.2), rgba(255, 255, 255, 0.08));
-  --glass-overlay: linear-gradient(160deg, rgba(255, 255, 255, 0.17), rgba(255, 255, 255, 0.07));
+/* ---- Glass materials (selected per app; colour tokens are set inline by
+   applyGlass, the material class by `data-material` on <html>). ---- */
+:root[data-material='blur'] {
+  --glass-backdrop: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+}
+:root[data-material='mica'] {
+  --glass-backdrop: blur(calc(var(--glass-blur) * 1.7)) saturate(var(--glass-saturate))
+    brightness(1.03);
+  --glass-rim: inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+:root[data-material='liquid'] {
+  /* The edge refraction is a per-surface SVG filter applied by liquidMaterial.ts
+     (a shared url() token can't know each element's size/radius); this is the
+     fallback blur/saturation for surfaces the engine does not touch. No extra
+     brightness — it would make unfiltered areas look lighter than the rest. */
+  --glass-backdrop: blur(var(--glass-blur)) saturate(calc(var(--glass-saturate) * 1.3));
+}
+:root[data-material='shine'] {
+  --glass-backdrop: blur(var(--glass-blur)) saturate(calc(var(--glass-saturate) * 1.45));
+  /* rdev-style highlight: a soft inset rim (the diagonal light band comes from
+     the `--glass-sheen` set by applyGlass). */
+  --glass-rim:
+    inset 0 1px 0 rgba(255, 255, 255, 0.55),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.16),
+    inset 0 0 22px rgba(255, 255, 255, 0.12);
+}
+/* The zero-size host <svg> must stay rendered (not display:none). */
+.glass-defs {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+
+html {
+  /* No dark tap flash on touch (looked like the option "darkening" on click). */
+  -webkit-tap-highlight-color: transparent;
 }
 
 body {
@@ -65,6 +114,16 @@ body {
   line-height: 1.5;
   user-select: none;
   overflow: hidden;
+}
+
+/* Form controls (buttons, inputs …) do not inherit `font-family` by default —
+   without this they would keep the browser's own font and ignore the font
+   chosen in the settings. */
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
 }
 
 ::-webkit-scrollbar {
@@ -105,8 +164,15 @@ body {
   inset: -64px;
   z-index: 1;
   background:
-    linear-gradient(180deg, rgba(8, 10, 15, 0.5) 0%, rgba(8, 10, 15, 0.12) 26%, rgba(8, 10, 15, 0.72) 100%),
-    linear-gradient(90deg, rgba(8, 10, 15, 0.55) 0%, rgba(8, 10, 15, 0) 22%);
+    linear-gradient(
+      180deg,
+      rgba(var(--scrim-rgb), 0.5) 0%,
+      rgba(var(--scrim-rgb), 0.12) 26%,
+      rgba(var(--scrim-rgb), 0.72) 100%
+    ),
+    linear-gradient(90deg, rgba(var(--scrim-rgb), 0.55) 0%, rgba(var(--scrim-rgb), 0) 22%);
+  /* Strength = background influence; 0 at opacity 100 (fully clear). */
+  opacity: var(--scrim-strength, 1);
   pointer-events: none;
 }
 /* Extra darkening on top of the scrim (controlled per app). */
@@ -119,10 +185,12 @@ body {
 }
 
 .glass {
-  background: var(--glass);
-  backdrop-filter: blur(18px) saturate(120%);
-  -webkit-backdrop-filter: blur(18px) saturate(120%);
+  background-color: var(--glass);
+  background-image: var(--glass-sheen);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
   border: 1px solid var(--line);
+  box-shadow: var(--glass-rim);
 }
 
 /* ---------------------------------------------------------------- rail */
@@ -136,39 +204,108 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
+  touch-action: none;
   gap: 6px;
-  padding: 10px 0;
+  /* Left blank narrowed by half the little bar's width (average of before/after). */
+  padding: 10px 3px 10px 0;
+}
+
+/* Moving themed highlight + moving left bar (the rail acts as a segmented
+   control; both are spring-animated by useJelly). */
+.rail-thumb {
+  position: absolute;
+  left: 7.5px;
+  top: 0;
+  width: 46px;
+  border-radius: 12px;
+  background: var(--brand);
+  z-index: 0;
+  pointer-events: none;
+  will-change: transform;
+}
+.rail-bar {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 3px;
+  height: 22px;
+  border-radius: 0 3px 3px 0;
+  background: var(--on-brand);
+  z-index: 0;
+  pointer-events: none;
+  will-change: transform;
 }
 
 .rail-item {
   position: relative;
+  z-index: 1;
   width: 46px;
   height: 46px;
   display: grid;
   place-items: center;
   border: none;
   background: transparent;
-  color: var(--fg-2);
+  /* Over the game background → black/white by the theme colour. */
+  color: var(--chrome-fg-2);
   cursor: pointer;
   border-radius: 12px;
   transition: background 0.15s var(--ease), color 0.15s var(--ease);
 }
+/* Hover just brightens the icon (no grey background), matching the other
+   segmented controls. */
 .rail-item:hover {
-  color: var(--fg);
-  background: var(--glass-hover);
+  color: var(--chrome-fg);
 }
 .rail-item.active {
-  color: var(--fg);
-  background: rgba(255, 255, 255, 0.18);
+  color: var(--on-brand);
 }
-.rail-item.active::before {
-  content: "";
+/* Sidebar applies the current app's material: a glass strip behind the icons.
+   Its right edge stops between the rail icons and the first game icon (a little
+   narrower than the 64px rail). */
+/* With material on, the rail is a glass surface → its icons follow the glass
+   brightness (so sliding the brightness changes them), like other glass text. */
+:root[data-sidebar-material='true'] .rail-item {
+  color: var(--fg-2);
+}
+:root[data-sidebar-material='true'] .rail-item:hover {
+  color: var(--fg);
+}
+/* The active item's background is the theme colour → highest precedence: its
+   icon follows the theme colour regardless of the sidebar material. */
+:root[data-sidebar-material='true'] .rail-item.active {
+  color: var(--on-brand);
+}
+:root[data-sidebar-material='true'] .rail-update-btn {
+  color: var(--fg-2);
+}
+:root[data-sidebar-material='true'] .rail-update-btn:hover {
+  color: var(--fg);
+}
+.rail-glass {
+  display: none;
+}
+:root[data-sidebar-material='true'] .rail-glass {
+  display: block;
   position: absolute;
-  left: -10px;
-  width: 3px;
-  height: 22px;
-  border-radius: 0 3px 3px 0;
-  background: var(--brand);
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 62px;
+  z-index: 0;
+  border-radius: 0;
+  background-color: var(--glass);
+  background-image: var(--glass-sheen);
+  background-repeat: var(--glass-repeat, no-repeat);
+  background-size: var(--glass-size, auto);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  border-right: 1px solid var(--line);
+}
+.rail-item,
+.rail-spacer,
+.rail-update {
+  position: relative;
+  z-index: 1;
 }
 .rail-spacer {
   flex: 1;
@@ -204,23 +341,30 @@ body {
   overflow: hidden;
   border-radius: 12px;
   border: 1.5px solid transparent;
-  background: rgba(255, 255, 255, 0.14);
-  color: #fff;
+  background: var(--glass-hover);
+  color: var(--chrome-fg);
   font-weight: 700;
   font-size: 16px;
   cursor: pointer;
-  transition: border-color 0.15s var(--ease);
+  touch-action: none;
+  transition:
+    transform 0.35s cubic-bezier(0.34, 1.4, 0.4, 1),
+    border-color 0.15s var(--ease),
+    box-shadow 0.2s var(--ease);
+  will-change: transform;
 }
 .game-chip img {
   width: 100%;
   height: 100%;
   object-fit: cover;
+  -webkit-user-drag: none;
+  user-select: none;
 }
 .game-chip:hover {
-  border-color: rgba(255, 255, 255, 0.5);
+  border-color: var(--line-strong);
 }
 .game-chip.active {
-  border-color: #fff;
+  border-color: var(--chrome-fg);
 }
 .game-add {
   flex: 0 0 auto;
@@ -229,14 +373,14 @@ body {
   display: grid;
   place-items: center;
   border-radius: 12px;
-  border: 1px dashed rgba(255, 255, 255, 0.5);
+  border: 1px dashed var(--line-strong);
   background: transparent;
-  color: #fff;
+  color: var(--chrome-fg);
   cursor: pointer;
 }
 .game-add:hover {
   background: var(--glass-hover);
-  border-color: #fff;
+  border-color: var(--chrome-fg);
 }
 .game-chip[draggable='true'] {
   cursor: grab;
@@ -249,7 +393,11 @@ body {
   box-shadow: 0 0 0 2px var(--brand-dim);
 }
 .game-chip.dragging {
-  opacity: 0.45;
+  opacity: 1;
+  z-index: 20;
+  cursor: grabbing;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+  transition: none;
 }
 .games-wrap {
   display: flex;
@@ -272,6 +420,11 @@ body {
    box — so the chips' hover shadow (0 8px 20px) is cut off at the bottom/left.
    The padding gives the shadow room and the negative margins cancel it out
    again, keeping the collapsed width at zero. */
+/* While dragging, don't clip the dragged chip (its release animation must start
+   from where the finger was, even outside the row). */
+.games-collapser > .games.row-dragging {
+  overflow: visible;
+}
 .games-collapser > .games {
   overflow: hidden;
   min-width: 0;
@@ -287,7 +440,7 @@ body {
   border: none;
   border-radius: 12px;
   background: transparent;
-  color: var(--fg-3);
+  color: var(--chrome-fg-3);
   cursor: pointer;
   -webkit-app-region: no-drag;
   transition:
@@ -297,7 +450,7 @@ body {
 }
 .games-toggle:hover {
   background: var(--glass-hover);
-  color: var(--fg);
+  color: var(--chrome-fg);
 }
 .games-wrap.collapsed .games-toggle {
   margin-left: -13px;
@@ -319,14 +472,14 @@ body {
   border: none;
   border-radius: 8px;
   background: transparent;
-  color: var(--fg-2);
+  color: var(--chrome-fg-2);
   cursor: pointer;
   font-size: 13px;
   transition: background 0.12s var(--ease), color 0.12s var(--ease);
 }
 .win-btn:hover {
-  background: rgba(255, 255, 255, 0.14);
-  color: var(--fg);
+  background: var(--glass-hover);
+  color: var(--chrome-fg);
 }
 .win-btn.close:hover {
   background: var(--error);
@@ -350,9 +503,6 @@ body {
   inset: 0;
 }
 .home-info {
-  position: absolute;
-  left: 26px;
-  bottom: 26px;
   max-width: 440px;
   padding: 20px 22px;
   border-radius: 18px;
@@ -393,13 +543,134 @@ body {
   color: var(--success);
 }
 
-.home-actions {
+/* Positionable home modules (see HomeView.tsx). */
+.home-module {
   position: absolute;
-  right: 26px;
-  bottom: 26px;
+  z-index: 5;
+  /* max-content: an absolutely-positioned box with `left` set would otherwise
+     shrink-to-fit the space left of the container edge (module got narrower as it
+     was dragged right). */
+  width: max-content;
+  max-width: calc(100% - 8px);
+  will-change: transform;
+  /* Touch must not be taken over as a pan/scroll gesture (else the browser
+     fires `pointercancel` and the drag aborts). */
+  touch-action: none;
+  transition: transform 0.42s cubic-bezier(0.22, 1.4, 0.36, 1);
+}
+.home-module.draggable {
+  cursor: grab;
+}
+.home-module.dragging {
+  cursor: grabbing;
+  transition: none;
+}
+.start-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+/* Pre-download: a small circle inside the launch button's left rounded cap. */
+.pre-wrap {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 2;
+}
+/* Sits concentrically with the launch pill's left rounded cap (54 px tall). */
+.pre-circle {
+  width: 54px;
+  height: 54px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  position: relative;
+  border-radius: 50%;
+  background: none;
+  /* Pre-download: theme-coloured progress on a light-grey track. */
+  color: var(--brand);
+  --ring-track: rgba(17, 24, 39, 0.14);
+  --ring-track-opacity: 1;
+  cursor: pointer;
+  transition: filter 0.15s var(--ease), transform 0.15s var(--ease);
+}
+/* Game update: white progress on a light-white track (the button is themed). */
+.pre-circle.update-circle {
+  color: #ffffff;
+  --ring-track: rgba(255, 255, 255, 0.5);
+}
+.ring-track {
+  stroke: var(--ring-track, currentColor);
+  stroke-opacity: var(--ring-track-opacity, 0.22);
+}
+/* The cap circles own their colour (theme / white); the global `.ring { --fg }`
+   must not leak into them. */
+.pre-circle .ring {
+  color: inherit;
+}
+.pre-ring {
+  display: block;
+}
+.pre-icon,
+.pre-state {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: inherit;
+  pointer-events: none;
+}
+.pre-circle:hover {
+  filter: brightness(1.18);
+}
+.pre-circle:active {
+  transform: scale(0.94);
+}
+.pre-wrap .dl-pop {
+  left: 50%;
+  right: auto;
+  transform: translate(-50%, 4px);
+}
+.pre-wrap:hover .dl-pop {
+  transform: translate(-50%, 0);
+}
+
+.module-controls {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 18px;
+}
+/* Per-module settings: a caret that expands an inline settings panel. */
+.module-caret {
+  display: grid;
+  place-items: center;
+  padding: 6px;
+  transition: transform 0.2s var(--ease);
+}
+.module-caret.open {
+  transform: rotate(180deg);
+}
+/* Animated reveal: the panel stays mounted and animates its height (0fr → 1fr). */
+.module-settings {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.26s var(--ease);
+}
+.module-settings.open {
+  grid-template-rows: 1fr;
+}
+.module-settings-inner {
+  overflow: hidden;
+  min-height: 0;
+  padding: 0 0 8px;
+}
+.module-settings .settings-row {
+  padding-left: 18px;
+}
+.module-settings .input {
+  width: min(320px, 46vw);
 }
 .playtime-pill {
   display: flex;
@@ -413,6 +684,9 @@ body {
   font-variant-numeric: tabular-nums;
 }
 .start-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   padding: 16px 44px;
   border: none;
   border-radius: 999px;
@@ -476,12 +750,12 @@ body {
   font-size: 22px;
   font-weight: 700;
   letter-spacing: -0.01em;
-  color: var(--fg);
+  color: var(--chrome-fg);
 }
 .page-subtitle {
   margin: 4px 0 0;
   font-size: 13px;
-  color: var(--fg-3);
+  color: var(--chrome-fg-3);
 }
 .page-actions {
   display: flex;
@@ -497,8 +771,8 @@ body {
 /* ---------------------------------------------------------------- panels */
 .panel {
   background: var(--glass);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
   border: 1px solid var(--line);
   border-radius: 14px;
 }
@@ -530,8 +804,8 @@ body {
   border: 1px solid var(--line);
   border-radius: 14px;
   background: var(--glass);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
 }
 .stat-value {
   font-size: 30px;
@@ -557,8 +831,8 @@ body {
   border: 1px solid var(--line);
   border-radius: 14px;
   background: var(--glass);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -614,8 +888,8 @@ body {
   border-radius: 12px;
   overflow: hidden;
   background: var(--glass);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
 }
 .list-row {
   display: grid;
@@ -713,8 +987,8 @@ body {
   border-radius: 14px;
   overflow: hidden;
   background: var(--glass);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
 }
 .settings-row {
   display: grid;
@@ -752,21 +1026,71 @@ body {
   z-index: 50;
   display: grid;
   place-items: center;
-  background: rgba(6, 8, 12, 0.42);
-  backdrop-filter: blur(6px) saturate(120%);
-  -webkit-backdrop-filter: blur(6px) saturate(120%);
+  /* Light veil only (no blur) so the dialog's own backdrop-filter shows the
+     actual wallpaper, not a greyed/blurred mask. */
+  background: rgba(6, 8, 12, 0.26);
+  animation: maskIn 0.18s var(--ease) both;
+}
+@keyframes maskIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.modal-mask.closing {
+  animation: maskOut 0.18s var(--ease) both;
+}
+@keyframes maskOut {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+.modal.closing {
+  animation: popOut 0.18s var(--ease) both;
+}
+@keyframes popOut {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.55);
+  }
 }
 .modal {
   width: min(640px, 92vw);
   max-height: 88vh;
   display: flex;
   flex-direction: column;
-  background: var(--glass-2);
-  backdrop-filter: blur(18px) saturate(120%);
-  -webkit-backdrop-filter: blur(18px) saturate(120%);
+  /* Lower opacity than `--glass-2` so the *current* background shows through the
+     material (not a flat grey fill). */
+  background-color: var(--glass);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
   border: 1px solid var(--line-strong);
   border-radius: 16px;
   overflow: hidden;
+  /* Expand-in / collapse back to where the dialog was OPENED (snapshotted onto
+     the modal as --open-dx/--open-dy); dialogs without a clear origin stay
+     centred. */
+  transform-origin: calc(50% + var(--open-dx, 0px)) calc(50% + var(--open-dy, 0px));
+  animation: popIn 0.24s cubic-bezier(0.22, 1.4, 0.36, 1) both;
+}
+@keyframes popIn {
+  from {
+    opacity: 0;
+    transform: scale(0.55);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 .modal-header {
   display: flex;
@@ -819,9 +1143,9 @@ body {
   padding: 0 20px;
   border: 1px solid var(--line);
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.06);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
+  background: var(--glass);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
   box-shadow:
     0 8px 22px rgba(0, 0, 0, 0.25),
     inset 0 1px 0 rgba(255, 255, 255, 0.05);
@@ -831,7 +1155,7 @@ body {
     box-shadow 0.2s var(--ease);
 }
 .modal .btn:hover {
-  background: rgba(255, 255, 255, 0.13);
+  background: var(--glass-hover);
   border-color: var(--line-strong);
   box-shadow:
     0 10px 26px rgba(0, 0, 0, 0.32),
@@ -848,11 +1172,11 @@ body {
   background: var(--brand-hover);
 }
 .modal .btn.ghost {
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--glass);
   border-color: var(--line);
 }
 .modal .btn.ghost:hover {
-  background: rgba(255, 255, 255, 0.12);
+  background: var(--glass-hover);
 }
 .modal .btn.danger {
   background: rgba(255, 90, 95, 0.1);
@@ -904,9 +1228,9 @@ body {
   place-items: center;
   overflow: hidden;
   border-radius: 14px;
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--glass-hover);
   border: 1px solid var(--line);
-  color: #fff;
+  color: var(--fg);
   font-weight: 700;
   font-size: 18px;
   flex-shrink: 0;
@@ -957,19 +1281,104 @@ body {
 }
 
 /* --------------------------------------------------------------- toast */
-.toast {
+/* The dialog layer re-renders its own wallpaper so the dialog material renders
+   over the real background (see components/ModalBackdrop.tsx). */
+.modal-backdrop {
+  position: fixed;
+  inset: -64px;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.modal-backdrop img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.modal-backdrop span {
+  position: absolute;
+  inset: 0;
+  background: #000000;
+}
+
+/* Full-window launch transition (see components/LaunchTransition.tsx). */
+.launch-fx {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 85;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.12s linear;
+}
+.launch-fx.on {
+  opacity: 1;
+}
+.modal-mask > .modal {
+  position: relative;
+  z-index: 1;
+}
+
+/* Toast host: stacks multiple toasts (see components/toast.tsx). */
+.toast-stack {
   position: fixed;
   top: 78px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 80;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+}
+.toast {
+  position: static;
+  cursor: pointer;
+  pointer-events: auto;
   padding: 10px 18px;
   border-radius: 10px;
   border: 1px solid var(--line-strong);
-  background: rgba(24, 26, 32, 0.96);
-  backdrop-filter: blur(18px);
+  background-color: var(--glass-2);
+  background-image: var(--glass-sheen);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  box-shadow: var(--glass-rim);
   font-size: 13px;
   color: var(--fg);
+  animation: glassPopIn 0.18s cubic-bezier(0.22, 1.3, 0.36, 1) both;
+}
+.toast.closing {
+  animation: glassPopOut 0.17s var(--ease) both;
+}
+.select-menu.closing {
+  animation: glassPopOut 0.15s var(--ease) both;
+}
+/* Whole-page overlays (installer / uninstaller / gallery viewer) fade+scale in. */
+.setup,
+.viewer {
+  animation: overlayIn 0.24s var(--ease) both;
+}
+@keyframes overlayIn {
+  from {
+    opacity: 0;
+    transform: scale(0.99);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes glassPopOut {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.9) translateY(-4px);
+  }
 }
 
 /* --------------------------------------------------------------- welcome */
@@ -1021,19 +1430,31 @@ body {
   gap: 6px;
   height: 34px;
   padding: 0 16px;
-  border: 1px solid var(--line-strong);
+  /* Same frosted glass fill as the cards, so buttons track the current
+     material (blur/refraction …) too. */
+  border: 1px solid var(--line);
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--glass);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
   color: var(--fg);
   cursor: pointer;
   font-size: 13px;
   font-weight: 500;
   line-height: 1;
   white-space: nowrap;
-  transition: background 0.12s var(--ease), border-color 0.12s var(--ease);
+  transition:
+    background 0.12s var(--ease),
+    border-color 0.12s var(--ease),
+    transform 0.12s var(--ease);
 }
 .btn:hover {
-  background: rgba(255, 255, 255, 0.16);
+  background: var(--glass-hover);
+  border-color: var(--line-strong);
+}
+/* Press feedback (a small zoom, à la the liquid-glass demos). */
+.btn:active {
+  transform: scale(0.96);
 }
 .btn:disabled {
   opacity: 0.5;
@@ -1059,7 +1480,8 @@ body {
 }
 .btn.ghost {
   border-color: transparent;
-  background: transparent;
+  /* Frosted glass fill like the cards (never the theme colour). */
+  background: var(--glass);
   color: var(--fg-2);
 }
 .btn.ghost:hover {
@@ -1087,14 +1509,26 @@ body {
 
 /* ------------------------------------------------------- segmented control */
 .segmented {
+  position: relative;
   display: inline-flex;
   gap: 3px;
   padding: 3px;
+  touch-action: none;
   border: 1px solid var(--line);
   border-radius: 10px;
-  background: rgba(0, 0, 0, 0.22);
+  /* A card-style glass surface (same tokens as `.glass`), so the row reads as
+     part of the material rather than a flat veil. */
+  background-color: var(--glass);
+  background-image: var(--glass-sheen);
+  background-repeat: var(--glass-repeat, no-repeat);
+  background-size: var(--glass-size, auto);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  box-shadow: var(--glass-rim);
 }
 .seg {
+  position: relative;
+  z-index: 1;
   height: 28px;
   padding: 0 14px;
   display: inline-flex;
@@ -1106,16 +1540,31 @@ body {
   color: var(--fg-2);
   font-size: 12px;
   cursor: pointer;
-  transition:
-    background 0.15s var(--ease),
-    color 0.15s var(--ease);
+  transition: color 0.15s var(--ease);
 }
 .seg:hover {
   color: var(--fg);
 }
 .seg.active {
-  background: var(--brand);
   color: var(--on-brand);
+}
+/* Sliding highlight (see components/Segmented.tsx): a themed pill for the active
+   option, on top of the control's card-glass surface. Its label uses `--on-brand`
+   (black or white, chosen from the theme colour). */
+.seg-thumb,
+.tab-thumb {
+  position: absolute;
+  left: 0;
+  z-index: 0;
+  background: var(--brand);
+  pointer-events: none;
+  /* `transform` is driven by useJelly (springs); only width transitions here. */
+  transition: width 0.28s var(--ease);
+}
+.seg-thumb {
+  top: 3px;
+  bottom: 3px;
+  border-radius: 7px;
 }
 
 /* --------------------------------------------------------------- slider */
@@ -1125,7 +1574,7 @@ body {
   width: 190px;
   height: 4px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.2);
+  background: var(--line-strong);
   outline: none;
   cursor: pointer;
 }
@@ -1139,6 +1588,16 @@ body {
   border: 2px solid var(--on-brand);
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
   cursor: pointer;
+  transition:
+    transform 0.28s cubic-bezier(0.22, 1.5, 0.36, 1),
+    box-shadow 0.15s var(--ease);
+}
+.slider:hover::-webkit-slider-thumb {
+  transform: scale(1.2);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.5);
+}
+.slider:active::-webkit-slider-thumb {
+  transform: scale(1.35);
 }
 .slider::-webkit-slider-thumb:hover {
   background: var(--brand-hover);
@@ -1146,19 +1605,24 @@ body {
 
 /* ----------------------------------------------------------------- tabs */
 .tabs {
+  position: relative;
   display: inline-flex;
   gap: 4px;
   padding: 4px;
+  touch-action: none;
   border: 1px solid var(--line);
   border-radius: 12px;
-  background: var(--glass);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
-  box-shadow:
-    0 12px 34px rgba(0, 0, 0, 0.3),
-    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  background-color: var(--glass);
+  background-image: var(--glass-sheen);
+  background-repeat: var(--glass-repeat, no-repeat);
+  background-size: var(--glass-size, auto);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  box-shadow: var(--glass-rim);
 }
 .tab {
+  position: relative;
+  z-index: 1;
   height: 34px;
   padding: 0 18px;
   display: inline-flex;
@@ -1171,29 +1635,30 @@ body {
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
-  transition:
-    background 0.15s var(--ease),
-    color 0.15s var(--ease);
+  transition: color 0.15s var(--ease);
 }
 .tab:hover {
   color: var(--fg);
 }
 .tab.active {
-  background: var(--brand);
   color: var(--on-brand);
 }
-/* Slide the frosted card itself — a transform on the card (not its wrapper)
-   keeps backdrop-filter working, so the blur survives the animation. */
-.tab-panel > .settings {
-  animation: tabIn 0.26s var(--ease);
+.tab-thumb {
+  top: 4px;
+  bottom: 4px;
+  border-radius: 9px;
 }
-@keyframes tabIn {
+/* Settings tab switch: the same translate-only transition as the top views.
+   No `opacity` (it flashes the glass card's backdrop-filter) and the panel
+   element is stable, so repeated switching cannot leave a compositing offset. */
+.tab-anim-run {
+  animation: tab-slide 0.32s cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes tab-slide {
   from {
-    opacity: 0;
-    transform: translateX(var(--tab-x, 22px));
+    transform: translateX(var(--tab-x, 26px));
   }
   to {
-    opacity: 1;
     transform: none;
   }
 }
@@ -1224,7 +1689,7 @@ body {
   transition: border-color 0.15s var(--ease);
 }
 .launcher-icon:hover {
-  border-color: #ffffff;
+  border-color: var(--fg);
 }
 .launcher-icon img {
   width: 100%;
@@ -1415,8 +1880,8 @@ body {
   border: 1px solid var(--line);
   border-radius: 12px;
   background: var(--glass-2);
-  backdrop-filter: blur(18px) saturate(130%);
-  -webkit-backdrop-filter: blur(18px) saturate(130%);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
   box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
   animation: selectIn 0.14s var(--ease);
 }
@@ -1506,9 +1971,13 @@ body {
   justify-content: space-between;
   gap: 12px;
 }
+/* Over the game background (not inside a glass card) → theme-colour foreground. */
+.pools-bar .panel-title {
+  color: var(--chrome-fg);
+}
 .gacha-progress {
   font-size: 12px;
-  color: var(--fg-2);
+  color: var(--chrome-fg-2);
   font-variant-numeric: tabular-nums;
 }
 
@@ -1557,8 +2026,8 @@ body {
   border: 1px solid var(--line);
   border-radius: 999px;
   background: var(--glass-2);
-  backdrop-filter: blur(18px) saturate(130%);
-  -webkit-backdrop-filter: blur(18px) saturate(130%);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
   box-shadow: 0 14px 34px rgba(0, 0, 0, 0.4);
   color: var(--fg);
   font-size: 13px;
@@ -1594,8 +2063,8 @@ body {
   border: 1px solid var(--line);
   border-radius: 14px;
   background: var(--glass);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
   overflow: hidden;
 }
 .pool-col-head {
@@ -1724,63 +2193,139 @@ body {
   font-size: 13px;
   color: var(--fg-2);
 }
-.switch input {
-  appearance: none;
-  -webkit-appearance: none;
+.switch.disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.switch-track {
+  position: relative;
+  flex: 0 0 auto;
   width: 38px;
   height: 22px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.22);
-  position: relative;
+  background: var(--field-bg);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
   cursor: pointer;
-  transition: background 0.15s var(--ease);
-  margin: 0;
+  touch-action: none;
+  outline: none;
+  transition: background 0.2s var(--ease);
 }
-.switch input:checked {
+.switch-track[data-on='true'] {
   background: var(--brand);
 }
-.switch input::after {
-  content: "";
+.switch-track:focus-visible {
+  box-shadow: 0 0 0 2px var(--brand-line);
+}
+.switch-knob {
   position: absolute;
   top: 3px;
   left: 3px;
   width: 16px;
   height: 16px;
-  border-radius: 50%;
+  border-radius: 999px;
   background: var(--on-brand);
-  transition: transform 0.15s var(--ease);
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.35);
+  /* transform (position + jelly pop) is driven by useJelly. */
+  transition: width 0.18s var(--ease), height 0.18s var(--ease), top 0.18s var(--ease);
 }
-.switch input:checked::after {
-  transform: translateX(16px);
+/* iOS-style: the knob stretches while being dragged — wider *and* taller, so it
+   bulges both horizontally and vertically (fills the track's height). */
+/* Very restrained drag deformation (knob barely grows). */
+.switch-track[data-dragging='true'] .switch-knob {
+  width: 17px;
+  height: 16.5px;
+  top: 2.75px;
+}
+.switch-track:active .switch-knob {
+  filter: brightness(1.02);
 }
 
-/* -------------------------------------------------------- color input */
-.color-input {
+/* -------------------------------------------------------- color picker */
+/* In-app, glass-aware picker (the OS <input type="color"> dialog cannot be
+   themed). Trigger swatch + a floating popup of sliders and presets. */
+.color-trigger {
   width: 42px;
   height: 28px;
-  padding: 0;
+  padding: 3px;
   border: 1px solid var(--line-strong);
   border-radius: 8px;
-  background: transparent;
+  background: var(--field-bg);
   cursor: pointer;
 }
-.color-input::-webkit-color-swatch-wrapper {
-  padding: 2px;
-}
-.color-input::-webkit-color-swatch {
-  border: none;
+.color-trigger-fill {
+  display: block;
+  width: 100%;
+  height: 100%;
   border-radius: 5px;
+}
+/* Colour editor — react-colorful inside a glass popup (follows the material). */
+.color-popup {
+  width: 240px;
+}
+.color-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.color-editor .react-colorful {
+  width: 100%;
+  height: 168px;
+  border-radius: 10px;
+}
+.color-editor .react-colorful__saturation {
+  border-radius: 10px 10px 0 0;
+  border-bottom: none;
+}
+.color-editor .react-colorful__hue {
+  height: 18px;
+  border-radius: 0 0 10px 10px;
+}
+.color-editor .react-colorful__pointer {
+  width: 18px;
+  height: 18px;
+  border-width: 2px;
+}
+.color-editor-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.color-preview {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+}
+.color-text {
+  flex: 1;
+  min-width: 0;
+}
+.color-presets {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 6px;
+}
+.color-swatch {
+  width: 100%;
+  aspect-ratio: 1;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  cursor: pointer;
 }
 
 /* ----------------------------------------------------------- gallery */
 .gallery-grid {
-  column-width: 220px;
-  column-gap: 12px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
 }
 .gallery-thumb {
   display: block;
   width: 100%;
-  margin: 0 0 12px;
+  margin: 0;
   padding: 0;
   border: 1px solid var(--line);
   border-radius: 12px;
@@ -1856,6 +2401,11 @@ body {
   flex-direction: column;
   background: #0b0d12;
 }
+/* The self-update dialog has no clear click origin → expand from the centre. */
+.update-modal {
+  transform-origin: center center !important;
+}
+
 .viewer-bar {
   height: 44px;
   display: flex;
@@ -1891,6 +2441,44 @@ body {
   will-change: transform;
   user-select: none;
   -webkit-user-drag: none;
+}
+/* Circular prev/next buttons: fixed gaussian blur + jelly press. `top` uses a
+   calc (not translateY) so the press-jelly `transform: scale()` doesn't fight it. */
+.viewer-nav {
+  position: absolute;
+  top: calc(50% - 28px);
+  width: 56px;
+  height: 56px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: rgba(20, 20, 24, 0.32);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  color: #ffffff;
+  font-size: 36px;
+  line-height: 1;
+  padding-bottom: 4px;
+  cursor: pointer;
+  z-index: 2;
+  transition:
+    opacity 0.25s var(--ease),
+    background 0.15s var(--ease);
+}
+.viewer-nav.prev {
+  left: 16px;
+}
+.viewer-nav.next {
+  right: 16px;
+}
+.viewer-nav:hover {
+  background: rgba(40, 40, 46, 0.5);
+}
+/* Fade out after the pointer is idle (see Viewer.tsx). */
+.viewer-nav.hidden {
+  opacity: 0;
+  pointer-events: none;
 }
 
 /* =========================================================================
@@ -1929,6 +2517,10 @@ textarea:focus-visible {
 
 /* ---------- buttons ---------- */
 .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
   height: 36px;
   border-radius: 10px;
   font-weight: 600;
@@ -1956,17 +2548,12 @@ textarea:focus-visible {
     color 0.15s var(--ease);
 }
 .rail-item.active {
-  background: var(--brand);
+  /* The themed thumb provides the background now; the icon follows the theme
+     colour (black or white), not the wallpaper. */
   color: var(--on-brand);
-}
-.rail-item.active::before {
-  background: var(--on-brand);
 }
 
 /* ---------- top game switcher ---------- */
-.game-chip {
-  transition: border-color 0.15s var(--ease);
-}
 .game-chip:hover {
   box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
 }
@@ -1982,8 +2569,8 @@ textarea:focus-visible {
 .home-info,
 .playtime-pill {
   background: var(--glass-overlay);
-  backdrop-filter: blur(18px) saturate(120%);
-  -webkit-backdrop-filter: blur(18px) saturate(120%);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
   border: 1px solid var(--line);
   box-shadow:
     0 10px 30px rgba(0, 0, 0, 0.3),
@@ -2012,7 +2599,11 @@ textarea:focus-visible {
   --glow: var(--brand);
   position: relative;
   overflow: hidden;
-  padding: 0 44px;
+  /* Fixed width so every state (启动 / 开始更新 / 停止 / 进度) keeps the same
+     footprint and the home modules never shift. */
+  width: 138px;
+  box-sizing: border-box;
+  padding: 0;
   background: #ffffff;
   letter-spacing: 0.16em;
   box-shadow:
@@ -2021,6 +2612,12 @@ textarea:focus-visible {
   transition:
     box-shadow 0.25s var(--ease),
     transform 0.1s var(--ease);
+}
+/* States with a cap circle keep the label a fixed gap to the right of it, so
+   the pre-download ("启动") and update ("42%") labels line up. */
+.start-btn.has-circle {
+  justify-content: flex-start;
+  padding-left: 62px;
 }
 .start-btn::after {
   content: '';
@@ -2089,87 +2686,12 @@ textarea:focus-visible {
 .dl-wrap {
   position: relative;
 }
-/* 54px box → the ring is concentric with the pill / button's rounded cap. */
-.ring-box {
-  width: 54px;
-  height: 54px;
-  flex: 0 0 auto;
-  display: grid;
-  place-items: center;
-}
 .ring {
-  color: #ffffff;
-}
-.dl-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  height: 54px;
-  padding: 0 22px 0 0;
-  border-radius: 999px;
   color: var(--fg);
-  font-size: 14px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
+}
+/* Update progress shows a percentage; keep the digits from jittering. */
+.start-btn.update {
   font-variant-numeric: tabular-nums;
-  cursor: pointer;
-}
-.dl-pill:hover {
-  background: rgba(255, 255, 255, 0.16);
-}
-/* Label + status text share one size (16px) so "预下载" and "已暂停" match. */
-.dl-pill-label {
-  min-width: 42px;
-  text-align: left;
-  font-size: 16px;
-  font-weight: 800;
-}
-/* percent on top, speed below in small text */
-.dl-col {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 1px;
-  line-height: 1.1;
-}
-.dl-percent {
-  font-size: 16px;
-  font-weight: 800;
-}
-.dl-sub {
-  font-size: 10px;
-  font-weight: 600;
-  opacity: 0.65;
-}
-.start-btn.dl-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 8px;
-  padding: 0 20px 0 0;
-  color: var(--on-brand);
-  letter-spacing: 0;
-  font-variant-numeric: tabular-nums;
-}
-/* The ring on the (theme-coloured) download button follows the text colour. */
-.start-btn.dl-btn .ring {
-  color: var(--on-brand);
-}
-.dl-btn-info {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 1px;
-  line-height: 1.1;
-}
-.dl-btn-percent {
-  font-size: 18px;
-  font-weight: 800;
-}
-.dl-btn-speed {
-  font-size: 11px;
-  font-weight: 600;
-  opacity: 0.6;
 }
 /* Hover detail popup — attached right above the control. */
 .dl-pop {
@@ -2181,11 +2703,12 @@ textarea:focus-visible {
   border: 1px solid var(--line);
   border-radius: 12px;
   background: var(--glass-2);
-  backdrop-filter: blur(18px) saturate(130%);
-  -webkit-backdrop-filter: blur(18px) saturate(130%);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
   box-shadow: 0 14px 34px rgba(0, 0, 0, 0.42);
   opacity: 0;
-  transform: translateY(4px);
+  transform: translateY(4px) scale(0.94);
+  transform-origin: bottom right;
   pointer-events: none;
   white-space: nowrap;
   transition:
@@ -2194,7 +2717,7 @@ textarea:focus-visible {
 }
 .dl-wrap:hover .dl-pop {
   opacity: 1;
-  transform: none;
+  transform: scale(1);
 }
 .dl-pop-speed {
   font-size: 13px;
@@ -2356,6 +2879,19 @@ textarea:focus-visible {
   text-transform: uppercase;
   opacity: 0.55;
 }
+/* Group heading inside a settings list / form. */
+.settings-group-title {
+  padding: 20px 18px 6px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  opacity: 0.5;
+}
+.settings-group-title:first-child {
+  /* The gap to the card's top edge must match the gap a later title has to the
+     previous row's border (which equals the title's own top padding). */
+  padding-top: 20px;
+}
 .about-line {
   display: flex;
   align-items: center;
@@ -2427,10 +2963,10 @@ textarea:focus-visible {
   position: relative;
 }
 .rail-update-btn {
-  color: var(--fg-2);
+  color: var(--chrome-fg-2);
 }
 .rail-update-btn:hover {
-  color: var(--fg);
+  color: var(--chrome-fg);
 }
 .rail-update-icon {
   position: relative;
@@ -2474,6 +3010,17 @@ textarea:focus-visible {
   border: 1px solid var(--line);
   pointer-events: none;
   z-index: 30;
+  animation: railPopIn 0.18s cubic-bezier(0.22, 1.3, 0.36, 1) both;
+}
+@keyframes railPopIn {
+  from {
+    opacity: 0;
+    transform: translateX(-6px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 .rail-pop-head {
   font-size: 12px;
@@ -2520,8 +3067,8 @@ textarea:focus-visible {
   border-radius: 16px;
   border: 1px solid var(--line);
   background: var(--glass);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
   overflow: hidden;
 }
 .setup-head {
@@ -2550,6 +3097,8 @@ textarea:focus-visible {
   margin-left: auto;
   width: 30px;
   height: 30px;
+  display: grid;
+  place-items: center;
   border: none;
   border-radius: 8px;
   background: transparent;
@@ -3066,6 +3615,111 @@ textarea:focus-visible {
   padding: 0 22px;
   border-radius: 11px;
   font-size: 14px;
+}
+
+/* ---------------------------------------------------- material surface texture
+   Every frosted surface paints the current material's `--glass-sheen` layer
+   (云母颗粒 or 高光光带). Declared last so it wins over the `background`
+   shorthand on the individual component rules. */
+.glass,
+.panel,
+.settings,
+.list,
+.pool-col,
+.stat-card,
+.pity-card,
+.modal,
+.toast,
+.gacha-toast,
+.home-info,
+.playtime-pill,
+.welcome,
+.setup-card,
+.glass-pop {
+  background-image: var(--glass-sheen);
+  background-repeat: var(--glass-repeat, no-repeat);
+  background-size: var(--glass-size, auto);
+}
+
+/* Portal popup (see components/GlassPopup.tsx) — matches the current material. */
+.glass-pop {
+  position: fixed;
+  z-index: 90;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background-color: var(--glass-2);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  box-shadow: var(--glass-rim), 0 14px 34px rgba(0, 0, 0, 0.42);
+  white-space: nowrap;
+  animation: glassPopIn 0.18s cubic-bezier(0.22, 1.3, 0.36, 1) both;
+}
+/* Purely informational popup (download details): clicks pass through to the
+   progress ring underneath it. */
+.glass-pop.dl-pop-glass {
+  pointer-events: none;
+}
+@keyframes glassPopIn {
+  from {
+    opacity: 0;
+    transform: scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.glass-pop.closing {
+  animation: glassPopOut 0.16s var(--ease) both;
+}
+@keyframes glassPopOut {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.95) translateY(-3px);
+  }
+}
+
+/* ---------------------------------------------------- component surfaces
+   A component NOT wrapped in a material surface uses the current material as its
+   background; one that IS wrapped uses a light translucent black (just a slight
+   darken, no double material). Declared last so it wins (except `.primary`). */
+.tabs,
+.segmented,
+.input,
+.select,
+.select-trigger,
+.select-menu,
+.font-item,
+.color-trigger,
+.btn {
+  background-color: var(--glass);
+  background-image: var(--glass-sheen);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+}
+.settings .segmented,
+.settings .input,
+.settings .select,
+.settings .select-trigger,
+.settings .font-item,
+.settings .color-trigger,
+.settings .btn,
+.modal .btn,
+.modal .input,
+.modal .select,
+.modal .select-trigger,
+.modal .segmented,
+.panel .segmented,
+.list .segmented {
+  background: rgba(0, 0, 0, 0.16);
+  background-image: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
 

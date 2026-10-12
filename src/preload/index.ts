@@ -4,9 +4,13 @@ import type {
   KevinApi,
   NewAppEntry,
   AppEntry,
-  GlassStyle,
+  GlassPatch,
+  HomeModuleId,
+  HomeModuleState,
+  LaunchEffect,
   CloseAction,
-  AfterLaunchAction
+  AfterLaunchAction,
+  AutoStartMode
 } from '@shared/types'
 
 const api: KevinApi = {
@@ -36,17 +40,29 @@ const api: KevinApi = {
   getLauncherSettings: () => ipcRenderer.invoke('launcher:getSettings'),
   setLauncherIcon: (dataUrl: string | null) => ipcRenderer.invoke('launcher:setIcon', dataUrl),
   setLauncherFont: (family: string | null) => ipcRenderer.invoke('launcher:setFont', family),
-  setLauncherBehavior: (patch: { closeAction?: CloseAction; afterLaunch?: AfterLaunchAction }) =>
-    ipcRenderer.invoke('launcher:setBehavior', patch),
+  setLauncherBehavior: (patch: {
+    closeAction?: CloseAction
+    afterLaunch?: AfterLaunchAction
+    autoStart?: AutoStartMode
+    sidebarMaterial?: boolean
+  }) => ipcRenderer.invoke('launcher:setBehavior', patch),
   hideToTray: () => ipcRenderer.invoke('window:hideToTray'),
   exportData: () => ipcRenderer.invoke('data:export'),
   importData: () => ipcRenderer.invoke('data:import'),
   setThemeColor: (appId: string, color: string | null) =>
     ipcRenderer.invoke('apps:setThemeColor', appId, color),
-  setGlassStyle: (appId: string, style: GlassStyle) =>
-    ipcRenderer.invoke('apps:setGlassStyle', appId, style),
+  setGlass: (appId: string, patch: GlassPatch) => ipcRenderer.invoke('apps:setGlass', appId, patch),
+  setGachaShowSecond: (appId: string, value: boolean) =>
+    ipcRenderer.invoke('apps:setGachaShowSecond', appId, value),
   setBgTuning: (appId: string, tuning: { blur: number; dim: number }) =>
     ipcRenderer.invoke('apps:setBgTuning', appId, tuning),
+  setHomeModule: (appId: string, moduleId: HomeModuleId, patch: Partial<HomeModuleState>) =>
+    ipcRenderer.invoke('apps:setHomeModule', appId, moduleId, patch),
+  setLaunchEffect: (appId: string, effect: LaunchEffect) =>
+    ipcRenderer.invoke('apps:setLaunchEffect', appId, effect),
+  setModuleLabel: (appId: string, label: string | null) =>
+    ipcRenderer.invoke('apps:setModuleLabel', appId, label),
+  exportLogs: () => ipcRenderer.invoke('logs:export'),
   extractThemeColor: (appId: string) => ipcRenderer.invoke('apps:extractThemeColor', appId),
 
   launchApp: (id: string) => ipcRenderer.invoke('apps:launch', id),
@@ -74,7 +90,9 @@ const api: KevinApi = {
     ipcRenderer.invoke('update:simulate', appId, mode),
 
   galleryList: (appId: string) => ipcRenderer.invoke('gallery:list', appId),
-  galleryOpenViewer: (path: string) => ipcRenderer.invoke('gallery:openViewer', path),
+  galleryOpenViewer: (paths: string[], index: number) =>
+    ipcRenderer.invoke('gallery:openViewer', paths, index),
+  galleryViewerNav: (delta: number) => ipcRenderer.invoke('gallery:viewerNav', delta),
   galleryContextMenu: (path: string) => ipcRenderer.invoke('gallery:contextMenu', path),
 
   pickExecutable: () => ipcRenderer.invoke('dialog:pickExecutable'),

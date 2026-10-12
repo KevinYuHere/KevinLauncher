@@ -12,8 +12,12 @@ export type IconName =
   | 'plus'
   | 'stop'
   | 'clock'
+  | 'modules'
   | 'chevronLeft'
   | 'chevronRight'
+  | 'pause'
+  | 'play'
+  | 'chevronDown'
 
 interface IconProps {
   name: IconName
@@ -55,6 +59,14 @@ const PATHS: Record<IconName, ReactElement> = {
       <path d="M9.2 10.8 12 13.6l2.8-2.8" />
     </>
   ),
+  modules: (
+    <>
+      <rect x="3.5" y="3.5" width="7" height="7" rx="1.6" />
+      <rect x="13.5" y="3.5" width="7" height="7" rx="1.6" />
+      <rect x="3.5" y="13.5" width="7" height="7" rx="1.6" />
+      <rect x="13.5" y="13.5" width="7" height="7" rx="1.6" />
+    </>
+  ),
   settings: (
     <>
       <circle cx="12" cy="12" r="3" />
@@ -85,6 +97,22 @@ const PATHS: Record<IconName, ReactElement> = {
   chevronRight: (
     <>
       <path d="M9 5l7 7-7 7" />
+    </>
+  ),
+  pause: (
+    <>
+      <rect x="6.6" y="5" width="3.4" height="14" rx="1" />
+      <rect x="14" y="5" width="3.4" height="14" rx="1" />
+    </>
+  ),
+  play: (
+    <>
+      <path d="M8 5.5 18.5 12 8 18.5z" />
+    </>
+  ),
+  chevronDown: (
+    <>
+      <path d="M5 9l7 7 7-7" />
     </>
   )
 }

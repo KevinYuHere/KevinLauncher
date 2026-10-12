@@ -1,9 +1,9 @@
-import { createWriteStream, createReadStream, promises as fs } from 'fs'
+import { createWriteStream, promises as fs } from 'fs'
 import { get as httpsGet } from 'https'
 import { get as httpGet } from 'http'
-import { createHash } from 'crypto'
 import { dirname } from 'path'
 import type { IncomingMessage } from 'http'
+import { md5File } from './hash'
 
 export interface DownloadOptions {
   url: string
@@ -20,16 +20,6 @@ async function fileSize(path: string): Promise<number> {
   } catch {
     return 0
   }
-}
-
-async function md5File(path: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const hash = createHash('md5')
-    const stream = createReadStream(path)
-    stream.on('data', (chunk) => hash.update(chunk))
-    stream.on('end', () => resolve(hash.digest('hex')))
-    stream.on('error', reject)
-  })
 }
 
 /**
