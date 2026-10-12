@@ -87,15 +87,18 @@ jobs:
       - name: Build the installer (portable, self-drawn UI)
         run: npx electron-builder --win --prepackaged release/win-unpacked --publish never
 
-      - name: Build the update payload and manifest
-        run: node scripts/build-update-payload.mjs release/win-unpacked ${{ steps.version.outputs.version }}
-
+      # Notes first: build-update-payload embeds RELEASE_NOTES.md into the
+      # manifest, so the free `releases/latest/download/...` path can show the
+      # changelog without hitting the GitHub API.
       - name: Release notes from CHANGELOG.md
         shell: bash
         run: |
           # Refuses to continue when CHANGELOG.md is missing or has no section for
           # this version (the script exits non-zero), so nothing is published.
           node scripts/extract-changelog.mjs "${{ steps.version.outputs.version }}" release/RELEASE_NOTES.md
+
+      - name: Build the update payload and manifest
+        run: node scripts/build-update-payload.mjs release/win-unpacked ${{ steps.version.outputs.version }}
 
       - name: Publish the release
         shell: bash
