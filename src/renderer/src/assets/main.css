@@ -414,15 +414,15 @@ textarea {
   opacity: 0;
   pointer-events: none;
 }
-/* While dragging, don't clip the dragged chip. */
-.games-collapser > .games.row-dragging {
+/* While dragging, don't clip the dragged chip (its large shadow / bulge). */
+.games-collapser > .games:has(.sortable-dragging) {
   overflow: visible;
 }
 .games-collapser > .games {
-  /* Clip only far outside the box so the chip press/click bulge (all sides) is
-     never cut off, while the collapse still hides the row. */
+  /* Clip far outside the box so the collapse still hides the row, but leave
+     enough margin for the chips' hover / active shadows (8px 22px ≈ 30px). */
   overflow: clip;
-  overflow-clip-margin: 14px;
+  overflow-clip-margin: 32px;
   min-width: 0;
 }
 .games-toggle {
@@ -2367,9 +2367,9 @@ textarea {
 
 /* ----------------------------------------------------------- gallery */
 .gallery-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 12px;
+  /* Masonry container: tiles are absolutely positioned by GalleryView (each
+     placed into the shortest column, in order), so only the height is set. */
+  position: relative;
 }
 .gallery-thumb {
   display: block;

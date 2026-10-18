@@ -245,7 +245,7 @@ export default function Sortable<T>({
   return (
     <div
       ref={containerRef}
-      className={`sortable sortable-${orientation}${className ? ' ' + className : ''}`}
+      className={`sortable sortable-${orientation}${source !== null ? ' sortable-dragging' : ''}${className ? ' ' + className : ''}`}
     >
       {ordered.map((item, index) => (
         <SortableRow

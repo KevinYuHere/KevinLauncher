@@ -97,23 +97,66 @@ function compile(gl: WebGLRenderingContext, type: number, src: string): WebGLSha
   return s
 }
 
-/** Captures the current wallpaper (image, or the live frame of a video). */
-function captureBackground(): HTMLCanvasElement | null {
+/**
+ * The wallpaper **as it is actually shown**: the `object-fit: cover` crop of the
+ * `.bg-layer` for the window (the layer is inset −64px and centre-cropped), with
+ * the current wallpaper blur and dimming baked in. The effect therefore warps
+ * exactly the pixels behind it instead of the whole (uncropped) image — which
+ * used to be stretched across the window and read wrong whenever the wallpaper
+ * aspect ratio did not match.
+ */
+function captureBackground(dpr: number): HTMLCanvasElement | null {
   const layer = document.querySelector<HTMLImageElement | HTMLVideoElement>('.bg-layer')
   if (!layer) return null
   const video = layer instanceof HTMLVideoElement
-  const w = video ? layer.videoWidth : layer.naturalWidth
-  const h = video ? layer.videoHeight : layer.naturalHeight
-  if (!w || !h) return null
-  const c = document.createElement('canvas')
-  c.width = w
-  c.height = h
+  const iw = video ? layer.videoWidth : layer.naturalWidth
+  const ih = video ? layer.videoHeight : layer.naturalHeight
+  const W = window.innerWidth
+  const H = window.innerHeight
+  if (!iw || !ih || W < 2 || H < 2) return null
+
+  // object-fit: cover over the (W+128)×(H+128) layer; the window sees the
+  // central W×H of that box (see `.bg-layer` / wallpaperRegion.ts).
+  const s = Math.max((W + 128) / iw, (H + 128) / ih)
+  const imgX = (W + 128 - iw * s) / 2 - 64
+  const imgY = (H + 128 - ih * s) / 2 - 64
+
+  const style = getComputedStyle(document.documentElement)
+  const blur = parseFloat(style.getPropertyValue('--wallpaper-blur')) || 0
+  const dim = Math.min(1, Math.max(0, parseFloat(style.getPropertyValue('--wallpaper-dim')) || 0))
+  // Pad by the blur radius so blurring never fades the window edges.
+  const pad = blur > 0 ? Math.ceil(blur * 3) : 0
+  const srcX = (-pad - imgX) / s
+  const srcY = (-pad - imgY) / s
+  const srcW = (W + 2 * pad) / s
+  const srcH = (H + 2 * pad) / s
+
+  const out = document.createElement('canvas')
+  out.width = Math.round(W * dpr)
+  out.height = Math.round(H * dpr)
+  const ctx = out.getContext('2d')
+  if (!ctx) return null
   try {
-    c.getContext('2d')?.drawImage(layer, 0, 0, w, h)
+    if (pad > 0) {
+      const tmp = document.createElement('canvas')
+      tmp.width = Math.round((W + 2 * pad) * dpr)
+      tmp.height = Math.round((H + 2 * pad) * dpr)
+      const tctx = tmp.getContext('2d')
+      if (!tctx) return null
+      tctx.filter = `blur(${blur * dpr}px)`
+      tctx.drawImage(layer, srcX, srcY, srcW, srcH, 0, 0, tmp.width, tmp.height)
+      ctx.drawImage(tmp, pad * dpr, pad * dpr, W * dpr, H * dpr, 0, 0, out.width, out.height)
+    } else {
+      ctx.drawImage(layer, srcX, srcY, srcW, srcH, 0, 0, out.width, out.height)
+    }
+    if (dim > 0) {
+      ctx.fillStyle = `rgba(0, 0, 0, ${dim})`
+      ctx.fillRect(0, 0, out.width, out.height)
+    }
   } catch {
     return null
   }
-  return c
+  return out
 }
 
 /**
@@ -183,7 +226,7 @@ export default function LaunchTransition({ trigger, onDone }: LaunchTransitionPr
     canvas.height = Math.round(window.innerHeight * dpr)
     gl.viewport(0, 0, canvas.width, canvas.height)
 
-    const src = captureBackground()
+    const src = captureBackground(dpr)
     gl.activeTexture(gl.TEXTURE0)
     // (re)create texture content
     const tex = gl.createTexture()

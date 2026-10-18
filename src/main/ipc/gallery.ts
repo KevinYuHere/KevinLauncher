@@ -1,8 +1,9 @@
-import { BrowserWindow, clipboard, ipcMain, Menu, nativeImage, shell } from 'electron'
+import { BrowserWindow, ClipboardItem, clipboard, ipcMain, Menu, nativeImage, shell } from 'electron'
 import { promises as fs } from 'fs'
 import { extname, join } from 'path'
 import type { GalleryItem } from '@shared/types'
 import { AppStore } from '../services/appStore'
+import { log } from '../services/logger'
 import { openViewer, viewerNav } from '../services/viewer'
 
 const IMAGE_EXT = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.avif'])
@@ -12,25 +13,17 @@ const MAX_DEPTH = 6
 type NativeImageType = ReturnType<typeof nativeImage.createFromPath>
 
 /**
- * Copy an image to the clipboard across Electron versions: older builds expose
- * the synchronous `clipboard.writeImage`, newer ones reworked the clipboard into
- * the async W3C-style `clipboard.write([ClipboardItem])`.
+ * Copy an image to the system clipboard. Electron 44's clipboard only exposes the
+ * W3C-style `write(ClipboardItem[])` (the old `clipboard.writeImage` was removed,
+ * and `ClipboardItem` is not a global in the main process), so build a PNG entry
+ * from the native image.
  */
 function copyImage(image: NativeImageType): void {
-  const api = clipboard as unknown as {
-    writeImage?: (img: NativeImageType) => void
-    write?: (items: unknown[]) => Promise<void>
-  }
-  if (typeof api.writeImage === 'function') {
-    api.writeImage(image)
-    return
-  }
-  const ClipboardItemCtor = (
-    globalThis as { ClipboardItem?: new (data: Record<string, Blob>) => unknown }
-  ).ClipboardItem
-  if (typeof api.write === 'function' && ClipboardItemCtor) {
-    const blob = new Blob([image.toPNG() as unknown as BlobPart], { type: 'image/png' })
-    void api.write([new ClipboardItemCtor({ 'image/png': blob })]).catch(() => undefined)
+  try {
+    const blob = new Blob([new Uint8Array(image.toPNG())], { type: 'image/png' })
+    void clipboard.write([new ClipboardItem({ 'image/png': blob })])
+  } catch (error) {
+    log(`gallery: copy image failed (${(error as Error).message})`)
   }
 }
 
@@ -81,16 +74,21 @@ export function registerGalleryIpc(): void {
   ipcMain.handle('gallery:contextMenu', (e, path: string) => {
     const win = BrowserWindow.fromWebContents(e.sender)
     if (!win) return
-    const menu = Menu.buildFromTemplate([
-      { label: '在文件资源管理器中打开', click: () => shell.showItemInFolder(path) },
-      {
+    const isImage = IMAGE_EXT.has(extname(path).toLowerCase())
+    const template = [
+      { label: '在文件资源管理器中打开', click: () => shell.showItemInFolder(path) }
+    ] as Electron.MenuItemConstructorOptions[]
+    // "复制图片" only makes sense for a still image — the wallpaper viewer reuses
+    // this menu and a wallpaper may be a video (nativeImage would be empty).
+    if (isImage) {
+      template.push({
         label: '复制图片',
         click: () => {
           const image = nativeImage.createFromPath(path)
           if (!image.isEmpty()) copyImage(image)
         }
-      }
-    ])
-    menu.popup({ window: win })
+      })
+    }
+    Menu.buildFromTemplate(template).popup({ window: win })
   })
 }

@@ -1,6 +1,26 @@
-import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactElement
+} from 'react'
 import type { AppEntry, GalleryItem } from '@shared/types'
 import { getThumb, observeTile, type Thumb } from '../gallery/thumbs'
+
+// Masonry: tiles are placed into the shortest column, in order, so columns pack
+// independently while the reading order stays left→right, then next row.
+const TILE_GAP = 12
+const MIN_COL = 220
+const FALLBACK_ASPECT = 16 / 9
+
+interface TileBox {
+  x: number
+  y: number
+  w: number
+  h: number
+}
 
 // Screenshot browser for one app. Thumbnails are generated lazily as tiles
 // scroll into view and cached; clicking opens the full image in a viewer
@@ -11,31 +31,41 @@ interface GalleryViewProps {
   onEdit: () => void
 }
 
-// One grid cell: shows the cached thumbnail if present and otherwise registers
-// with the shared IntersectionObserver so the JPEG is produced on demand.
+// One tile: absolutely positioned by the parent's masonry layout; registers with
+// the shared IntersectionObserver so the JPEG is produced on demand and reports
+// its aspect ratio back so the layout can settle.
 function GalleryTile({
   item,
   paths,
-  index
+  index,
+  box,
+  onAspect
 }: {
   item: GalleryItem
   paths: string[]
   index: number
+  box: TileBox
+  onAspect: (path: string, aspect: number) => void
 }): ReactElement {
   const ref = useRef<HTMLButtonElement>(null)
   const [thumb, setThumb] = useState<Thumb | undefined>(() => getThumb(item.path))
+  const onAspectRef = useRef(onAspect)
+  onAspectRef.current = onAspect
 
   useEffect(() => {
     const el = ref.current
     if (!el) return
-    return observeTile(el, item.path, setThumb)
+    return observeTile(el, item.path, (loaded) => {
+      setThumb(loaded)
+      onAspectRef.current(item.path, loaded.aspect)
+    })
   }, [item.path])
 
   return (
     <button
       ref={ref}
       className="gallery-thumb"
-      style={{ aspectRatio: thumb ? String(thumb.aspect) : '16 / 9' }}
+      style={{ position: 'absolute', left: box.x, top: box.y, width: box.w, height: box.h }}
       title={item.name}
       onClick={() => void window.api.galleryOpenViewer(paths, index)}
       onContextMenu={(e) => {
@@ -55,6 +85,47 @@ function GalleryTile({
 export default function GalleryView({ entry, onBack, onEdit }: GalleryViewProps): ReactElement {
   const [items, setItems] = useState<GalleryItem[]>([])
   const [loading, setLoading] = useState(false)
+  const [width, setWidth] = useState(0)
+  const [aspects, setAspects] = useState<Record<string, number>>({})
+  const observerRef = useRef<ResizeObserver | null>(null)
+
+  // Column count / size from the container width. A callback ref (rather than a
+  // mount effect) because the grid only mounts once the screenshots are read.
+  const bindGrid = useCallback((el: HTMLDivElement | null): void => {
+    observerRef.current?.disconnect()
+    observerRef.current = null
+    if (!el) return
+    const measure = (): void => setWidth(el.clientWidth)
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(el)
+    observerRef.current = observer
+  }, [])
+
+  useEffect(() => () => observerRef.current?.disconnect(), [])
+
+  const onAspect = useCallback((path: string, aspect: number): void => {
+    setAspects((prev) => (prev[path] === aspect ? prev : { ...prev, [path]: aspect }))
+  }, [])
+
+  const cols = Math.max(1, Math.floor((width + TILE_GAP) / (MIN_COL + TILE_GAP)))
+  const colWidth = width > 0 ? (width - (cols - 1) * TILE_GAP) / cols : MIN_COL
+
+  const { boxes, height } = useMemo(() => {
+    const colHeights = new Array<number>(cols).fill(0)
+    const boxes: TileBox[] = items.map((item) => {
+      const aspect = aspects[item.path] ?? FALLBACK_ASPECT
+      const h = colWidth / aspect
+      let col = 0
+      for (let i = 1; i < cols; i++) if (colHeights[i] < colHeights[col]) col = i
+      const box: TileBox = { x: col * (colWidth + TILE_GAP), y: colHeights[col], w: colWidth, h }
+      colHeights[col] += h + TILE_GAP
+      return box
+    })
+    return { boxes, height: colHeights.length ? Math.max(...colHeights) - TILE_GAP : 0 }
+  }, [items, aspects, cols, colWidth])
+
+  const paths = useMemo(() => items.map((item) => item.path), [items])
 
   // Re-read the screenshot directory for this app.
   const refresh = useCallback(async (): Promise<void> => {
@@ -114,13 +185,19 @@ export default function GalleryView({ entry, onBack, onEdit }: GalleryViewProps)
             </div>
           </div>
         ) : (
-          <div className="gallery-grid">
+          <div
+            className="gallery-grid"
+            ref={bindGrid}
+            style={{ height: height > 0 ? `${Math.round(height)}px` : undefined }}
+          >
             {items.map((item, index) => (
               <GalleryTile
                 key={item.path}
                 item={item}
-                paths={items.map((i) => i.path)}
+                paths={paths}
                 index={index}
+                box={boxes[index]}
+                onAspect={onAspect}
               />
             ))}
           </div>
