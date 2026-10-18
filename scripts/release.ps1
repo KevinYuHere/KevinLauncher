@@ -1,4 +1,4 @@
-# Builds and publishes a release:
+﻿# Builds and publishes a release:
 #   1. electron-vite build
 #   2. electron-builder --dir  (then rcedit applies the exe icon locally)
 #   3. electron-builder --prepackaged   -> self-drawn installer (portable target)
