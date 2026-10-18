@@ -44,6 +44,19 @@ export function storedDataDir(): string | null {
 
 /** Points Electron at the configured directory. Call before the app is ready. */
 export function applyDataDir(): void {
+  // Sandbox override (used for local trials): takes priority over the registry
+  // so a test build can run against a throwaway copy of the user's data without
+  // touching the real data directory or the stored setting.
+  const sandbox = process.env.KEVIN_LAUNCHER_DATA_DIR
+  if (sandbox && sandbox.trim()) {
+    try {
+      app.setPath('userData', sandbox.trim())
+      log(`dataDir: sandbox ${sandbox.trim()}`)
+      return
+    } catch (error) {
+      log(`dataDir: cannot use sandbox ${sandbox} (${(error as Error).message})`)
+    }
+  }
   const custom = storedDataDir()
   if (!custom) return
   if (custom.toLowerCase() === defaultDataDir().toLowerCase()) return

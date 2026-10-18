@@ -100,7 +100,7 @@ export default function GalleryView({ entry, onBack, onEdit }: GalleryViewProps)
             <div className="empty">
               <div className="empty-icon">▣</div>
               <div className="empty-title">未设置截图目录</div>
-              <div>在「设置 · 编辑应用」中填写截图目录后即可浏览</div>
+              <div>在「设置 → 高级设置」中填写截图目录后即可浏览</div>
               <button className="btn primary" style={{ marginTop: 12 }} onClick={onEdit}>
                 去设置
               </button>

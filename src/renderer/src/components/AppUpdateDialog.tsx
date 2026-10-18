@@ -1,6 +1,5 @@
 import { useRef, useState, type ReactElement } from 'react'
 import { useOpenOrigin } from './useOpenOrigin'
-import ModalBackdrop from './ModalBackdrop'
 import type { AppUpdateInfo } from '@shared/types'
 
 interface AppUpdateDialogProps {
@@ -31,12 +30,12 @@ export default function AppUpdateDialog({
   }
   return (
     <div className={`modal-mask${closing ? ' closing' : ''}`}>
-      <ModalBackdrop />
       <div
         ref={modalRef}
-        className={`modal update-modal${closing ? ' closing' : ''}`}
+        className={`modal update-modal wallpaper-region${closing ? ' closing' : ''}`}
         onClick={(e) => e.stopPropagation()}
       >
+        <span className="wp-region-layer" aria-hidden="true" />
         <div className="modal-header">
           <h2>检测到新版本 {info.version}</h2>
         </div>

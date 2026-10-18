@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState, type ReactElement } from 'react'
 import { useOpenOrigin } from './useOpenOrigin'
-import ModalBackdrop from './ModalBackdrop'
 
 interface ConfirmState {
   message: string
@@ -50,12 +49,12 @@ export function ConfirmHost(): ReactElement | null {
 
   return (
     <div className={`modal-mask${closing ? ' closing' : ''}`}>
-      <ModalBackdrop />
       <div
         ref={modalRef}
-        className={`modal confirm-modal${closing ? ' closing' : ''}`}
+        className={`modal confirm-modal wallpaper-region${closing ? ' closing' : ''}`}
         onClick={(e) => e.stopPropagation()}
       >
+        <span className="wp-region-layer" aria-hidden="true" />
         <div className="modal-header">
           <h2>确认</h2>
         </div>

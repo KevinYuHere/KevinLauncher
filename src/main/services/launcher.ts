@@ -1,6 +1,6 @@
 import { spawn } from 'child_process'
 import { dirname, extname } from 'path'
-import type { AppEntry, LaunchResult } from '@shared/types'
+import type { LaunchResult } from '@shared/types'
 import { log } from './logger'
 import { isElevated } from './elevation'
 
@@ -37,6 +37,20 @@ function psQuote(value: string): string {
   return `'${value.replace(/'/g, "''")}'`
 }
 
+/**
+ * Everything needed to start a process. Built from a launch method (per app) or
+ * a linked launch (starts several apps), so the launcher stays agnostic.
+ */
+export interface LaunchSpec {
+  /** File to start (.exe / .bat / .cmd / .ps1 / .lnk / any file). */
+  targetPath: string
+  arguments: string
+  workingDirectory: string
+  runAsAdmin: boolean
+  /** Extra environment variables merged over the current process env. */
+  environmentVariables?: Record<string, string>
+}
+
 type SpawnResult = LaunchResult & { code?: string }
 
 function isElevationError(result: SpawnResult): boolean {
@@ -49,7 +63,7 @@ function isElevationError(result: SpawnResult): boolean {
 
 export class Launcher {
   /**
-   * Start `entry.targetPath`. Works for a bare game exe, a `.bat`/`.cmd`
+   * Start `spec.targetPath`. Works for a bare game exe, a `.bat`/`.cmd`
    * script, a `.ps1` script, a `.lnk` shortcut or any other launcher.
    *
    * `.lnk` shortcuts are opened through the shell exactly like double-clicking
@@ -57,10 +71,12 @@ export class Launcher {
    * whatever the shortcut says, and stay correct even if the shortcut is
    * updated). Those launches cannot be tracked by pid, so run-state and
    * play-time rely on the entry's `monitorProcessNames`.
+   *
+   * `name` is only used for logs / user-facing messages.
    */
-  static async launch(entry: AppEntry): Promise<LaunchResult> {
-    if (entry.targetPath.toLowerCase().endsWith('.lnk')) {
-      return this.spawnShortcut(entry)
+  static async launch(spec: LaunchSpec, name = ''): Promise<LaunchResult> {
+    if (spec.targetPath.toLowerCase().endsWith('.lnk')) {
+      return this.spawnShortcut(spec)
     }
 
     // If the launcher itself is already elevated, a direct spawn of an
@@ -68,35 +84,35 @@ export class Launcher {
     // process-tree tracking and stopping). Only shell out to RunAs when the
     // launcher is not elevated.
     const alreadyElevated = await isElevated()
-    if (entry.runAsAdmin && !alreadyElevated) return this.launchElevated(entry)
+    if (spec.runAsAdmin && !alreadyElevated) return this.launchElevated(spec)
 
-    const result = await this.spawnDetached(entry)
+    const result = await this.spawnDetached(spec)
     if (result.ok) return result
 
     if (isElevationError(result) && !alreadyElevated) {
-      log(`launch: "${entry.name}" requires elevation, retrying as admin`)
-      const elevated = await this.launchElevated(entry)
+      log(`launch: "${name}" requires elevation, retrying as admin`)
+      const elevated = await this.launchElevated(spec)
       if (elevated.ok) {
         return { ...elevated, message: '该程序需要管理员权限，已自动以管理员身份启动' }
       }
       return elevated
     }
 
-    log(`launch: failed for "${entry.name}": ${result.error}`)
+    log(`launch: failed for "${name}": ${result.error}`)
     return result
   }
 
-  private static resolveCwd(entry: AppEntry): string {
-    return entry.workingDirectory.trim() || dirname(entry.targetPath)
+  private static resolveCwd(spec: LaunchSpec): string {
+    return spec.workingDirectory.trim() || dirname(spec.targetPath)
   }
 
   /** Open a `.lnk` through the shell (`start`), like a double-click. */
-  private static async spawnShortcut(entry: AppEntry): Promise<SpawnResult> {
-    const cwd = this.resolveCwd(entry)
-    const userArgs = splitArgs(entry.arguments)
-    const args = ['/c', 'start', '', entry.targetPath, ...userArgs]
+  private static async spawnShortcut(spec: LaunchSpec): Promise<SpawnResult> {
+    const cwd = this.resolveCwd(spec)
+    const userArgs = splitArgs(spec.arguments)
+    const args = ['/c', 'start', '', spec.targetPath, ...userArgs]
 
-    log(`launch: open shortcut "${entry.targetPath}"`)
+    log(`launch: open shortcut "${spec.targetPath}"`)
 
     return new Promise<SpawnResult>((resolve) => {
       try {
@@ -121,10 +137,10 @@ export class Launcher {
     })
   }
 
-  private static async spawnDetached(entry: AppEntry): Promise<SpawnResult> {
-    const env = { ...process.env, ...entry.environmentVariables }
-    const cwd = this.resolveCwd(entry)
-    const { command, args } = this.resolveCommand(entry)
+  private static async spawnDetached(spec: LaunchSpec): Promise<SpawnResult> {
+    const env = { ...process.env, ...spec.environmentVariables }
+    const cwd = this.resolveCwd(spec)
+    const { command, args } = this.resolveCommand(spec)
 
     log(`launch: spawn "${command}" ${JSON.stringify(args)} (cwd=${cwd})`)
 
@@ -157,9 +173,9 @@ export class Launcher {
    * cannot be tracked by pid, so the caller should rely on process-name
    * monitoring for such entries.
    */
-  private static async launchElevated(entry: AppEntry): Promise<LaunchResult> {
-    const { command, args } = this.resolveCommand(entry)
-    const cwd = this.resolveCwd(entry)
+  private static async launchElevated(spec: LaunchSpec): Promise<LaunchResult> {
+    const { command, args } = this.resolveCommand(spec)
+    const cwd = this.resolveCwd(spec)
 
     let script = `Start-Process -FilePath ${psQuote(command)}`
     if (args.length) script += ` -ArgumentList @(${args.map(psQuote).join(',')})`
@@ -196,22 +212,22 @@ export class Launcher {
     })
   }
 
-  private static resolveCommand(entry: AppEntry): { command: string; args: string[] } {
-    const ext = extname(entry.targetPath).toLowerCase()
-    const userArgs = splitArgs(entry.arguments)
+  private static resolveCommand(spec: LaunchSpec): { command: string; args: string[] } {
+    const ext = extname(spec.targetPath).toLowerCase()
+    const userArgs = splitArgs(spec.arguments)
 
     if (ext === '.bat' || ext === '.cmd') {
       return {
         command: process.env.ComSpec || 'cmd.exe',
-        args: ['/c', entry.targetPath, ...userArgs]
+        args: ['/c', spec.targetPath, ...userArgs]
       }
     }
     if (ext === '.ps1') {
       return {
         command: 'powershell.exe',
-        args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', entry.targetPath, ...userArgs]
+        args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', spec.targetPath, ...userArgs]
       }
     }
-    return { command: entry.targetPath, args: userArgs }
+    return { command: spec.targetPath, args: userArgs }
   }
 }

@@ -3,6 +3,7 @@ import type { AddonDescriptor, AppEntry, GachaRecord, GachaStats } from '@shared
 import { displayRank, rankClass } from '../format'
 import { confirm } from './confirm'
 import Switch from './Switch'
+import InlineEdit from './InlineEdit'
 
 // Gacha history for the current app: a per-banner breakdown with 5★/4★ stats,
 // pity counters and the raw record list. Records are fetched outside the render
@@ -151,13 +152,14 @@ export default function GachaView({
               </button>
             ) : (
               <>
-                <input
-                  className="input"
-                  style={{ flex: 1, minWidth: 280 }}
-                  value={url}
-                  onChange={(e) => setUrl(e.target.value)}
-                  placeholder="抽卡链接（含 authkey），或点「扫描缓存」自动获取"
-                />
+                <div className="gacha-url">
+                  <InlineEdit
+                    className="wide"
+                    value={url}
+                    placeholder="抽卡链接（含 authkey），或点「扫描缓存」自动获取"
+                    onCommit={setUrl}
+                  />
+                </div>
                 <button className="btn" disabled={locked()} onClick={() => void scanAndUpdate()}>
                   扫描缓存
                 </button>

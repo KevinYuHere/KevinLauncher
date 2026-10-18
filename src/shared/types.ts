@@ -90,7 +90,7 @@ export const MATERIAL_DEFAULTS: Record<GlassMaterial, GlassAppearance> = {
   // 液态 (per the 绝区零 preset)
   liquid: {
     brightness: 0,
-    opacity: 95,
+    opacity: 50,
     material: 'liquid',
     blur: 0,
     saturation: 120,
@@ -105,7 +105,7 @@ export const MATERIAL_DEFAULTS: Record<GlassMaterial, GlassAppearance> = {
   // 高光 (per the 明日方舟 preset)
   shine: {
     brightness: 0,
-    opacity: 95,
+    opacity: 50,
     material: 'shine',
     blur: 0,
     saturation: 120,
@@ -123,7 +123,7 @@ export const MATERIAL_DEFAULTS: Record<GlassMaterial, GlassAppearance> = {
 export const DEFAULT_GLASS_APPEARANCE: GlassAppearance = { ...MATERIAL_DEFAULTS.blur }
 
 /** Home-screen modules (per app). */
-export type HomeModuleId = 'info' | 'playtime' | 'launch'
+export type HomeModuleId = 'info' | 'playtime' | 'launch' | 'wallpaper' | 'linkedLaunch'
 
 /** Per-module state on the home screen. `x`/`y` are stage fractions (null = default). */
 export interface HomeModuleState {
@@ -143,6 +143,8 @@ export const HOME_MODULES: {
 }[] = [
   { id: 'info', name: '信息卡片', desc: '左下角的应用信息与总时长', hideable: true },
   { id: 'playtime', name: '使用时长', desc: '右下角的使用时长药丸按钮', hideable: true },
+  { id: 'wallpaper', name: '壁纸', desc: '左上角的上一张 / 下一张壁纸按钮', hideable: true },
+  { id: 'linkedLaunch', name: '关联启动', desc: '一键拉起多个应用的快捷按钮', hideable: true },
   { id: 'launch', name: '启动按钮', desc: '启动 / 更新 / 停止按钮（不可隐藏）', hideable: false }
 ]
 
@@ -181,21 +183,80 @@ export interface AddonDescriptor {
 }
 
 /**
- * A launchable application. Deliberately NOT tied to a specific game
- * executable: `targetPath` may be a game exe, an official launcher, a
- * `.bat`/`.ps1` script or another third-party launcher.
+ * One way to start an application. An app may have several (e.g. the normal
+ * launch, a launch through the official launcher, a script with extra flags);
+ * exactly one is marked as the default.
  */
-export interface AppEntry {
+export interface LaunchMethod {
   id: string
+  /** User-facing name shown in the picker / module settings. */
   name: string
-  /** Custom subtitle shown under the app name on the home screen. */
-  moduleLabel: string | null
   /** File to start (.exe / .bat / .cmd / .ps1 / .lnk / any file). */
   targetPath: string
   /** Raw argument string, passed as-is to the target. */
   arguments: string
   /** Optional working directory. */
   workingDirectory: string
+  /** Whether this method is started with administrator rights. */
+  runAsAdmin: boolean
+}
+
+/** One wallpaper (image or video) in an app's rotation list. */
+export interface Wallpaper {
+  id: string
+  /** File name stored in the launcher `bg` directory. */
+  file: string
+  /** Original file name, shown in the list. */
+  name: string
+}
+
+export type WallpaperStrategy = 'random' | 'loop'
+export type WallpaperTrigger = 'launcherStart' | 'appSwitch' | 'appLaunch' | 'interval'
+
+/** How / when an app's wallpapers rotate. */
+export interface WallpaperSettings {
+  strategy: WallpaperStrategy
+  trigger: WallpaperTrigger
+  /** Interval in minutes (used when `trigger === 'interval'`). */
+  intervalMinutes: number
+}
+
+export const DEFAULT_WALLPAPER_SETTINGS: WallpaperSettings = {
+  strategy: 'loop',
+  trigger: 'appSwitch',
+  intervalMinutes: 30
+}
+
+/**
+ * A launcher-wide "linked launch": one file (any type the launcher can start)
+ * that starts several applications at once. It has no home of its own — it is
+ * surfaced through the apps it is associated with.
+ */
+export interface LinkedLaunch {
+  id: string
+  name: string
+  targetPath: string
+  arguments: string
+  workingDirectory: string
+  runAsAdmin: boolean
+  /** Whether this appears in the games-bar linked-launch row. */
+  showInGamesRow: boolean
+}
+
+/**
+ * A launchable application. Deliberately NOT tied to a specific game
+ * executable: each launch method's `targetPath` may be a game exe, an official
+ * launcher, a `.bat`/`.ps1` script or another third-party launcher.
+ */
+export interface AppEntry {
+  id: string
+  name: string
+  /** Custom subtitle shown under the app name on the home screen. */
+  moduleLabel: string | null
+  /** Ways to launch this app (at least one); one is the default. */
+  launchMethods: LaunchMethod[]
+  /** Id of the default launch method (must be in `launchMethods`). */
+  defaultLaunchMethodId: string
   /**
    * Game installation directory (used for version detection / updates). Kept
    * separate from the launch target, which may be a script or another launcher.
@@ -203,22 +264,25 @@ export interface AppEntry {
   gameDirectory: string | null
   /** Extra environment variables merged over the current process env. */
   environmentVariables: Record<string, string>
-  runAsAdmin: boolean
   /** Bound game add-on (explicit, never inferred from the exe name). */
   addonId: AddonId | null
   /** Icon file name stored in the launcher `icons` directory. */
   iconFile: string | null
-  /** Background file name stored in the launcher `bg` directory. */
-  backgroundFile: string | null
+  /** Wallpapers rotated for this app (images / videos); may be empty. */
+  wallpapers: Wallpaper[]
+  /** Rotation strategy / trigger. */
+  wallpaperSettings: WallpaperSettings
+  /** Index of the currently shown wallpaper (`wallpapers[wallpaperIndex]`). */
+  wallpaperIndex: number
   /** Accent/theme colour for this app (hex), or null for the default. */
   themeColor: string | null
   /** Glass appearance (colour / material / blur) used across the UI for this app. */
   glass: GlassAppearance
-  /** Auto-extract the theme colour from the background whenever it changes. */
+  /** Auto-extract the theme colour from the current wallpaper whenever it changes. */
   autoTheme: boolean
-  /** Background Gaussian blur radius in px (0 = sharp). */
+  /** Background Gaussian blur radius in px (0 = sharp); applies to every wallpaper. */
   backgroundBlur: number
-  /** Background darkening, 0-100 (100 = the default scrim). */
+  /** Background darkening, 0-100 (100 = the default scrim); applies to every wallpaper. */
   backgroundDim: number
   /** Screenshot directory for the gallery feature. */
   screenshotDirectory: string | null
@@ -230,6 +294,10 @@ export interface AppEntry {
   monitorProcessNames: string[]
   /** 抽卡记录里是否显示次高品级（每个应用独立）。 */
   gachaShowSecond: boolean
+  /** Linked launches associated with this app, in this app's display order. */
+  linkedLaunchIds: string[]
+  /** Default linked launch for this app (must be in `linkedLaunchIds`). */
+  defaultLinkedLaunchId: string | null
   /** Home-screen module state (per app). Missing modules use the defaults. */
   homeModules?: Partial<Record<HomeModuleId, HomeModuleState>>
   /** Full-screen launch transition played when this app starts. */
@@ -238,18 +306,25 @@ export interface AppEntry {
   updatedAt: string
 }
 
+/** A launch method supplied when creating an app. */
+export interface NewLaunchMethod {
+  name?: string
+  targetPath: string
+  arguments?: string
+  workingDirectory?: string
+  runAsAdmin?: boolean
+}
+
 export interface NewAppEntry {
   name: string
   /** Optional custom subtitle for the home screen (defaults to the add-on name). */
   moduleLabel?: string | null
   /** Launch transition (defaults to none). */
   launchEffect?: LaunchEffect
-  targetPath: string
-  arguments?: string
-  workingDirectory?: string
+  /** Ways to launch the app; at least one. The first is the default. */
+  launchMethods: NewLaunchMethod[]
   gameDirectory?: string | null
   environmentVariables?: Record<string, string>
-  runAsAdmin?: boolean
   addonId?: AddonId | null
   screenshotDirectory?: string | null
   monitorProcessNames?: string[]
@@ -563,14 +638,11 @@ export interface KevinApi {
   reorderApps(ids: string[]): Promise<AppEntry[]>
   getUiPrefs(): Promise<UiPrefs>
   setGamesRowHidden(hidden: boolean): Promise<UiPrefs>
-  setBackground(appId: string, sourcePath: string | null): Promise<AppEntry>
   setIcon(appId: string, sourcePath: string | null): Promise<AppEntry>
   /** Save a square-cropped icon from a data URL (PNG). */
   setIconData(appId: string, dataUrl: string | null): Promise<AppEntry>
-  /** Restore the default icon (extracted from the target file). */
+  /** Restore the default icon (extracted from the default launch method's file). */
   resetIcon(appId: string): Promise<AppEntry>
-  /** Restore the default background (the current desktop wallpaper). */
-  resetBackground(appId: string): Promise<AppEntry>
   setAutoTheme(appId: string, on: boolean): Promise<AppEntry>
   /** Pick an icon source: an image, or an exe/bat/lnk whose icon is extracted. */
   pickIconSource(): Promise<{ path: string; dataUrl: string } | null>
@@ -593,14 +665,14 @@ export interface KevinApi {
   /** 抽卡记录里是否显示次高品级（每个应用独立）。 */
   setGachaShowSecond(appId: string, value: boolean): Promise<AppEntry>
   hideToTray(): Promise<void>
-  /** Export every setting (apps, playtime, gacha, icons, backgrounds) to a zip. */
+  /** Export every setting (apps, playtime, gacha, icons, wallpapers) to a zip. */
   exportData(): Promise<string | null>
   /** Restore a previously exported zip (overwrites everything). */
   importData(): Promise<{ apps: number } | null>
   setThemeColor(appId: string, color: string | null): Promise<AppEntry>
   /** Update the app's glass appearance (colour / material / blur). */
   setGlass(appId: string, patch: GlassPatch): Promise<AppEntry>
-  /** Set background blur (px) and dimming (0-100) for an app. */
+  /** Set background blur (px) and dimming (0-100) for an app (all wallpapers). */
   setBgTuning(appId: string, tuning: { blur: number; dim: number }): Promise<AppEntry>
   /** Update one home-screen module's state (visibility / draggable / position). */
   setHomeModule(appId: string, moduleId: HomeModuleId, patch: Partial<HomeModuleState>): Promise<AppEntry>
@@ -610,10 +682,46 @@ export interface KevinApi {
   setModuleLabel(appId: string, label: string | null): Promise<AppEntry>
   /** Ask for a directory and copy the launcher logs there; returns it (or null). */
   exportLogs(): Promise<string | null>
-  /** Extract a theme colour from the app's background image. */
+  /** Extract a theme colour from the app's current wallpaper (image only). */
   extractThemeColor(appId: string): Promise<AppEntry | null>
 
-  launchApp(id: string): Promise<LaunchResult>
+  /** Replace an app's launch methods + default (at least one is enforced). */
+  setLaunchMethods(appId: string, methods: LaunchMethod[], defaultId: string): Promise<AppEntry>
+
+  /** --- wallpapers (per app) --- */
+  /** Pick one or more image/video files for the wallpaper list. */
+  pickWallpapers(): Promise<string[]>
+  /** Import a picked file into the app's wallpaper list (appended). */
+  wallpaperAdd(appId: string, sourcePath: string): Promise<AppEntry>
+  /** Remove a wallpaper from the list (deletes the stored file). */
+  wallpaperRemove(appId: string, wallpaperId: string): Promise<AppEntry>
+  /** Reorder an app's wallpapers by id. */
+  wallpaperReorder(appId: string, ids: string[]): Promise<AppEntry>
+  /** Update rotation strategy / trigger. */
+  wallpaperSettings(appId: string, patch: Partial<WallpaperSettings>): Promise<AppEntry>
+  /** Manually show the previous / next wallpaper (list order). */
+  wallpaperStep(appId: string, delta: number): Promise<AppEntry>
+  /** Rotate automatically according to the strategy (random / loop). */
+  wallpaperAdvance(appId: string): Promise<AppEntry>
+  /** Replace the wallpaper list with the current desktop wallpaper. */
+  wallpaperReset(appId: string): Promise<AppEntry>
+  /** Show a specific wallpaper (by list index). */
+  wallpaperSelect(appId: string, index: number): Promise<AppEntry>
+  /** Open a wallpaper in the shared media viewer (prev/next + video). */
+  wallpaperOpenViewer(appId: string, index: number): Promise<void>
+
+  /** --- linked launches (launcher-wide) --- */
+  listLinkedLaunches(): Promise<LinkedLaunch[]>
+  addLinkedLaunch(input: Omit<LinkedLaunch, 'id' | 'showInGamesRow'> & { showInGamesRow?: boolean }): Promise<LinkedLaunch>
+  updateLinkedLaunch(entry: LinkedLaunch): Promise<LinkedLaunch>
+  removeLinkedLaunch(id: string): Promise<void>
+  /** Global order of linked launches (games-bar row / page). */
+  reorderLinkedLaunches(ids: string[]): Promise<LinkedLaunch[]>
+  /** Set the linked launches associated with an app, in order, + the default. */
+  setAppLinkedLaunches(appId: string, ids: string[], defaultId: string | null): Promise<AppEntry>
+  launchLinkedLaunch(id: string): Promise<LaunchResult>
+
+  launchApp(id: string, methodId?: string): Promise<LaunchResult>
   listRunning(): Promise<RunningApp[]>
   stopApp(appId: string): Promise<StopResult>
 

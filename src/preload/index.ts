@@ -8,6 +8,9 @@ import type {
   HomeModuleId,
   HomeModuleState,
   LaunchEffect,
+  LaunchMethod,
+  LinkedLaunch,
+  WallpaperSettings,
   CloseAction,
   AfterLaunchAction,
   AutoStartMode
@@ -23,14 +26,11 @@ const api: KevinApi = {
   reorderApps: (ids: string[]) => ipcRenderer.invoke('apps:reorder', ids),
   getUiPrefs: () => ipcRenderer.invoke('ui:getPrefs'),
   setGamesRowHidden: (hidden: boolean) => ipcRenderer.invoke('ui:setGamesRowHidden', hidden),
-  setBackground: (appId: string, sourcePath: string | null) =>
-    ipcRenderer.invoke('apps:setBackground', appId, sourcePath),
   setIcon: (appId: string, sourcePath: string | null) =>
     ipcRenderer.invoke('apps:setIcon', appId, sourcePath),
   setIconData: (appId: string, dataUrl: string | null) =>
     ipcRenderer.invoke('apps:setIconData', appId, dataUrl),
   resetIcon: (appId: string) => ipcRenderer.invoke('apps:resetIcon', appId),
-  resetBackground: (appId: string) => ipcRenderer.invoke('apps:resetBackground', appId),
   setAutoTheme: (appId: string, on: boolean) => ipcRenderer.invoke('apps:setAutoTheme', appId, on),
   pickIconSource: () => ipcRenderer.invoke('dialog:pickIconSource'),
   iconFromPath: (path: string) => ipcRenderer.invoke('image:iconFromPath', path),
@@ -65,7 +65,38 @@ const api: KevinApi = {
   exportLogs: () => ipcRenderer.invoke('logs:export'),
   extractThemeColor: (appId: string) => ipcRenderer.invoke('apps:extractThemeColor', appId),
 
-  launchApp: (id: string) => ipcRenderer.invoke('apps:launch', id),
+  setLaunchMethods: (appId: string, methods: LaunchMethod[], defaultId: string) =>
+    ipcRenderer.invoke('apps:setLaunchMethods', appId, methods, defaultId),
+
+  pickWallpapers: () => ipcRenderer.invoke('wallpaper:pick'),
+  wallpaperAdd: (appId: string, sourcePath: string) =>
+    ipcRenderer.invoke('wallpaper:add', appId, sourcePath),
+  wallpaperRemove: (appId: string, wallpaperId: string) =>
+    ipcRenderer.invoke('wallpaper:remove', appId, wallpaperId),
+  wallpaperReorder: (appId: string, ids: string[]) =>
+    ipcRenderer.invoke('wallpaper:reorder', appId, ids),
+  wallpaperSettings: (appId: string, patch: Partial<WallpaperSettings>) =>
+    ipcRenderer.invoke('wallpaper:settings', appId, patch),
+  wallpaperStep: (appId: string, delta: number) =>
+    ipcRenderer.invoke('wallpaper:step', appId, delta),
+  wallpaperAdvance: (appId: string) => ipcRenderer.invoke('wallpaper:advance', appId),
+  wallpaperReset: (appId: string) => ipcRenderer.invoke('wallpaper:reset', appId),
+  wallpaperSelect: (appId: string, index: number) =>
+    ipcRenderer.invoke('wallpaper:select', appId, index),
+  wallpaperOpenViewer: (appId: string, index: number) =>
+    ipcRenderer.invoke('wallpaper:viewer', appId, index),
+
+  listLinkedLaunches: () => ipcRenderer.invoke('linked:list'),
+  addLinkedLaunch: (input: Omit<LinkedLaunch, 'id' | 'showInGamesRow'> & { showInGamesRow?: boolean }) =>
+    ipcRenderer.invoke('linked:add', input),
+  updateLinkedLaunch: (entry: LinkedLaunch) => ipcRenderer.invoke('linked:update', entry),
+  removeLinkedLaunch: (id: string) => ipcRenderer.invoke('linked:remove', id),
+  reorderLinkedLaunches: (ids: string[]) => ipcRenderer.invoke('linked:reorder', ids),
+  setAppLinkedLaunches: (appId: string, ids: string[], defaultId: string | null) =>
+    ipcRenderer.invoke('linked:setApp', appId, ids, defaultId),
+  launchLinkedLaunch: (id: string) => ipcRenderer.invoke('linked:launch', id),
+
+  launchApp: (id: string, methodId?: string) => ipcRenderer.invoke('apps:launch', id, methodId),
   listRunning: () => ipcRenderer.invoke('runtime:list'),
   stopApp: (appId: string) => ipcRenderer.invoke('runtime:stop', appId),
 

@@ -4,15 +4,21 @@ import type {
   AppEntry,
   AppUpdateInfo,
   AppUpdateState,
+  HomeModuleId,
   LauncherSettings,
+  LaunchMethod,
+  LinkedLaunch,
   NewAppEntry,
   RunningApp,
   UpdateInfo,
   UpdateStatus,
-  UsageReport
+  UsageReport,
+  WallpaperSettings
 } from '@shared/types'
+import { currentWallpaper, isVideoFile } from '@shared/appEntry'
 import Rail from './components/Rail'
 import GamesRow from './components/GamesRow'
+import LinkedLaunchRow from './components/LinkedLaunchRow'
 import WindowControls from './components/WindowControls'
 import Icon from './components/Icon'
 import HomeView from './components/HomeView'
@@ -20,23 +26,24 @@ import GachaView from './components/GachaView'
 import UpdateView from './components/UpdateView'
 import SettingsView from './components/SettingsView'
 import ModuleManagerView from './components/ModuleManagerView'
+import LinkedLaunchView from './components/LinkedLaunchView'
 import LaunchTransition from './components/LaunchTransition'
 import Toaster, { showToast } from './components/toast'
 import { installPressJelly } from './drag/pressJelly'
 import GalleryView from './components/GalleryView'
 import PlayTimeView from './components/PlayTimeView'
-import AppFormDialog, { type AppFormMedia } from './components/AppFormDialog'
+import NewAppDialog from './components/NewAppDialog'
 import AppUpdateDialog from './components/AppUpdateDialog'
 import UpdateRing from './components/UpdateRing'
 import { ConfirmHost, confirm } from './components/confirm'
 import IconCropper from './components/IconCropper'
 import type { ViewId } from './viewTypes'
-import { backgroundUrl, brandUrl, defaultIconUrl, VIDEO_RE } from './media'
+import { backgroundUrl, brandUrl, defaultIconUrl } from './media'
 import { directoriesOverlap } from '@shared/paths'
 import { updateChromeContrast } from './contrast'
 import { applyGlass, applyTheme } from './theme'
-
-type DialogState = { mode: 'add' } | { mode: 'edit'; entry: AppEntry } | null
+import { extractVideoAccent } from './videoAccent'
+import { installWallpaperRegionUpdater, updateWallpaperRegions } from './wallpaperRegion'
 
 /** Local calendar date as `YYYY-MM-DD` (used to run daily update checks). */
 function localDate(): string {
@@ -62,7 +69,10 @@ export default function App(): ReactElement {
   const [addons, setAddons] = useState<AddonDescriptor[]>([])
   const [currentId, setCurrentId] = useState<string | null>(null)
   const [view, setView] = useState<ViewId>('home')
-  const [dialog, setDialog] = useState<DialogState>(null)
+  const [showAdd, setShowAdd] = useState(false)
+  const [moduleSection, setModuleSection] = useState<HomeModuleId | null>(null)
+  const [linkedFocusId, setLinkedFocusId] = useState<string | null>(null)
+  const [linkedLaunches, setLinkedLaunches] = useState<LinkedLaunch[]>([])
   const [totals, setTotals] = useState<Record<string, number>>({})
   const [updateInfos, setUpdateInfos] = useState<Record<string, UpdateInfo>>({})
   const [updateStatuses, setUpdateStatuses] = useState<Record<string, UpdateStatus>>({})
@@ -76,6 +86,7 @@ export default function App(): ReactElement {
     dim: number
   } | null>(null)
   const bgSaveTimer = useRef<number | undefined>(undefined)
+  const bgRaf = useRef(0)
   const [launcherSettings, setLauncherSettings] = useState<LauncherSettings>({
     iconFile: null,
     fontFamily: null,
@@ -122,6 +133,9 @@ export default function App(): ReactElement {
   const refreshTotals = useCallback(async (): Promise<void> => {
     setTotals(await window.api.playTimeTotals())
   }, [])
+  const refreshLinked = useCallback(async (): Promise<void> => {
+    setLinkedLaunches(await window.api.listLinkedLaunches())
+  }, [])
 
   const handleReorder = useCallback(async (ids: string[]): Promise<void> => {
     setApps(await window.api.reorderApps(ids))
@@ -151,9 +165,13 @@ export default function App(): ReactElement {
       await refreshApps()
       await refreshRunning()
       await refreshTotals()
+      await refreshLinked()
       setAppsLoaded(true)
     })()
-    const offApps = window.api.onAppsChanged(() => void refreshApps())
+    const offApps = window.api.onAppsChanged(() => {
+      void refreshApps()
+      void refreshLinked()
+    })
     const offRunning = window.api.onRunningChanged(() => void refreshRunning())
     const offPlayTime = window.api.onPlayTimeChanged(() => void refreshTotals())
     return () => {
@@ -161,7 +179,7 @@ export default function App(): ReactElement {
       offRunning()
       offPlayTime()
     }
-  }, [refreshApps, refreshRunning, refreshTotals])
+  }, [refreshApps, refreshRunning, refreshTotals, refreshLinked])
 
   useEffect(() => {
     void window.api.getLauncherSettings().then(setLauncherSettings)
@@ -312,6 +330,13 @@ export default function App(): ReactElement {
     }
   }, [current, currentAddon, view])
 
+  // The "jump to a module section" hint is one-shot: clear it once we leave the
+  // module manager so entering it normally shows every section collapsed.
+  useEffect(() => {
+    if (view !== 'modules') setModuleSection(null)
+    if (view !== 'linkedLaunch') setLinkedFocusId(null)
+  }, [view])
+
   const checkUpdate = useCallback(async (appId: string): Promise<void> => {
     try {
       const info = await window.api.updateInfo(appId)
@@ -348,52 +373,28 @@ export default function App(): ReactElement {
 
   useEffect(() => window.api.onWindowShown(() => runDailyChecks()), [runDailyChecks])
 
-  const applyMedia = useCallback(
-    async (appId: string, media: AppFormMedia): Promise<void> => {
-      if (media.iconSource) {
-        if (media.iconSource.startsWith('data:')) await window.api.setIconData(appId, media.iconSource)
-        else await window.api.setIcon(appId, media.iconSource)
-      } else if (media.clearIcon) {
-        await window.api.resetIcon(appId)
-      }
-      if (media.backgroundSource) await window.api.setBackground(appId, media.backgroundSource)
-      else if (media.clearBackground) await window.api.setBackground(appId, null)
+  const handleAddApp = useCallback(
+    async (input: NewAppEntry, iconDataUrl: string | null): Promise<void> => {
+      const created = await window.api.addApp(input)
+      if (iconDataUrl) await window.api.setIconData(created.id, iconDataUrl)
+      setCurrentId(created.id)
+      setView('home')
+      setShowAdd(false)
+      showToast('应用已添加')
+    },
+    [showToast]
+  )
+
+  /** Merge a partial change into an app (settings page edits it in place). */
+  const handlePatchEntry = useCallback(
+    async (entry: AppEntry, patch: Partial<AppEntry>): Promise<void> => {
+      await window.api.updateApp({ ...entry, ...patch })
     },
     []
   )
 
-  const handleSubmit = useCallback(
-    async (input: NewAppEntry, media: AppFormMedia): Promise<void> => {
-      if (dialog?.mode === 'edit') {
-        const entry = dialog.entry
-        await window.api.updateApp({
-          ...entry,
-          name: input.name,
-          targetPath: input.targetPath,
-          arguments: input.arguments ?? '',
-          workingDirectory: input.workingDirectory ?? '',
-          gameDirectory: input.gameDirectory ?? entry.gameDirectory,
-          runAsAdmin: input.runAsAdmin ?? entry.runAsAdmin,
-          addonId: input.addonId ?? null,
-          screenshotDirectory: input.screenshotDirectory ?? null,
-          monitorProcessNames: input.monitorProcessNames ?? []
-        })
-        await applyMedia(entry.id, media)
-        showToast('已保存')
-      } else {
-        const created = await window.api.addApp(input)
-        await applyMedia(created.id, media)
-        setCurrentId(created.id)
-        setView('home')
-        showToast('应用已添加')
-      }
-      setDialog(null)
-    },
-    [dialog, applyMedia, showToast]
-  )
-
   const handleLaunch = useCallback(
-    async (id: string): Promise<void> => {
+    async (id: string, methodId?: string): Promise<void> => {
       const entry = apps.find((a) => a.id === id)
       if (entry && entry.launchEffect !== 'none') {
         const wrap = document.querySelector('.home .start-wrap') as HTMLElement | null
@@ -405,12 +406,16 @@ export default function App(): ReactElement {
           originY: r ? 1 - (r.top + r.height / 2) / window.innerHeight : 0.4
         })
       }
-      const result = await window.api.launchApp(id)
+      const result = await window.api.launchApp(id, methodId)
       if (!result.ok) {
-        showToast(`启动失败：${result.error ?? '未知错误'}`)
+        showToast(result.error ?? '启动失败')
         return
       }
       if (result.message) showToast(result.message)
+      // A launch may be a wallpaper-rotation trigger.
+      if (entry?.wallpaperSettings?.trigger === 'appLaunch') {
+        await window.api.wallpaperAdvance(id)
+      }
       const action = launcherSettings.afterLaunch
       if (action === 'minimize') await window.api.windowMinimize()
       else if (action === 'tray') await window.api.hideToTray()
@@ -495,18 +500,15 @@ export default function App(): ReactElement {
     resolve?.(result)
   }, [])
 
-  const pickAndSet = useCallback(
-    async (appId: string, kind: 'icon' | 'background'): Promise<void> => {
-      if (kind === 'icon') {
-        const res = await cropIcon()
-        if (res) await window.api.setIconData(appId, res.dataUrl)
-        return
-      }
-      const source = await window.api.pickBackground()
-      if (source) await window.api.setBackground(appId, source)
-    },
-    [cropIcon]
-  )
+  const handlePickAppIcon = useCallback(async (): Promise<void> => {
+    if (!currentId) return
+    const res = await cropIcon()
+    if (res) await window.api.setIconData(currentId, res.dataUrl)
+  }, [currentId, cropIcon])
+
+  const handleResetAppIcon = useCallback(async (): Promise<void> => {
+    if (currentId) await window.api.resetIcon(currentId)
+  }, [currentId])
 
   const pickLauncherIcon = useCallback(async (): Promise<void> => {
     const res = await cropIcon()
@@ -521,6 +523,123 @@ export default function App(): ReactElement {
     setLauncherSettings(await window.api.setLauncherFont(family))
   }, [])
 
+  // -------------------------------------------------------------- wallpapers
+  const handleWallpaperAdd = useCallback(async (): Promise<void> => {
+    if (!currentId) return
+    const paths = await window.api.pickWallpapers()
+    for (const path of paths) await window.api.wallpaperAdd(currentId, path)
+  }, [currentId])
+
+  const handleWallpaperRemove = useCallback(
+    async (id: string): Promise<void> => {
+      if (currentId) await window.api.wallpaperRemove(currentId, id)
+    },
+    [currentId]
+  )
+
+  const handleWallpaperReorder = useCallback(
+    async (ids: string[]): Promise<void> => {
+      if (currentId) await window.api.wallpaperReorder(currentId, ids)
+    },
+    [currentId]
+  )
+
+  const handleWallpaperSettings = useCallback(
+    async (patch: Partial<WallpaperSettings>): Promise<void> => {
+      if (currentId) await window.api.wallpaperSettings(currentId, patch)
+    },
+    [currentId]
+  )
+
+  const handleWallpaperStep = useCallback(
+    async (delta: number): Promise<void> => {
+      if (currentId) await window.api.wallpaperStep(currentId, delta)
+    },
+    [currentId]
+  )
+
+  const handleWallpaperSelect = useCallback(
+    async (index: number): Promise<void> => {
+      if (currentId) await window.api.wallpaperSelect(currentId, index)
+    },
+    [currentId]
+  )
+
+  const handleWallpaperView = useCallback(
+    async (index: number): Promise<void> => {
+      if (currentId) await window.api.wallpaperOpenViewer(currentId, index)
+    },
+    [currentId]
+  )
+
+  const handleSetLaunchMethods = useCallback(
+    async (appId: string, methods: LaunchMethod[], defaultId: string): Promise<void> => {
+      await window.api.setLaunchMethods(appId, methods, defaultId)
+    },
+    []
+  )
+
+  const handleSetAppLinked = useCallback(
+    async (appId: string, ids: string[], defaultId: string | null): Promise<void> => {
+      await window.api.setAppLinkedLaunches(appId, ids, defaultId)
+    },
+    []
+  )
+
+  // ---------------------------------------------------------- linked launches
+  const handleLinkedLaunch = useCallback(
+    async (id: string): Promise<void> => {
+      const result = await window.api.launchLinkedLaunch(id)
+      if (!result.ok) showToast(result.error ?? '启动失败')
+    },
+    [showToast]
+  )
+
+  const handleStopLinked = useCallback(
+    async (id: string): Promise<void> => {
+      await window.api.stopApp(`linked:${id}`)
+    },
+    []
+  )
+
+  const linkedRunningKeys = useMemo(
+    () => running.filter((r) => r.appId.startsWith('linked:')).map((r) => r.appId),
+    [running]
+  )
+
+  const gamesRowLinked = useMemo(
+    () => linkedLaunches.filter((item) => item.showInGamesRow),
+    [linkedLaunches]
+  )
+
+  const handleLinkedReorder = useCallback(async (ids: string[]): Promise<void> => {
+    setLinkedLaunches(await window.api.reorderLinkedLaunches(ids))
+  }, [])
+
+  const handleLinkedAdd = useCallback(async (): Promise<void> => {
+    await window.api.addLinkedLaunch({
+      name: '新建关联启动',
+      targetPath: '',
+      arguments: '',
+      workingDirectory: '',
+      runAsAdmin: true,
+      showInGamesRow: true
+    })
+    setLinkedLaunches(await window.api.listLinkedLaunches())
+  }, [])
+
+  const handleLinkedUpdate = useCallback(async (entry: LinkedLaunch): Promise<void> => {
+    await window.api.updateLinkedLaunch(entry)
+  }, [])
+
+  const handleLinkedRemove = useCallback(
+    async (id: string): Promise<void> => {
+      if (!(await confirm('确定删除该关联启动吗？'))) return
+      await window.api.removeLinkedLaunch(id)
+    },
+    []
+  )
+
   const exportData = useCallback(async (): Promise<void> => {
     try {
       const path = await window.api.exportData()
@@ -532,7 +651,7 @@ export default function App(): ReactElement {
 
   const importData = useCallback(async (): Promise<void> => {
     if (
-      !(await confirm('导入会覆盖当前全部设置（应用、使用时长、抽卡记录、图标、背景），确定继续？'))
+      !(await confirm('导入会覆盖当前全部设置（应用、使用时长、抽卡记录、图标、壁纸），确定继续？'))
     ) {
       return
     }
@@ -561,9 +680,7 @@ export default function App(): ReactElement {
       )
     }
     if (view === 'gallery') {
-      return (
-        <GalleryView entry={entry} onBack={back} onEdit={() => setDialog({ mode: 'edit', entry })} />
-      )
+      return <GalleryView entry={entry} onBack={back} onEdit={() => setView('settings')} />
     }
     if (view === 'update') {
       return (
@@ -576,10 +693,27 @@ export default function App(): ReactElement {
         />
       )
     }
+    if (view === 'linkedLaunch') {
+      return (
+        <LinkedLaunchView
+          linkedLaunches={linkedLaunches}
+          apps={apps}
+          initialExpandedId={linkedFocusId}
+          onBack={back}
+          onAdd={() => void handleLinkedAdd()}
+          onUpdate={(item) => void handleLinkedUpdate(item)}
+          onRemove={(id) => void handleLinkedRemove(id)}
+          onReorder={(ids) => void handleLinkedReorder(ids)}
+          onSetAppLinked={(appId, ids, defaultId) => void handleSetAppLinked(appId, ids, defaultId)}
+        />
+      )
+    }
     if (view === 'modules') {
       return (
         <ModuleManagerView
           entry={entry}
+          linkedLaunches={linkedLaunches}
+          initialExpanded={moduleSection}
           onBack={back}
           onSetModule={(moduleId, patch) =>
             void window.api.setHomeModule(entry.id, moduleId, patch)
@@ -589,20 +723,37 @@ export default function App(): ReactElement {
           }
           onSetModuleLabel={(label) => void window.api.setModuleLabel(entry.id, label)}
           onSetLaunchEffect={(effect) => void window.api.setLaunchEffect(entry.id, effect)}
+          onSetLaunchMethods={(methods, defaultId) =>
+            void handleSetLaunchMethods(entry.id, methods, defaultId)
+          }
+          onWallpaperAdd={() => void handleWallpaperAdd()}
+          onWallpaperRemove={(id) => void handleWallpaperRemove(id)}
+          onWallpaperReorder={(ids) => void handleWallpaperReorder(ids)}
+          onWallpaperSettings={(patch) => void handleWallpaperSettings(patch)}
+          onWallpaperSelect={(index) => void handleWallpaperSelect(index)}
+          onWallpaperView={(index) => void handleWallpaperView(index)}
+          onBgTuning={handleBgTuning}
+          onSetAppLinked={(ids, defaultId) => void handleSetAppLinked(entry.id, ids, defaultId)}
+          onEditLinkedLaunch={(id) => {
+            setLinkedFocusId(id)
+            setView('linkedLaunch')
+          }}
         />
       )
     }
     return (
       <SettingsView
         entry={entry}
+        addons={addons}
         onBack={back}
-        onEdit={() => setDialog({ mode: 'edit', entry })}
-        onPickBackground={() => void pickAndSet(entry.id, 'background')}
+        onPatchEntry={(patch) => void handlePatchEntry(entry, patch)}
+        onPickIcon={() => void handlePickAppIcon()}
+        onResetIcon={() => void handleResetAppIcon()}
         onRemove={() => void handleRemove(entry)}
-        bgBlur={bgDisplay?.blur ?? entry.backgroundBlur ?? 0}
-        bgDim={bgDisplay?.dim ?? entry.backgroundDim ?? 100}
-        onBgTuning={handleBgTuning}
-        onResetBackground={() => void window.api.resetBackground(entry.id)}
+        onOpenModuleSettings={(section) => {
+          setModuleSection(section)
+          setView('modules')
+        }}
         launcher={launcherSettings}
         fonts={fonts}
         version={version}
@@ -630,13 +781,30 @@ export default function App(): ReactElement {
     )
   }
 
-  const bg = backgroundUrl(current?.backgroundFile ?? null)
-  const isVideo = current?.backgroundFile ? VIDEO_RE.test(current.backgroundFile) : false
-  const dialogEntry = dialog?.mode === 'edit' ? dialog.entry : null
+  const wallpaper = current ? currentWallpaper(current) : null
+  const bg = backgroundUrl(wallpaper?.file ?? null)
+  const isVideo = isVideoFile(wallpaper?.file)
 
   useEffect(() => {
     applyTheme(current?.themeColor ?? null)
   }, [current?.themeColor])
+
+  // Video wallpapers cannot be sampled by the main process, so decode the first
+  // frame here and update the auto theme colour when the video changes.
+  useEffect(() => {
+    if (!current || !current.autoTheme || !isVideo || !bg) return undefined
+    let cancelled = false
+    const appId = current.id
+    void extractVideoAccent(bg).then((color) => {
+      if (!cancelled && color && color !== current.themeColor) {
+        void window.api.setThemeColor(appId, color)
+      }
+    })
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bg, isVideo, current?.autoTheme, current?.id])
 
   // Swap the background only once the incoming image has decoded, carrying the
   // new game's blur / dim with it. The previous background (with its own blur)
@@ -668,11 +836,52 @@ export default function App(): ReactElement {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bg, isVideo, current?.id])
 
+  // Wallpaper rotation triggers: on app switch, once on launcher start (first
+  // time an app is shown) and on an interval. `appLaunch` is handled in
+  // `handleLaunch`.
+  const startedApps = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    if (!current) return undefined
+    const settings = current.wallpaperSettings
+    const trigger = settings?.trigger
+    if (trigger === 'appSwitch') {
+      void window.api.wallpaperAdvance(current.id)
+      return undefined
+    }
+    if (trigger === 'launcherStart') {
+      if (!startedApps.current.has(current.id)) {
+        startedApps.current.add(current.id)
+        void window.api.wallpaperAdvance(current.id)
+      }
+      return undefined
+    }
+    if (trigger === 'interval') {
+      if (!startedApps.current.has(current.id)) {
+        startedApps.current.add(current.id)
+        void window.api.wallpaperAdvance(current.id)
+      }
+      const minutes = Math.max(1, settings?.intervalMinutes ?? 30)
+      const timer = window.setInterval(
+        () => void window.api.wallpaperAdvance(current.id),
+        minutes * 60_000
+      )
+      return () => window.clearInterval(timer)
+    }
+    return undefined
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [current?.id, current?.wallpaperSettings?.trigger, current?.wallpaperSettings?.intervalMinutes])
+
   // Live background tuning from the settings sliders: update instantly, persist
   // debounced.
   const handleBgTuning = useCallback(
     (blur: number, dim: number): void => {
-      setBgDisplay((prev) => (prev ? { ...prev, blur, dim } : prev))
+      // Coalesce the live preview to one update per frame (dragging stays smooth).
+      if (!bgRaf.current) {
+        bgRaf.current = requestAnimationFrame(() => {
+          bgRaf.current = 0
+          setBgDisplay((prev) => (prev ? { ...prev, blur, dim } : prev))
+        })
+      }
       if (bgSaveTimer.current) window.clearTimeout(bgSaveTimer.current)
       const id = current?.id
       bgSaveTimer.current = window.setTimeout(() => {
@@ -688,6 +897,68 @@ export default function App(): ReactElement {
   useEffect(() => {
     applyGlass(current?.glass)
   }, [current?.glass])
+
+  // Plan-A popup backgrounds: publish the wallpaper image + its centre-cropped
+  // geometry so every `.wallpaper-region` popup can paint the exact region under
+  // it, then keep those offsets in sync.
+  const [wpImage, setWpImage] = useState<{ src: string; w: number; h: number } | null>(null)
+  useEffect(() => {
+    if (!bg || isVideo) {
+      setWpImage(null)
+      return undefined
+    }
+    let cancelled = false
+    const image = new Image()
+    image.crossOrigin = 'anonymous'
+    image.onload = () => {
+      if (!cancelled) setWpImage({ src: bg, w: image.naturalWidth, h: image.naturalHeight })
+    }
+    image.onerror = () => {
+      if (!cancelled) setWpImage(null)
+    }
+    image.src = bg
+    return () => {
+      cancelled = true
+    }
+  }, [bg, isVideo])
+
+  const [winSize, setWinSize] = useState({ w: window.innerWidth, h: window.innerHeight })
+  useEffect(() => {
+    const onResize = (): void => setWinSize({ w: window.innerWidth, h: window.innerHeight })
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+
+  useEffect(() => {
+    const root = document.documentElement
+    if (wpImage) {
+      const vw = winSize.w + 128
+      const vh = winSize.h + 128
+      const scale = Math.max(vw / wpImage.w, vh / wpImage.h)
+      const dw = wpImage.w * scale
+      const dh = wpImage.h * scale
+      root.style.setProperty('--wallpaper-image', `url("${wpImage.src}")`)
+      root.style.setProperty('--wallpaper-display-w', `${dw}px`)
+      root.style.setProperty('--wallpaper-display-h', `${dh}px`)
+      root.style.setProperty('--wallpaper-cx', `${(vw - dw) / 2}px`)
+      root.style.setProperty('--wallpaper-cy', `${(vh - dh) / 2}px`)
+      root.dataset.wallpaperRegion = 'image'
+    } else {
+      root.style.setProperty('--wallpaper-image', 'none')
+      root.dataset.wallpaperRegion = 'video'
+    }
+    updateWallpaperRegions()
+  }, [wpImage, winSize])
+
+  useEffect(() => installWallpaperRegionUpdater(), [])
+
+  // Publish the current app's wallpaper blur / dim so popups and dialogs can
+  // show the same wallpaper appearance.
+  useEffect(() => {
+    const root = document.documentElement
+    root.style.setProperty('--wallpaper-blur', `${current?.backgroundBlur ?? 0}px`)
+    root.style.setProperty('--wallpaper-dim', String((current?.backgroundDim ?? 0) / 100))
+  }, [current?.backgroundBlur, current?.backgroundDim])
 
   // The sidebar material is a launcher-wide setting.
   useEffect(() => {
@@ -742,7 +1013,16 @@ export default function App(): ReactElement {
   useEffect(() => {
     const el = animRef.current
     if (!el) return
-    const order: ViewId[] = ['home', 'playtime', 'gacha', 'gallery', 'update', 'settings']
+    const order: ViewId[] = [
+      'home',
+      'playtime',
+      'gacha',
+      'gallery',
+      'update',
+      'modules',
+      'linkedLaunch',
+      'settings'
+    ]
     const direction = order.indexOf(view) >= order.indexOf(prevViewRef.current) ? 1 : -1
     prevViewRef.current = view
     el.style.setProperty('--anim-x', `${direction * 26}px`)
@@ -811,9 +1091,17 @@ export default function App(): ReactElement {
               apps={apps}
               currentId={currentId}
               onSelect={(id) => setCurrentId(id)}
-              onAdd={() => setDialog({ mode: 'add' })}
+              onAdd={() => setShowAdd(true)}
               onReorder={(ids) => void handleReorder(ids)}
               onDragEnd={handleGamesDragEnd}
+            />
+            <LinkedLaunchRow
+              items={gamesRowLinked}
+              visible={view === 'home'}
+              runningKeys={linkedRunningKeys}
+              onLaunch={(id) => void handleLinkedLaunch(id)}
+              onStop={(id) => void handleStopLinked(id)}
+              onReorder={(ids) => void handleLinkedReorder(ids)}
             />
           </div>
           <button
@@ -843,7 +1131,7 @@ export default function App(): ReactElement {
               </div>
               <h2>KevinLauncher</h2>
               <p>还没有任何应用。添加任意 exe / bat / 脚本或其它启动器。</p>
-              <button className="start-btn" onClick={() => setDialog({ mode: 'add' })}>
+              <button className="start-btn" onClick={() => setShowAdd(true)}>
                 添加应用
               </button>
             </div>
@@ -856,11 +1144,16 @@ export default function App(): ReactElement {
               totalSec={totals[current.id] ?? 0}
               updateInfo={updateInfos[current.id]}
               updateStatus={updateStatuses[current.id] ?? null}
-              onLaunch={() => void handleLaunch(current.id)}
+              linkedLaunches={linkedLaunches}
+              runningKeys={running.map((r) => r.appId)}
+              onLaunch={(methodId) => void handleLaunch(current.id, methodId)}
               onStop={() => void handleStop(current.id)}
               onUpdateToggle={() => void handleUpdate(current.id, 'update')}
               onPreDownloadToggle={() => void handleUpdate(current.id, 'preDownload')}
               onShowStats={() => setView('playtime')}
+              onWallpaperStep={(delta) => void handleWallpaperStep(delta)}
+              onLaunchLinked={(id) => void handleLinkedLaunch(id)}
+              onStopLinked={(id) => void handleStopLinked(id)}
               onMoveModule={(moduleId, x, y) =>
                 void window.api.setHomeModule(current.id, moduleId, { x, y })
               }
@@ -874,12 +1167,11 @@ export default function App(): ReactElement {
       </main>
       </div>
 
-      {dialog && (
-        <AppFormDialog
+      {showAdd && (
+        <NewAppDialog
           addons={addons}
-          initial={dialogEntry}
-          onClose={() => setDialog(null)}
-          onSubmit={handleSubmit}
+          onClose={() => setShowAdd(false)}
+          onSubmit={handleAddApp}
           pickIconCropped={cropIcon}
         />
       )}

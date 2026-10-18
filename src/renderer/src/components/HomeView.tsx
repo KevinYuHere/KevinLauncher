@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ReactElement,
@@ -13,13 +14,17 @@ import {
   type AppEntry,
   type HomeModuleId,
   type HomeModuleState,
+  type LinkedLaunch,
   type UpdateInfo,
   type UpdateStatus
 } from '@shared/types'
 import { useJellyDrag } from '../drag/useJellyDrag'
+import { useLongPress } from '../drag/useLongPress'
 import { pushOut2D, type Rect } from '../drag/resolve'
 import { showToast } from './toast'
 import DownloadButton, { type DownloadTone, type RingTone } from './DownloadButton'
+import LaunchDrawer, { type DrawerOption } from './LaunchDrawer'
+import ScrollText from './ScrollText'
 import Icon from './Icon'
 import { formatBytes, formatEta, formatSpeed } from '../format'
 import { useDownloadSpeed } from '../useDownloadSpeed'
@@ -32,11 +37,18 @@ interface HomeViewProps {
   totalSec: number
   updateInfo: UpdateInfo | undefined
   updateStatus: UpdateStatus | null
-  onLaunch: () => void
+  /** Connected linked launches (global list; filtered per app below). */
+  linkedLaunches: LinkedLaunch[]
+  /** Runtime keys currently running (includes `linked:<id>` tasks). */
+  runningKeys: string[]
+  onLaunch: (methodId?: string) => void
   onStop: () => void
   onUpdateToggle: () => void
   onPreDownloadToggle: () => void
   onShowStats: () => void
+  onWallpaperStep: (delta: number) => void
+  onLaunchLinked: (id: string) => void
+  onStopLinked: (id: string) => void
   onMoveModule: (moduleId: HomeModuleId, x: number, y: number) => void
   /** Called when a module cannot be placed (home full) so it can be hidden. */
   onModuleUnplaceable: (moduleId: HomeModuleId) => void
@@ -77,6 +89,8 @@ function HomeModule({
   live,
   shift,
   dragging,
+  dragEnabled,
+  raised,
   override,
   register,
   onDrag,
@@ -91,6 +105,10 @@ function HomeModule({
   live: { x: number; y: number } | null
   shift: { x: number; y: number } | null
   dragging: boolean
+  /** Overrides `state.draggable` (e.g. suspended while a picker is open). */
+  dragEnabled?: boolean
+  /** Lift above the launch drawer so it can cover the drawer's tucked edge. */
+  raised?: boolean
   override: { left: number; top: number } | null
   register: (id: HomeModuleId, el: HTMLDivElement | null) => void
   onDrag: (id: HomeModuleId, dx: number, dy: number) => void
@@ -101,6 +119,7 @@ function HomeModule({
   const wrapRef = useRef<HTMLDivElement>(null)
   const [stage, setStage] = useState({ w: 0, h: 0 })
   const [box, setBox] = useState({ w: 0, h: 0 })
+  const canDrag = dragEnabled ?? state.draggable
 
   useEffect(() => {
     const el = stageRef.current
@@ -147,7 +166,7 @@ function HomeModule({
   const shifted = shift && (shift.x !== 0 || shift.y !== 0)
 
   const { onPointerDown } = useJellyDrag(wrapRef, {
-    enabled: state.draggable,
+    enabled: canDrag,
     mode: 'position',
     popScale: 1.2,
     maxStretch: 0.46,
@@ -158,7 +177,7 @@ function HomeModule({
   return (
     <div
       ref={wrapRef}
-      className={`home-module${state.draggable ? ' draggable' : ''}${dragging ? ' dragging' : ''}`}
+      className={`home-module${canDrag ? ' draggable' : ''}${dragging ? ' dragging' : ''}${raised ? ' raised' : ''}`}
       style={{
         left: `${Math.round(left)}px`,
         top: `${Math.round(top)}px`,
@@ -171,6 +190,16 @@ function HomeModule({
   )
 }
 
+/** Axis-aligned overlap test with a gap (used to normalise the layout). */
+function rectsOverlap(a: Rect, b: Rect, gap: number): boolean {
+  return (
+    a.x < b.x + b.w + gap &&
+    a.x + a.w + gap > b.x &&
+    a.y < b.y + b.h + gap &&
+    a.y + a.h + gap > b.y
+  )
+}
+
 export default function HomeView({
   entry,
   addon,
@@ -179,20 +208,29 @@ export default function HomeView({
   totalSec,
   updateInfo,
   updateStatus,
+  linkedLaunches,
+  runningKeys,
   onLaunch,
   onStop,
   onUpdateToggle,
   onPreDownloadToggle,
   onShowStats,
+  onWallpaperStep,
+  onLaunchLinked,
+  onStopLinked,
   onMoveModule,
   onModuleUnplaceable
 }: HomeViewProps): ReactElement {
   const [now, setNow] = useState(Date.now())
   const [launchW, setLaunchW] = useState(0)
+  const [linkedW, setLinkedW] = useState(0)
   const [live, setLive] = useState<Record<string, { x: number; y: number }>>({})
   const [shifts, setShifts] = useState<Record<string, { x: number; y: number }>>({})
   const [override, setOverride] = useState<Record<string, { left: number; top: number }>>({})
   const [dragId, setDragId] = useState<HomeModuleId | null>(null)
+  const [picker, setPicker] = useState<{ kind: 'launch' | 'linked'; anchor: DOMRect } | null>(null)
+  const [pickerClosing, setPickerClosing] = useState(false)
+  const [pickHighlight, setPickHighlight] = useState<string | null>('default')
   const stageRef = useRef<HTMLDivElement>(null)
   const refs = useRef<Partial<Record<HomeModuleId, HTMLElement | null>>>({})
   const prevVisible = useRef<string>('')
@@ -228,6 +266,31 @@ export default function HomeView({
   const info = mod('info')
   const playtime = mod('playtime')
   const launch = mod('launch')
+  const wallpaper = mod('wallpaper')
+  const linked = mod('linkedLaunch')
+
+  // Linked launches associated with this app (in the app's own order).
+  const appLinked = useMemo(
+    () =>
+      entry.linkedLaunchIds
+        .map((id) => linkedLaunches.find((item) => item.id === id))
+        .filter((item): item is LinkedLaunch => !!item),
+    [entry.linkedLaunchIds, linkedLaunches]
+  )
+  const defaultLinkedId = useMemo(
+    () =>
+      appLinked.find((item) => item.id === entry.defaultLinkedLaunchId)?.id ??
+      appLinked[0]?.id ??
+      null,
+    [appLinked, entry.defaultLinkedLaunchId]
+  )
+  const defaultLinked = appLinked.find((item) => item.id === defaultLinkedId) ?? null
+  const linkedRunning = defaultLinkedId ? runningKeys.includes(`linked:${defaultLinkedId}`) : false
+  const linkedLabel = linkedRunning
+    ? '停止'
+    : picker?.kind === 'linked'
+      ? (defaultLinked?.name ?? '关联启动')
+      : '关联启动'
 
   const stageSize = (): { w: number; h: number } => {
     const el = stageRef.current
@@ -250,7 +313,12 @@ export default function HomeView({
     }
   }
 
-  const visibleIds = (): HomeModuleId[] => HOME_MODULES.filter((m) => mod(m.id).visible).map((m) => m.id)
+  const isVisible = (id: HomeModuleId): boolean => {
+    if (!mod(id).visible) return false
+    if (id === 'linkedLaunch' && appLinked.length === 0) return false
+    return true
+  }
+  const visibleIds = (): HomeModuleId[] => HOME_MODULES.filter((m) => isVisible(m.id)).map((m) => m.id)
 
   // Base position captured once at drag start (the delta is relative to it).
   const baseRef = useRef<Partial<Record<HomeModuleId, { left: number; top: number }>>>({})
@@ -301,7 +369,6 @@ export default function HomeView({
     const nx = Math.max(0, Math.min(maxX, base.left + dx))
     const ny = Math.max(0, Math.min(maxY, base.top + dy))
     setLive((prev) => ({ ...prev, [id]: { x: nx, y: ny } }))
-    // Live yield — shove the neighbours as we move, not only on release.
     yieldShifts(id, { id, x: nx, y: ny, w: el.offsetWidth, h: el.offsetHeight }, w, h)
   }
 
@@ -421,9 +488,10 @@ export default function HomeView({
   }, [entry.id])
 
   // Re-flow as soon as a module's *own* size changes (the launch button widens
-  // when an update / pre-download appears), not only on window resize.
+  // when an update / pre-download appears, the linked pill when its name / order
+  // changes), not only on window resize.
   useEffect(() => {
-    const ids: HomeModuleId[] = ['info', 'playtime', 'launch']
+    const ids = HOME_MODULES.map((m) => m.id)
     const els = ids.map((id) => refs.current[id]).filter((el): el is HTMLDivElement => !!el)
     if (els.length === 0) return
     const sizes = new Map<HTMLElement, { w: number; h: number }>()
@@ -451,7 +519,7 @@ export default function HomeView({
       ro.disconnect()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [entry.id, entry.homeModules])
+  }, [entry.id, entry.homeModules, appLinked])
 
   // On enable: place the newly-visible module (push others aside, or report full).
   useEffect(() => {
@@ -460,7 +528,7 @@ export default function HomeView({
     prevVisible.current = sig
     if (!prev) return
     const newly = HOME_MODULES.map((m) => m.id).find(
-      (id) => mod(id).visible && !prev.split(',').includes(id)
+      (id) => isVisible(id) && !prev.split(',').includes(id)
     )
     if (!newly) return
     const timer = window.setTimeout(() => {
@@ -481,14 +549,38 @@ export default function HomeView({
       }
       const ov: Record<string, { left: number; top: number }> = { [newly]: { left: r.x, top: r.y } }
       for (const [mid, pos] of moves) ov[mid] = { left: pos.x, top: pos.y }
-      setOverride((prev) => ({ ...prev, ...ov }))
+      setOverride((prevOv) => ({ ...prevOv, ...ov }))
       const list: { id: HomeModuleId; x: number; y: number }[] = [{ id: newly, x: r.x, y: r.y }]
       for (const [mid, pos] of moves) list.push({ id: mid as HomeModuleId, x: pos.x, y: pos.y })
       persist(list)
     }, 60)
     return () => window.clearTimeout(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [entry.homeModules, entry.id])
+  }, [entry.homeModules, entry.id, appLinked])
+
+  // Normalise overlaps: any module sitting at its *default* anchor that overlaps
+  // a neighbour (e.g. after "隐藏 → 重置位置 → 显示") gets its neighbours pushed
+  // away, then the result is persisted. Modules with stored fractions are left
+  // alone (the drag already resolved them).
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const ids = visibleIds()
+      if (ids.length < 2) return
+      const rects = ids.map((id) => baseRectOf(id)).filter((r): r is Rect => r !== null)
+      for (const r of rects) {
+        const stored = entry.homeModules?.[r.id]
+        const atDefault = !stored || stored.x == null || stored.y == null
+        if (!atDefault) continue
+        const clash = rects.some((o) => o.id !== r.id && rectsOverlap(o, r, 2))
+        if (clash) {
+          reflowFrom(r.id as HomeModuleId)
+          break
+        }
+      }
+    }, 90)
+    return () => window.clearTimeout(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entry.homeModules, entry.id, appLinked])
 
   // Drop stale local overrides when the persisted state no longer matches it
   // (e.g. after "重置位置" sets x/y back to null, or after switching apps).
@@ -496,7 +588,7 @@ export default function HomeView({
     setOverride((prev) => {
       let changed = false
       const next = { ...prev }
-      for (const id of ['info', 'playtime', 'launch'] as HomeModuleId[]) {
+      for (const id of HOME_MODULES.map((m) => m.id)) {
         const stored = entry.homeModules?.[id]
         if (next[id] && (stored?.x == null || stored?.y == null)) {
           delete next[id]
@@ -525,7 +617,12 @@ export default function HomeView({
 
   // One launch-button shape for every mode (see DownloadButton): the cap ring
   // shows real progress with a pause / play state icon, and the label sits a
-  // fixed gap to its right.
+  // fixed gap to its right. In the idle state the button shows the default
+  // launch method's name (the button is the "default" choice of the picker).
+  const defaultMethod =
+    entry.launchMethods.find((m) => m.id === entry.defaultLaunchMethodId) ??
+    entry.launchMethods[0] ??
+    null
   const launchIcon =
     !active && !paused && preAvailable ? <Icon name="update" size={16} /> : undefined
   let launchLabel = '启动'
@@ -533,6 +630,7 @@ export default function HomeView({
   let launchProgress: number | null = null
   let launchRing: RingTone = 'pre'
   let launchClick = onLaunch
+  const idleLaunch = !running && !mainActive && !updateAvailable && !preActive && !preAvailable
   if (running) {
     launchLabel = '停止'
     launchTone = 'stop'
@@ -553,9 +651,111 @@ export default function HomeView({
   } else if (preAvailable) {
     launchClick = onPreDownloadToggle
   }
+  // While the drawer is open the button shows the default method's name.
+  if (idleLaunch && picker?.kind === 'launch') {
+    launchLabel = defaultMethod?.name?.trim() || '启动'
+  }
+
+  const methodPickerEnabled = idleLaunch && entry.launchMethods.length >= 2
+  const linkedPickerEnabled = appLinked.length >= 2
+
+  const drawerOptions: DrawerOption[] =
+    picker?.kind === 'launch'
+      ? entry.launchMethods
+          .filter((m) => m.id !== entry.defaultLaunchMethodId)
+          .map((m) => ({ id: m.id, label: m.name }))
+      : appLinked.filter((l) => l.id !== defaultLinkedId).map((l) => ({ id: l.id, label: l.name }))
+
+  const boundsRect =
+    stageRef.current?.getBoundingClientRect() ??
+    new DOMRect(0, 0, window.innerWidth, window.innerHeight)
+
+  const openPicker = (kind: 'launch' | 'linked', anchor: DOMRect): void => {
+    setPickerClosing(false)
+    setPicker({ kind, anchor })
+    setPickHighlight('default')
+  }
+
+  const closePicker = (): void => {
+    if (!picker || pickerClosing) return
+    setPickerClosing(true)
+    window.setTimeout(() => {
+      setPicker(null)
+      setPickerClosing(false)
+    }, 180)
+  }
+
+  const pickChoice = (id: string): void => {
+    if (picker?.kind === 'launch') {
+      onLaunch(id === 'default' ? undefined : id)
+    } else if (id === 'default') {
+      if (defaultLinkedId) onLaunchLinked(defaultLinkedId)
+    } else {
+      onLaunchLinked(id)
+    }
+    closePicker()
+  }
+
+  const launchButtonClick = (): void => {
+    if (picker?.kind === 'launch') {
+      pickChoice('default')
+      return
+    }
+    launchClick()
+  }
+
+  const onLinkedLongPress = (rect: DOMRect): void => {
+    if (linkedPickerEnabled && !picker) openPicker('linked', rect)
+  }
+  const linkedLongPress = useLongPress(onLinkedLongPress)
+  const linkedClick = (): void => {
+    if (linkedLongPress.consumeClick()) return
+    if (picker?.kind === 'linked') {
+      pickChoice('default')
+      return
+    }
+    if (!defaultLinkedId) return
+    if (linkedRunning) onStopLinked(defaultLinkedId)
+    else onLaunchLinked(defaultLinkedId)
+  }
 
   return (
     <div className="home" ref={stageRef}>
+      {wallpaper.visible && (
+        <HomeModule
+          moduleId="wallpaper"
+          state={wallpaper}
+          stageRef={stageRef}
+          anchor={{ left: 26, top: 26 }}
+          live={live.wallpaper ?? null}
+          shift={shifts.wallpaper ?? null}
+          dragging={dragId === 'wallpaper'}
+          override={override.wallpaper ?? null}
+          register={register}
+          onDrag={onDragModule}
+          onDrop={onDropModule}
+        >
+          <div className="wallpaper-switch">
+            <button
+              className="wp-btn glass"
+              title="上一张壁纸"
+              onClick={() => onWallpaperStep(-1)}
+              disabled={entry.wallpapers.length === 0}
+            >
+              <Icon name="chevronLeft" size={20} />
+            </button>
+            <button
+              className="wp-btn glass"
+              title="下一张壁纸"
+              onClick={() => onWallpaperStep(1)}
+              disabled={entry.wallpapers.length === 0}
+            >
+              <Icon name="chevronRight" size={20} />
+            </button>
+          </div>
+        </HomeModule>
+      )}
+
       {info.visible && (
         <HomeModule
           moduleId="info"
@@ -591,7 +791,7 @@ export default function HomeView({
           moduleId="playtime"
           state={playtime}
           stageRef={stageRef}
-          anchor={{ right: 26 + launchW + 12, bottom: 26 }}
+          anchor={{ right: 26 + launchW + (linkedW > 0 ? linkedW + 12 : 0), bottom: 26 }}
           live={live.playtime ?? null}
           shift={shifts.playtime ?? null}
           dragging={dragId === 'playtime'}
@@ -607,6 +807,41 @@ export default function HomeView({
         </HomeModule>
       )}
 
+      {linked.visible && appLinked.length > 0 && (
+        <HomeModule
+          moduleId="linkedLaunch"
+          state={linked}
+          stageRef={stageRef}
+          anchor={{ right: 26 + launchW + 12, bottom: 26 }}
+          live={live.linkedLaunch ?? null}
+          shift={shifts.linkedLaunch ?? null}
+          dragging={dragId === 'linkedLaunch'}
+          dragEnabled={!picker}
+          raised={picker?.kind === 'linked'}
+          override={override.linkedLaunch ?? null}
+          register={register}
+          onDrag={onDragModule}
+          onDrop={onDropModule}
+          onMeasure={(w) => setLinkedW((prev) => (Math.abs(prev - w) > 1 ? w : prev))}
+        >
+          <button
+            className={`linked-launch-pill glass${linkedRunning ? ' running' : ''}${picker?.kind === 'linked' ? ' picker-open' : ''}${picker?.kind === 'linked' && pickHighlight === 'default' ? ' selected' : ''}`}
+            title={
+              defaultLinked
+                ? linkedRunning
+                  ? `停止「${defaultLinked.name}」`
+                  : `启动「${defaultLinked.name}」`
+                : '关联启动'
+            }
+            onPointerDown={linkedLongPress.onPointerDown}
+            onClick={linkedClick}
+          >
+            <Icon name="link" size={16} />
+            <ScrollText text={linkedLabel} maxWidth={96} />
+          </button>
+        </HomeModule>
+      )}
+
       {launch.visible && (
         <HomeModule
           moduleId="launch"
@@ -616,6 +851,8 @@ export default function HomeView({
           live={live.launch ?? null}
           shift={shifts.launch ?? null}
           dragging={dragId === 'launch'}
+          dragEnabled={!picker}
+          raised={picker?.kind === 'launch'}
           override={override.launch ?? null}
           register={register}
           onDrag={onDragModule}
@@ -623,17 +860,36 @@ export default function HomeView({
           onMeasure={(w) => setLaunchW((prev) => (Math.abs(prev - w) > 1 ? w : prev))}
         >
           <DownloadButton
-            label={launchLabel}
+            label={<ScrollText text={launchLabel} maxWidth={150} />}
             tone={launchTone}
             progress={launchProgress}
             paused={paused}
             ringTone={launchRing}
             idleIcon={launchIcon}
-            onButtonClick={launchClick}
+            selected={picker?.kind === 'launch' && pickHighlight === 'default'}
+            onButtonClick={launchButtonClick}
             popup={popup}
             boundsRef={stageRef}
+            onLongPress={
+              methodPickerEnabled && !picker
+                ? (rect) => openPicker('launch', rect)
+                : undefined
+            }
           />
         </HomeModule>
+      )}
+
+      {picker && drawerOptions.length > 0 && (
+        <LaunchDrawer
+          anchor={picker.anchor}
+          bounds={boundsRect}
+          radius={Math.round(picker.anchor.height / 2)}
+          options={drawerOptions}
+          onHighlight={setPickHighlight}
+          onPick={pickChoice}
+          onClose={closePicker}
+          closing={pickerClosing}
+        />
       )}
     </div>
   )

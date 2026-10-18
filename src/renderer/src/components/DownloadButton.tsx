@@ -2,6 +2,7 @@ import { useRef, useState, type ReactElement, type ReactNode, type RefObject } f
 import Ring from './Ring'
 import GlassPopup from './GlassPopup'
 import Icon from './Icon'
+import { useLongPress } from '../drag/useLongPress'
 
 /** Button colour tone: plain (white) / update (theme) / stop (red). */
 export type DownloadTone = 'plain' | 'update' | 'stop'
@@ -10,7 +11,7 @@ export type RingTone = 'pre' | 'update'
 
 interface DownloadButtonProps {
   /** Button label (启动 / 开始更新 / 停止 / 45% / 已暂停). */
-  label: string
+  label: ReactNode
   onButtonClick: () => void
   tone?: DownloadTone
   /**
@@ -27,6 +28,10 @@ interface DownloadButtonProps {
   popup?: ReactNode
   /** Bounds the popup stays within (e.g. the home stage). */
   boundsRef?: RefObject<HTMLElement>
+  /** Long-press handler (opens the special launch-method picker). */
+  onLongPress?: (rect: DOMRect) => void
+  /** Highlighted as the selected choice of the launch drawer (theme colour). */
+  selected?: boolean
 }
 
 /**
@@ -44,18 +49,25 @@ export default function DownloadButton({
   ringTone = 'pre',
   idleIcon,
   popup,
-  boundsRef
+  boundsRef,
+  onLongPress,
+  selected
 }: DownloadButtonProps): ReactElement {
   const circleRef = useRef<HTMLButtonElement>(null)
   const [hover, setHover] = useState(false)
   const active = progress != null
   const hasCircle = active || !!idleIcon
+  const longPress = useLongPress((rect) => onLongPress?.(rect))
 
   return (
     <span className="start-wrap">
       <button
-        className={`start-btn${tone !== 'plain' ? ` ${tone}` : ''}${hasCircle ? ' has-circle' : ''}`}
-        onClick={onButtonClick}
+        className={`start-btn${tone !== 'plain' ? ` ${tone}` : ''}${hasCircle ? ' has-circle' : ''}${selected ? ' selected' : ''}`}
+        onPointerDown={onLongPress ? longPress.onPointerDown : undefined}
+        onClick={() => {
+          if (longPress.consumeClick()) return
+          onButtonClick()
+        }}
       >
         {label}
       </button>

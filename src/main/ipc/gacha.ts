@@ -8,6 +8,7 @@ import { fetchMiHoYoGacha } from '../gacha/mihoyo'
 import { fetchArknightsGacha } from '../gacha/arknights'
 import { loginHypergryphToken, silentHypergryphToken } from '../gacha/hypergryphAuth'
 import { scanWebCache } from '../gacha/urlSource'
+import { defaultLaunchMethod } from '@shared/appEntry'
 import { broadcast, gacha } from './context'
 
 export function registerGachaIpc(): void {
@@ -79,7 +80,7 @@ export function registerGachaIpc(): void {
     if (!entry?.addonId || entry.addonId === 'arknights') return null
     // The launch target may be a script/shortcut; the game's web cache lives
     // under the configured game directory.
-    const gameDir = entry.gameDirectory?.trim() || dirname(entry.targetPath)
+    const gameDir = entry.gameDirectory?.trim() || dirname(defaultLaunchMethod(entry)?.targetPath ?? '')
     return scanWebCache(gameDir, entry.addonId)
   })
 

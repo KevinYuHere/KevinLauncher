@@ -62,7 +62,8 @@ if ($LASTEXITCODE -ne 0) { throw 'electron-builder failed' }
 # The release notes come from CHANGELOG.md (newest version first). Publishing is
 # refused when the file is missing or has no section for this version — the same
 # rule the CI workflow enforces.
-node scripts/extract-changelog.mjs $Version (Join-Path $root 'release\RELEASE_NOTES.md')
+$notesFile = Join-Path $root 'release\RELEASE_NOTES.md'
+node scripts/extract-changelog.mjs $Version $notesFile
 if ($LASTEXITCODE -ne 0) { throw "CHANGELOG.md 缺少 $Version 的段落，已拒绝发布" }
 if ($FakeElectron) {
   node scripts/build-update-payload.mjs (Join-Path $root 'release\win-unpacked') $Version $FakeElectron

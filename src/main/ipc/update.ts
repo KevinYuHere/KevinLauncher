@@ -1,13 +1,15 @@
 import { ipcMain } from 'electron'
 import { dirname } from 'path'
+import type { AppEntry } from '@shared/types'
+import { defaultLaunchMethod } from '@shared/appEntry'
 import { AppStore } from '../services/appStore'
 import { getHoYoUpdateInfo } from '../update/hoyoplay'
 import { getArknightsUpdateInfo } from '../update/arknightsUpdate'
 import { getUpdatePreview, updates } from './context'
 
-/** Resolve an app's game directory (falls back to the launcher target's folder). */
-function gameDirOf(entry: { gameDirectory: string | null; targetPath: string }): string {
-  return entry.gameDirectory?.trim() || dirname(entry.targetPath)
+/** Resolve an app's game directory (falls back to the default method's folder). */
+function gameDirOf(entry: AppEntry): string {
+  return entry.gameDirectory?.trim() || dirname(defaultLaunchMethod(entry)?.targetPath ?? '')
 }
 
 export function registerUpdateIpc(): void {

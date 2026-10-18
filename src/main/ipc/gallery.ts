@@ -3,6 +3,7 @@ import { promises as fs } from 'fs'
 import { extname, join } from 'path'
 import type { GalleryItem } from '@shared/types'
 import { AppStore } from '../services/appStore'
+import { openViewer, viewerNav } from '../services/viewer'
 
 const IMAGE_EXT = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.avif'])
 const MAX_IMAGES = 3000
@@ -31,45 +32,6 @@ function copyImage(image: NativeImageType): void {
     const blob = new Blob([image.toPNG() as unknown as BlobPart], { type: 'image/png' })
     void api.write([new ClipboardItemCtor({ 'image/png': blob })]).catch(() => undefined)
   }
-}
-
-/** Single reusable image viewer window (avoid a renderer process per image). */
-let viewerWindow: BrowserWindow | null = null
-/** The list the viewer was opened with, so it can go to the previous/next image. */
-let viewerPaths: string[] = []
-let viewerIndex = 0
-
-function showViewer(path: string): void {
-  const hash = `viewer=${encodeURIComponent(path)}`
-  const devUrl = process.env['ELECTRON_RENDERER_URL']
-
-  if (viewerWindow && !viewerWindow.isDestroyed()) {
-    if (devUrl) void viewerWindow.loadURL(`${devUrl}#${hash}`)
-    else void viewerWindow.loadFile(join(__dirname, '../renderer/index.html'), { hash })
-    if (viewerWindow.isMinimized()) viewerWindow.restore()
-    viewerWindow.show()
-    viewerWindow.focus()
-    return
-  }
-
-  const viewer = new BrowserWindow({
-    width: 1040,
-    height: 740,
-    minWidth: 480,
-    minHeight: 360,
-    frame: false,
-    backgroundColor: '#0b0d12',
-    autoHideMenuBar: true,
-    title: '查看图片',
-    webPreferences: { preload: join(__dirname, '../preload/index.js'), sandbox: false }
-  })
-  viewerWindow = viewer
-  viewer.on('closed', () => {
-    if (viewerWindow === viewer) viewerWindow = null
-  })
-  viewer.setMenuBarVisibility(false)
-  if (devUrl) viewer.loadURL(`${devUrl}#${hash}`)
-  else viewer.loadFile(join(__dirname, '../renderer/index.html'), { hash })
 }
 
 async function collectImages(dir: string, out: GalleryItem[], depth = 0): Promise<void> {
@@ -109,21 +71,12 @@ export function registerGalleryIpc(): void {
   })
 
   ipcMain.handle('gallery:openViewer', (_e, paths: string[] | string, index: number) => {
-    viewerPaths = Array.isArray(paths) ? paths.slice() : [String(paths)]
-    if (viewerPaths.length === 0) return
-    viewerIndex = Math.max(0, Math.min(viewerPaths.length - 1, index | 0))
-    showViewer(viewerPaths[viewerIndex])
+    openViewer(Array.isArray(paths) ? paths : [String(paths)], index)
   })
 
   // Previous/next image (wraps). Returns the new path; the viewer window updates
   // in place (no reload).
-  ipcMain.handle('gallery:viewerNav', (_e, delta: number) => {
-    const n = viewerPaths.length
-    if (n === 0) return null
-    const step = delta < 0 ? -1 : 1
-    viewerIndex = (viewerIndex + step + n) % n
-    return viewerPaths[viewerIndex]
-  })
+  ipcMain.handle('gallery:viewerNav', (_e, delta: number) => viewerNav(delta))
 
   ipcMain.handle('gallery:contextMenu', (e, path: string) => {
     const win = BrowserWindow.fromWebContents(e.sender)

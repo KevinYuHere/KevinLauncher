@@ -322,6 +322,68 @@ export class AppUpdateChecker {
     return currentAppVersion()
   }
 
+  /** Optional fake release read from `%userData%/simulate-app-update.json`. */
+  private async fakeSpec(): Promise<AppUpdateInfo | null> {
+    try {
+      const raw = await fs.readFile(
+        join(app.getPath('userData'), 'simulate-app-update.json'),
+        'utf-8'
+      )
+      const spec = JSON.parse(raw) as { version?: string; name?: string; notes?: string }
+      const version = spec.version ?? '9.9.9'
+      return {
+        version,
+        name: spec.name ?? `KevinLauncher ${version}（模拟更新）`,
+        notes: spec.notes ?? '这是用于本地检查更新页面的模拟更新，不会真正下载。',
+        htmlUrl: `https://github.com/${GITHUB_REPO}/releases/tag/v${version}`,
+        payloadUrls: [],
+        payloadSize: 0,
+        payloadSha256: null,
+        installSize: 0,
+        electronVersion: null,
+        installerUrls: [],
+        installerName: null,
+        installerSize: 0,
+        installerSha256: null,
+        publishedAt: new Date().toISOString()
+      }
+    } catch {
+      return null
+    }
+  }
+
+  /** Fake download progress (used with `fakeSpec`). */
+  private simulateFake(info: AppUpdateInfo): void {
+    const total = 1048576
+    let transferred = 0
+    this.running = true
+    this.patch({
+      phase: 'downloading',
+      version: info.version,
+      percent: 0,
+      transferred: 0,
+      total,
+      bytesPerSecond: total / 3,
+      installPercent: 0,
+      message: ''
+    })
+    const timer = setInterval(() => {
+      transferred += total / 40
+      if (transferred >= total) {
+        clearInterval(timer)
+        this.running = false
+        this.patch({ phase: 'done', percent: 1, transferred: total, installPercent: 100 })
+        return
+      }
+      this.patch({
+        percent: transferred / total,
+        transferred,
+        bytesPerSecond: total / 3,
+        installPercent: 0
+      })
+    }, 150)
+  }
+
   status(): AppUpdateStatus {
     // Never advertise a version that is already installed: a cached result can
     // otherwise keep offering the update right after it was applied.
@@ -426,6 +488,20 @@ export class AppUpdateChecker {
    */
   async check(kind: 'auto' | 'manual' = 'auto'): Promise<AppUpdateStatus> {
     const now = Date.now()
+    // Local test affordance: `%userData%/simulate-app-update.json` fakes a newer
+    // release so the update dialog / ring can be inspected offline.
+    const fake = await this.fakeSpec()
+    if (fake) {
+      this.error = undefined
+      this.info = fake
+      this.lastAutoCheck = now
+      this.lastManualCheck = now
+      if (this.announced !== fake.version) {
+        this.announced = fake.version
+        for (const listener of this.listeners) listener(fake)
+      }
+      return this.status()
+    }
     const stamp = kind === 'auto' ? this.lastAutoCheck : this.lastManualCheck
     // Fresh for this kind (≤ 24 h) → answer from the cached result.
     if (stamp && now - stamp < CHECK_CACHE_TTL) return this.status()
@@ -481,7 +557,12 @@ export class AppUpdateChecker {
       info.installerName = name
       info.installerUrls = [`${LATEST_DOWNLOAD_BASE}/${name}`]
     }
-    if (!app.isPackaged || (!info.payloadUrls.length && !info.installerUrls.length)) {
+    if (info.payloadUrls.length === 0 && info.installerUrls.length === 0) {
+      // No real asset (the local fake spec): simulate the download UI.
+      if (!this.running) this.simulateFake(info)
+      return
+    }
+    if (!app.isPackaged) {
       void shell.openExternal(info.htmlUrl)
       return
     }

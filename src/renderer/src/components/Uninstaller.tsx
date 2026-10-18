@@ -81,7 +81,7 @@ export default function Uninstaller(): ReactElement {
               />
               <span>
                 保留用户数据（{formatBytes(info?.dataSize ?? 0)}
-                ，含应用列表、使用时长、抽卡记录、图标与背景）
+                ，含应用列表、使用时长、抽卡记录、图标与壁纸）
                 <em className="setup-check-path">{info?.dataDir ?? ''}</em>
               </span>
             </label>

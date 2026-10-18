@@ -9,8 +9,10 @@ import { registerGalleryIpc } from './gallery'
 import { registerHousekeepingIpc } from './housekeeping'
 import { registerInstallerIpc } from './installer'
 import { registerLaunchIpc } from './launch'
+import { registerLinkedLaunchIpc } from './linkedLaunch'
 import { registerMediaIpc } from './media'
 import { registerUpdateIpc } from './update'
+import { registerWallpaperIpc } from './wallpaper'
 import { registerWindowIpc } from './window'
 
 export { appUpdate, registerUpdatePreview, runtime, updates } from './context'
@@ -38,6 +40,8 @@ export function registerIpc(): void {
   registerAppsIpc()
   registerFontsIpc()
   registerLaunchIpc()
+  registerLinkedLaunchIpc()
+  registerWallpaperIpc()
   registerMediaIpc()
   registerBackupIpc()
   registerGachaIpc()

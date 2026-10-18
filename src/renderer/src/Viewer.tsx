@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
+import { isVideoFile } from '@shared/appEntry'
 import { fileUrl } from './media'
 
 interface ViewerProps {
@@ -12,6 +13,7 @@ export default function Viewer({ path }: ViewerProps): ReactElement {
   const [navPath, setNavPath] = useState<string | null>(null)
   const shown = navPath ?? path
   const name = shown.split(/[\\/]/).pop() ?? shown
+  const isVideo = isVideoFile(name)
   const stageRef = useRef<HTMLDivElement>(null)
   const dragRef = useRef<{ x: number; y: number; ox: number; oy: number } | null>(null)
 
@@ -172,23 +174,36 @@ export default function Viewer({ path }: ViewerProps): ReactElement {
         >
           ›
         </button>
-        <img
-          className="viewer-img"
-          src={fileUrl(shown)}
-          alt={name}
-          draggable={false}
-          onLoad={(e) => {
-            const img = e.currentTarget
-            setNatural({ w: img.naturalWidth, h: img.naturalHeight })
-          }}
-          style={{
-            width: natural ? `${natural.w}px` : undefined,
-            height: natural ? `${natural.h}px` : undefined,
-            opacity: natural ? 1 : 0,
-            transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})`,
-            cursor: dragging ? 'grabbing' : 'grab'
-          }}
-        />
+        {isVideo ? (
+          <video
+            key={shown}
+            className="viewer-img"
+            src={fileUrl(shown)}
+            controls
+            autoPlay
+            loop
+            muted
+            playsInline
+          />
+        ) : (
+          <img
+            className="viewer-img"
+            src={fileUrl(shown)}
+            alt={name}
+            draggable={false}
+            onLoad={(e) => {
+              const img = e.currentTarget
+              setNatural({ w: img.naturalWidth, h: img.naturalHeight })
+            }}
+            style={{
+              width: natural ? `${natural.w}px` : undefined,
+              height: natural ? `${natural.h}px` : undefined,
+              opacity: natural ? 1 : 0,
+              transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})`,
+              cursor: dragging ? 'grabbing' : 'grab'
+            }}
+          />
+        )}
       </div>
     </div>
   )

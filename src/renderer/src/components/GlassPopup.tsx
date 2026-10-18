@@ -92,13 +92,14 @@ export default function GlassPopup({
   return createPortal(
     <div
       ref={popRef}
-      className={`glass-pop${className ? ' ' + className : ''}${closing ? ' closing' : ''}`}
+      className={`glass-pop wallpaper-region${className ? ' ' + className : ''}${closing ? ' closing' : ''}`}
       style={{
         left: pos ? `${pos.left}px` : '-9999px',
         top: pos ? `${pos.top}px` : '-9999px',
         visibility: pos ? 'visible' : 'hidden'
       }}
     >
+      <span className="wp-region-layer" aria-hidden="true" />
       {children}
     </div>,
     document.body

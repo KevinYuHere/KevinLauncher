@@ -1,12 +1,15 @@
 import { app } from 'electron'
 import { join } from 'path'
-import { DEFAULT_GLASS_APPEARANCE, type AppEntry, type GlassAppearance } from '@shared/types'
+import type { AppEntry, LinkedLaunch } from '@shared/types'
 import { writeFileAtomic } from './atomicFile'
 import { openJsonStore } from './jsonStore'
+import { CURRENT_VERSION, migrateConfig } from './appMigrations'
 
 export interface LauncherConfig {
   version: number
   apps: AppEntry[]
+  /** Launcher-wide linked launches (one file starts several apps). */
+  linkedLaunches?: LinkedLaunch[]
   /** Persisted UI preferences. */
   ui?: {
     gamesRowHidden?: boolean
@@ -22,16 +25,7 @@ export interface LauncherConfig {
   }
 }
 
-/**
- * v2: admin. v3: glass tone. v4: bg blur/dim. v5: auto theme. v6: module label.
- * v7: glass tone → glass appearance { color, material, blur }.
- * v9: glass `color` → `brightness`; per-app gacha option; sidebar material toggle.
- * v10: glass gains `opacity` + per-material params (saturation/grain/refraction/
- *      edgeWidth/highlight/highlightAngle/dispersion).
- * v11: glass gains `panelRefraction`; per-app home-module state.
- */
-const CURRENT_VERSION = 12
-const DEFAULT_CONFIG: LauncherConfig = { version: CURRENT_VERSION, apps: [] }
+const DEFAULT_CONFIG: LauncherConfig = { version: CURRENT_VERSION, apps: [], linkedLaunches: [] }
 
 let cache: LauncherConfig | null = null
 /** Set when the config file could not be read — writes are refused for the session. */
@@ -51,6 +45,7 @@ export class AppStore {
       'appStore'
     )
     data.apps = Array.isArray(data.apps) ? data.apps : []
+    data.linkedLaunches = Array.isArray(data.linkedLaunches) ? data.linkedLaunches : []
     data.version = data.version ?? 1
     cache = data
     saveBlocked = !writable
@@ -60,61 +55,7 @@ export class AppStore {
 
   /** Runs version migrations and persists them once. */
   private static async migrate(config: LauncherConfig): Promise<void> {
-    if (config.version >= CURRENT_VERSION) return
-    const { version } = config
-    for (const entry of config.apps) {
-      // The pre-v7 binary tone, read only while upgrading an old config.
-      const legacy = entry as AppEntry & { glassStyle?: 'dark' | 'light' }
-      // v2: everything launched through the launcher runs as administrator now.
-      if (version < 2) entry.runAsAdmin = true
-      if (version < 3) legacy.glassStyle ??= 'dark'
-      if (version < 4) {
-        entry.backgroundBlur ??= 0
-        entry.backgroundDim ??= 25
-      }
-      if (version < 5) {
-        entry.autoTheme ??= entry.themeColor == null
-        // The old default dimming was 100; the new default is 25.
-        if (entry.backgroundDim === 100) entry.backgroundDim = 25
-      }
-      if (version < 6) entry.moduleLabel ??= null
-      if (version < 7) {
-        // Binary dark/light becomes a brightness (0 dark … 100 light) plus a
-        // material (毛玻璃 by default) and its own blur radius.
-        entry.glass = {
-          ...DEFAULT_GLASS_APPEARANCE,
-          brightness: legacy.glassStyle === 'light' ? 100 : 0
-        }
-        delete legacy.glassStyle
-      }
-      if (version < 9) {
-        // `color` was a misleading name for the brightness; the earlier
-        // distortion/edge/highlight fields were dropped.
-        const glass = entry.glass as (Partial<GlassAppearance> & { color?: number }) | undefined
-        entry.glass = {
-          ...DEFAULT_GLASS_APPEARANCE,
-          brightness: glass?.brightness ?? glass?.color ?? 0,
-          material: glass?.material ?? 'blur',
-          blur: glass?.blur ?? 18
-        }
-        entry.gachaShowSecond ??= true
-      }
-      if (version < 10) {
-        // Fill the new opacity + per-material fields (keep existing values).
-        entry.glass = { ...DEFAULT_GLASS_APPEARANCE, ...entry.glass }
-      }
-      if (version < 11) {
-        // panelRefraction + home-module state.
-        entry.glass = { ...DEFAULT_GLASS_APPEARANCE, ...entry.glass }
-        entry.homeModules = entry.homeModules ?? {}
-      }
-      if (version < 12) entry.launchEffect ??= 'none'
-    }
-    if (version < 9) {
-      config.launcher = { ...config.launcher, sidebarMaterial: config.launcher?.sidebarMaterial ?? true }
-    }
-    config.version = CURRENT_VERSION
-    await this.save()
+    if (migrateConfig(config)) await this.save()
   }
 
   static async save(): Promise<void> {
@@ -187,5 +128,35 @@ export class AppStore {
     config.apps = ordered
     await this.save()
     return config.apps
+  }
+
+  /** Launcher-wide linked launches (global order preserved). */
+  static async linkedLaunches(): Promise<LinkedLaunch[]> {
+    const config = await this.load()
+    return config.linkedLaunches ?? []
+  }
+
+  static async setLinkedLaunches(list: LinkedLaunch[]): Promise<void> {
+    const config = await this.load()
+    config.linkedLaunches = list
+    await this.save()
+  }
+
+  /** Reorders linked launches to match the given id order. */
+  static async reorderLinkedLaunches(ids: string[]): Promise<LinkedLaunch[]> {
+    const config = await this.load()
+    const byId = new Map((config.linkedLaunches ?? []).map((entry) => [entry.id, entry]))
+    const ordered: LinkedLaunch[] = []
+    for (const id of ids) {
+      const entry = byId.get(id)
+      if (entry) {
+        ordered.push(entry)
+        byId.delete(id)
+      }
+    }
+    for (const entry of byId.values()) ordered.push(entry)
+    config.linkedLaunches = ordered
+    await this.save()
+    return ordered
   }
 }

@@ -18,6 +18,11 @@ export type IconName =
   | 'pause'
   | 'play'
   | 'chevronDown'
+  | 'link'
+  | 'grip'
+  | 'check'
+  | 'pencil'
+  | 'folder'
 
 interface IconProps {
   name: IconName
@@ -113,6 +118,34 @@ const PATHS: Record<IconName, ReactElement> = {
   chevronDown: (
     <>
       <path d="M5 9l7 7 7-7" />
+    </>
+  ),
+  link: (
+    <>
+      <path d="M9.5 14.5 14.5 9.5" />
+      <path d="M8 12 5.8 14.2a3.4 3.4 0 0 0 4.8 4.8L13 16.8" />
+      <path d="M16 12l2.2-2.2a3.4 3.4 0 0 0-4.8-4.8L11 7.2" />
+    </>
+  ),
+  grip: (
+    <>
+      <path d="M8 7h8M8 12h8M8 17h8" />
+    </>
+  ),
+  check: (
+    <>
+      <path d="M5 12.5 10 17.5 19 7" />
+    </>
+  ),
+  pencil: (
+    <>
+      <path d="M4 20h4L19.5 8.5a2.1 2.1 0 0 0-3-3L5 17v3z" />
+      <path d="M14.5 6.5l3 3" />
+    </>
+  ),
+  folder: (
+    <>
+      <path d="M3.5 6.5h5.5l2 2.5h9.5v9a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5z" />
     </>
   )
 }

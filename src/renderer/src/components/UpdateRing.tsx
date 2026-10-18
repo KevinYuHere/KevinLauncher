@@ -85,7 +85,8 @@ export default function UpdateRing({
       {/* Only while something is actually happening — hovering the idle icon
           should not pop a panel open. */}
       {hover && state.phase !== 'idle' && (
-        <div className="rail-pop glass">
+        <div className="rail-pop glass wallpaper-region">
+          <span className="wp-region-layer" aria-hidden="true" />
           <div className="rail-pop-head">
             {installing ? '正在安装更新' : paused ? '已暂停' : '正在下载更新'}
           </div>

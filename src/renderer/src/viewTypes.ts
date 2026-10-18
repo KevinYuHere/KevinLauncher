@@ -6,4 +6,5 @@ export type ViewId =
   | 'gallery'
   | 'update'
   | 'modules'
+  | 'linkedLaunch'
   | 'settings'

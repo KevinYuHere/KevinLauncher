@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import { useOpenOrigin } from './useOpenOrigin'
-import ModalBackdrop from './ModalBackdrop'
 
 interface IconCropperProps {
   source: string
@@ -131,13 +130,13 @@ export default function IconCropper({
 
   return (
     <div className={`modal-mask${closing ? ' closing' : ''}`}>
-      <ModalBackdrop />
       <div
         ref={modalRef}
-        className={`modal${closing ? ' closing' : ''}`}
+        className={`modal wallpaper-region${closing ? ' closing' : ''}`}
         style={{ width: 'min(460px, 92vw)' }}
         onClick={(e) => e.stopPropagation()}
       >
+        <span className="wp-region-layer" aria-hidden="true" />
         <div className="modal-header">
           <h2>框选图标（正方形）</h2>
           <button className="modal-close" onClick={requestCancel}>

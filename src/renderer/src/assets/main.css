@@ -126,21 +126,11 @@ textarea {
   font-family: inherit;
 }
 
+/* Native scrollbars take no width (overlay-style) so content never shifts when
+   a list starts/stops scrolling. */
 ::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
-}
-::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.2);
-  border: 3px solid transparent;
-  background-clip: padding-box;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.34);
-  background-clip: padding-box;
-}
-::-webkit-scrollbar-track {
-  background: transparent;
+  width: 0;
+  height: 0;
 }
 
 /* ------------------------------------------------------------------ app */
@@ -401,11 +391,18 @@ textarea {
 }
 .games-wrap {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
+  /* Aligns the chips with the rail's home icon (top offset + top alignment). */
+  align-self: flex-start;
   gap: 0;
+  margin-top: 10px;
+  /* Hover area extends past the capsules' scrollbar so reaching it does not
+     count as leaving the row (which would collapse it again). */
+  padding-bottom: 14px;
   -webkit-app-region: no-drag;
 }
 .games-collapser {
+  position: relative;
   display: grid;
   grid-template-columns: 1fr;
   transition:
@@ -415,21 +412,18 @@ textarea {
 .games-collapser.collapsed {
   grid-template-columns: 0fr;
   opacity: 0;
+  pointer-events: none;
 }
-/* The collapse animation needs `overflow: hidden`, which clips at the padding
-   box — so the chips' hover shadow (0 8px 20px) is cut off at the bottom/left.
-   The padding gives the shadow room and the negative margins cancel it out
-   again, keeping the collapsed width at zero. */
-/* While dragging, don't clip the dragged chip (its release animation must start
-   from where the finger was, even outside the row). */
+/* While dragging, don't clip the dragged chip. */
 .games-collapser > .games.row-dragging {
   overflow: visible;
 }
 .games-collapser > .games {
-  overflow: hidden;
+  /* Clip only far outside the box so the chip press/click bulge (all sides) is
+     never cut off, while the collapse still hides the row. */
+  overflow: clip;
+  overflow-clip-margin: 14px;
   min-width: 0;
-  padding: 16px 28px 34px 24px;
-  margin: -16px -22px -34px -24px;
 }
 .games-toggle {
   flex: 0 0 auto;
@@ -652,25 +646,51 @@ textarea {
 .module-caret.open {
   transform: rotate(180deg);
 }
-/* Animated reveal: the panel stays mounted and animates its height (0fr → 1fr). */
-.module-settings {
+/* Animated reveal (see components/Collapse.tsx): the panel stays mounted and
+   animates its height (0fr → 1fr). No inner padding while closed so it fully
+   collapses (nothing leaks out). */
+.collapse {
   display: grid;
   grid-template-rows: 0fr;
   transition: grid-template-rows 0.26s var(--ease);
 }
-.module-settings.open {
+.collapse.open {
   grid-template-rows: 1fr;
 }
-.module-settings-inner {
+/* One 3px vertical line down the whole drawer, inset from the left, coloured
+   with the current text colour; rows keep a gap to its right. */
+.collapse-inner {
+  position: relative;
   overflow: hidden;
   min-height: 0;
-  padding: 0 0 8px;
 }
-.module-settings .settings-row {
-  padding-left: 18px;
+.collapse-inner::before {
+  content: '';
+  position: absolute;
+  left: 7px;
+  top: 6px;
+  bottom: 6px;
+  width: 1.5px;
+  border-radius: 2px;
+  background: currentColor;
 }
-.module-settings .input {
+.collapse-inner .settings-row {
+  padding-left: 22px;
+  padding-right: 18px;
+}
+.collapse-inner .input {
   width: min(320px, 46vw);
+}
+/* Inside a collapse the settings group is a plain list (no rounded card), so it
+   matches the info-card section and shares the same control darkening. */
+.collapse-inner .settings {
+  border: none;
+  border-radius: 0;
+  background: none;
+  background-image: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  overflow: visible;
 }
 .playtime-pill {
   display: flex;
@@ -735,7 +755,7 @@ textarea {
   overflow-y: auto;
   overflow-x: hidden;
   overscroll-behavior: contain;
-  padding: 22px 30px 30px;
+  padding: 11px 30px 30px;
 }
 .page-header {
   display: flex;
@@ -992,10 +1012,11 @@ textarea {
 }
 .settings-row {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 16px;
-  padding: 15px 18px;
+  min-height: 64px;
+  padding: 12px 18px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 .settings-row:last-child {
@@ -1017,6 +1038,40 @@ textarea {
 }
 .settings-action {
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+/* Controls keep their natural size; only inline editors are width-bounded. */
+.settings-action > * {
+  flex: 0 0 auto;
+}
+.settings-action .inline-edit {
+  max-width: 42vw;
+  justify-content: flex-end;
+}
+.settings-action .inline-edit.wide {
+  max-width: 52vw;
+}
+/* Keep the dropdown wide enough inside settings rows. */
+.settings-action .select-box {
+  min-width: 200px;
+}
+/* A right-aligned field right-aligns its text / placeholder too. */
+.settings-action .inline-edit-text {
+  text-align: right;
+}
+.settings-action .inline-edit-input {
+  text-align: right;
+}
+/* Card-layout method header: grip + number + name inline. */
+.method-head-inline {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
 }
 
 /* --------------------------------------------------------------- modal */
@@ -1098,6 +1153,7 @@ textarea {
   justify-content: space-between;
   padding: 16px 22px;
   border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
 }
 .modal-header h2 {
   margin: 0;
@@ -1121,13 +1177,19 @@ textarea {
   color: var(--fg);
 }
 .modal-body {
-  flex: 1;
+  flex: 1 1 auto;
   min-height: 0;
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
   padding: 22px;
   display: flex;
   flex-direction: column;
   gap: 18px;
+}
+/* Cards keep their content height so the body scrolls instead of shrinking and
+   clipping them. */
+.modal-body > * {
+  flex: 0 0 auto;
 }
 .modal-footer {
   display: flex;
@@ -1135,6 +1197,7 @@ textarea {
   gap: 10px;
   padding: 14px 22px;
   border-top: 1px solid var(--line);
+  flex: 0 0 auto;
 }
 
 /* Dialog buttons share the frosted "card" look of the gacha panels. */
@@ -1283,24 +1346,6 @@ textarea {
 /* --------------------------------------------------------------- toast */
 /* The dialog layer re-renders its own wallpaper so the dialog material renders
    over the real background (see components/ModalBackdrop.tsx). */
-.modal-backdrop {
-  position: fixed;
-  inset: -64px;
-  z-index: 0;
-  overflow: hidden;
-  pointer-events: none;
-}
-.modal-backdrop img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-.modal-backdrop span {
-  position: absolute;
-  inset: 0;
-  background: #000000;
-}
-
 /* Full-window launch transition (see components/LaunchTransition.tsx). */
 .launch-fx {
   position: fixed;
@@ -1888,15 +1933,13 @@ textarea {
 @keyframes selectIn {
   from {
     opacity: 0;
-    transform: translateY(-4px);
   }
   to {
     opacity: 1;
-    transform: none;
   }
 }
 .select-option {
-  height: 32px;
+  height: 36px;
   padding: 0 10px;
   display: flex;
   align-items: center;
@@ -1909,6 +1952,12 @@ textarea {
   text-align: left;
   cursor: pointer;
   transition: background 0.12s var(--ease);
+}
+.select-option-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 .select-option:hover {
   background: var(--glass-hover);
@@ -3008,6 +3057,7 @@ textarea:focus-visible {
   padding: 12px 14px;
   border-radius: 12px;
   border: 1px solid var(--line);
+  overflow: hidden;
   pointer-events: none;
   z-index: 30;
   animation: railPopIn 0.18s cubic-bezier(0.22, 1.3, 0.36, 1) both;
@@ -3720,6 +3770,829 @@ textarea:focus-visible {
   background-image: none;
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
+}
+
+/* ================================================== launch drawer (multi method)
+   The button + drawer together form a single-choice control: the button is the
+   default choice, the drawer lists the others. Respects the current material. */
+/* The drawer mirrors the Select dropdown (same material treatment). */
+.launch-drawer {
+  position: absolute;
+  z-index: 7;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  max-height: 260px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background-color: var(--glass-2);
+  background-image: var(--glass-sheen);
+  background-repeat: var(--glass-repeat, no-repeat);
+  background-size: var(--glass-size, auto);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+  color: var(--fg);
+  animation: drawerIn 0.2s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+.launch-drawer.closing {
+  animation: drawerOut 0.16s cubic-bezier(0.55, 0, 0.9, 0.4) both;
+}
+@keyframes drawerOut {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.92) translateY(6px);
+  }
+}
+.drawer-scroll {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+  min-height: 0;
+}
+@keyframes drawerIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.drawer-opt {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  min-height: 40px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--fg);
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition: background 0.14s var(--ease);
+}
+.drawer-opt:hover {
+  background: var(--glass-hover);
+}
+.drawer-opt[data-active='true'] {
+  background: var(--brand);
+  color: var(--on-brand);
+}
+
+/* ---------------------------------------------------- checkbox / radio */
+.checkbox,
+.radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--fg-2);
+}
+.checkbox.disabled,
+.radio.disabled {
+  opacity: 0.5;
+}
+.checkbox-box {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1.5px solid var(--line-strong);
+  border-radius: 7px;
+  background: var(--field-bg);
+  color: var(--on-brand);
+  cursor: pointer;
+  will-change: transform;
+}
+.checkbox-box[data-on='true'] {
+  background: var(--brand);
+  border-color: var(--brand);
+}
+.checkbox-label,
+.radio-label {
+  cursor: pointer;
+}
+.radio-dot {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1.5px solid var(--line-strong);
+  border-radius: 50%;
+  background: var(--field-bg);
+  cursor: pointer;
+  will-change: transform;
+}
+.radio-dot[data-on='true'] {
+  border-color: var(--brand);
+}
+.radio-knob {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--brand);
+  transform: scale(0);
+  transition: transform 0.16s cubic-bezier(0.34, 1.5, 0.4, 1);
+}
+.radio-dot[data-on='true'] .radio-knob {
+  transform: scale(1);
+}
+
+/* ---------------------------------------------------- wallpaper home module */
+.wallpaper-switch {
+  display: flex;
+  gap: 15px;
+}
+.wp-btn {
+  width: 52px;
+  height: 52px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border-radius: 16px;
+  color: var(--fg);
+  cursor: pointer;
+  transition:
+    transform 0.15s var(--ease),
+    background-color 0.15s var(--ease);
+}
+.wp-btn:hover {
+  background-color: var(--glass-hover);
+}
+.wp-btn:active {
+  transform: scale(0.94);
+}
+.wp-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* ------------------------------------------------- linked-launch home pill */
+.linked-launch-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 22px;
+  border-radius: 999px;
+  color: var(--fg);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.15s var(--ease);
+}
+.linked-launch-pill:active {
+  transform: scale(0.96);
+}
+.linked-launch-pill.running {
+  color: var(--error);
+}
+/* While its drawer is open the pill matches the launch button exactly: white /
+   black normally, theme colour when the "default" choice is selected. */
+.linked-launch-pill.picker-open {
+  background-color: #ffffff;
+  color: #16181d;
+  border-color: transparent;
+}
+.linked-launch-pill.picker-open.selected {
+  background-color: var(--brand);
+  color: var(--on-brand);
+}
+
+/* ---------------------------------------------- games-bar linked-launch row */
+.linked-row-wrap {
+  position: absolute;
+  left: 0;
+  top: 100%;
+  margin-top: 6px;
+  width: min(64vw, 720px);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 90px;
+  overflow: hidden;
+  transition:
+    max-height 0.3s var(--ease),
+    opacity 0.3s var(--ease);
+}
+.linked-row-wrap.hidden {
+  max-height: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+.linked-viewport {
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  -webkit-app-region: no-drag;
+}
+.linked-viewport::-webkit-scrollbar {
+  display: none;
+  height: 0;
+}
+.linked-viewport.fade-right {
+  -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 44px), transparent);
+  mask-image: linear-gradient(90deg, #000 calc(100% - 44px), transparent);
+}
+.linked-viewport.fade-left {
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 44px);
+  mask-image: linear-gradient(90deg, transparent, #000 44px);
+}
+.linked-viewport.fade-left.fade-right {
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 44px, #000 calc(100% - 44px), transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 44px, #000 calc(100% - 44px), transparent);
+}
+.linked-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: max-content;
+  padding: 3px 0;
+}
+.linked-cap {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 14px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background-color: var(--glass);
+  background-image: var(--glass-sheen);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  box-shadow: var(--glass-rim);
+  color: var(--chrome-fg);
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  will-change: transform, backdrop-filter;
+  transition: transform 0.35s cubic-bezier(0.34, 1.4, 0.4, 1);
+}
+.linked-cap.dragging {
+  transition: none;
+  z-index: 20;
+}
+.linked-cap:hover {
+  border-color: var(--line-strong);
+  filter: brightness(1.18);
+}
+.linked-cap.running {
+  color: var(--error);
+  border-color: var(--error);
+}
+.linked-cap-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--success);
+}
+.linked-cap.running .linked-cap-dot {
+  background: var(--error);
+}
+.linked-scrollbar {
+  position: relative;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+  -webkit-app-region: no-drag;
+  transition: opacity 0.18s var(--ease);
+}
+.linked-scrollbar.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+.linked-thumb {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--chrome-fg-3);
+  cursor: grab;
+}
+.linked-thumb:active {
+  cursor: grabbing;
+}
+
+/* --------------------------------------------- shared sortable (see Sortable.tsx) */
+.sortable {
+  display: flex;
+  gap: 8px;
+}
+.sortable-vertical {
+  flex-direction: column;
+}
+.sortable-horizontal {
+  flex-direction: row;
+  align-items: center;
+}
+.sortable-horizontal > .sortable-row {
+  flex: 0 0 auto;
+  display: flex;
+}
+.sortable-row {
+  position: relative;
+  will-change: transform;
+  /* The neighbour "yield" animates (same feel as the game icons). */
+  transition: transform 0.35s cubic-bezier(0.34, 1.4, 0.4, 1);
+}
+.sortable-row.dragging {
+  z-index: 3;
+  transition: none;
+}
+.ll-card {
+  padding: 0 18px;
+  border-bottom: 1px solid var(--line);
+}
+.ll-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 64px;
+}
+.ll-grip {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg-3);
+  cursor: grab;
+  touch-action: none;
+}
+.ll-grip:hover {
+  background: var(--glass-hover);
+  color: var(--fg);
+}
+.ll-grip.dragging,
+.ll-grip:active {
+  cursor: grabbing;
+}
+.ll-name {
+  flex: 1;
+}
+.ll-apps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+  padding: 6px 18px 14px;
+}
+/* A checkbox-group title styled like a normal row's first line (not the grey
+   uppercase group heading). */
+.check-group-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+  padding: 16px 18px 8px;
+}
+.collapse-inner .check-group-title {
+  padding-left: 22px;
+}
+.ll-app {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--fg-2);
+  cursor: pointer;
+}
+.method-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 18px;
+}
+.method-card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.method-spacer {
+  flex: 1;
+}
+.method-default {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13px;
+  color: var(--fg-2);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.wl-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 52px;
+  min-height: 52px;
+  padding: 0 18px;
+}
+.wl-thumb {
+  width: 46px;
+  height: 30px;
+  flex: 0 0 auto;
+  border-radius: 7px;
+  object-fit: cover;
+  background: var(--field-bg);
+}
+.wl-thumb-btn {
+  flex: 0 0 auto;
+  display: block;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+}
+.wl-row.current .wl-name {
+  color: var(--brand);
+  font-weight: 600;
+}
+.wl-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+  font-size: 13px;
+  text-align: left;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+}
+.wl-name:hover {
+  color: var(--brand);
+}
+.settings-empty {
+  padding: 10px 18px;
+  color: var(--fg-3);
+  font-size: 13px;
+}
+
+/* Selected launch button (the "default" choice of the launch drawer). */
+.start-btn.selected {
+  background: var(--brand);
+  color: var(--on-brand);
+}
+.start-btn.selected:hover {
+  background: var(--brand-hover);
+}
+
+/* The select box is at least as wide as its content so labels are not cramped. */
+.select-box {
+  min-width: 176px;
+}
+
+.home-module.raised {
+  z-index: 8;
+}
+
+/* A capsule never grows past this width; longer names scroll (see ScrollText). */
+.linked-cap {
+  max-width: 210px;
+}
+
+/* ---------------------------------------------------- scroll-on-overflow text */
+.scroll-text {
+  position: relative;
+  display: inline-block;
+  overflow: hidden;
+  max-width: 100%;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+.scroll-text.overflow {
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 9px, #000 calc(100% - 9px), transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 9px, #000 calc(100% - 9px), transparent);
+}
+.scroll-text-track {
+  display: inline-flex;
+  gap: 40px;
+  white-space: nowrap;
+  will-change: transform;
+}
+.scroll-text-copy {
+  display: inline-block;
+  white-space: nowrap;
+}
+.scroll-text.overflow .scroll-text-track {
+  animation-name: scrollTextX;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+  animation-delay: 0.7s;
+}
+@keyframes scrollTextX {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(var(--scroll-dist));
+  }
+}
+.drawer-opt .scroll-text {
+  max-width: 100%;
+}
+
+/* --------------------------------------------------------- inline name editor */
+.inline-edit {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  width: 280px;
+  max-width: 100%;
+  height: 20px;
+  padding: 0;
+}
+.inline-edit:hover .inline-edit-btn {
+  color: var(--fg);
+  background: var(--glass-hover);
+}
+.inline-edit.wide {
+  width: 420px;
+  max-width: 52vw;
+}
+.inline-edit-text {
+  cursor: text;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+  line-height: 1.4;
+}
+.inline-edit-text.empty {
+  color: var(--fg-4);
+}
+.inline-edit-field {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  align-items: center;
+}
+.inline-edit-field::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 2px;
+  height: 1px;
+  background: currentColor;
+  transform: scaleX(0);
+  transform-origin: left;
+  animation: inlineUnderline 0.24s var(--ease) forwards;
+}
+@keyframes inlineUnderline {
+  to {
+    transform: scaleX(1);
+  }
+}
+.inline-edit-input {
+  width: 100%;
+  height: 100%;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  line-height: 1.4;
+  padding: 0;
+}
+.inline-edit-input::placeholder {
+  color: var(--fg-4);
+}
+/* File / directory picker field: shows the path + a folder icon; clicking the
+   text or the icon opens the picker (no text editing). */
+.path-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  width: 280px;
+  max-width: 100%;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+}
+.path-field:hover .path-field-icon {
+  color: var(--fg);
+  background: var(--glass-hover);
+}
+.path-field-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+}
+.path-field-text.empty {
+  color: var(--fg-4);
+}
+.path-field-icon {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  padding: 2px;
+  border-radius: 6px;
+  color: var(--fg-3);
+  transition: color 0.14s var(--ease), background 0.14s var(--ease);
+}
+.path-field:hover .path-field-icon {
+  color: var(--fg);
+}
+.settings-action .path-field {
+  max-width: 42vw;
+}
+.path-field.wide,
+.settings-action .path-field.wide {
+  width: 420px;
+  max-width: 52vw;
+}
+.inline-edit-btn {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  padding: 2px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-3);
+  cursor: pointer;
+  transition: color 0.14s var(--ease), background 0.14s var(--ease);
+}
+.inline-edit-btn:hover {
+  color: var(--fg);
+  background: var(--glass-hover);
+}
+/* A name edited inline keeps the row layout: it grows in the free space. */
+.method-name,
+.ll-name {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+}
+
+/* New controls match the height of the existing buttons (36px). */
+.input,
+.select,
+.select-trigger,
+.row .btn {
+  height: 36px;
+}
+.row {
+  align-items: center;
+  gap: 8px;
+}
+
+/* Compact icon picker (add-app dialog / app settings). */
+.icon-picker-sm .launcher-icon {
+  width: 72px;
+  height: 72px;
+}
+/* No icon yet: the same dashed box + plus as the games-bar "add app" button. */
+.launcher-icon.empty {
+  border: 1.5px dashed var(--line-strong);
+  background: transparent;
+  color: var(--fg-3);
+}
+.linked-launch-pill svg {
+  flex: 0 0 auto;
+}
+/* The linked-launch pill has a fixed width (does not follow the label length). */
+.linked-launch-pill {
+  width: 160px;
+  justify-content: center;
+}
+/* Inset the scrolling label a little inside the button. */
+.start-btn .scroll-text,
+.linked-launch-pill .scroll-text {
+  margin: 0 6px;
+}
+
+/* Settings rows nested in a method card align with the card's own inset. */
+.method-card .settings-row {
+  padding-left: 0;
+  padding-right: 0;
+}
+/* The launch-file/args/dir rows get a little extra left inset. */
+.method-card .settings-row.field-row {
+  padding-left: 16px;
+}
+/* Slider rows: the value (with unit) sits to the left of the slider. */
+.range-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.range-value {
+  min-width: 46px;
+  text-align: right;
+  font-size: 12px;
+  color: var(--fg-2);
+  font-variant-numeric: tabular-nums;
+}
+/* The gacha URL editor fills the available row space. */
+.gacha-url {
+  flex: 1;
+  min-width: 280px;
+}
+
+/* Plan-A popup background: an inner layer paints the exact wallpaper region
+   under the popup (centre-cropped like the app background) with the material
+   tint + texture composited on top, then the liquid filter distorts that layer
+   (refraction + dispersion). No live backdrop sampling, so text behind the popup
+   never bleeds through. */
+.wallpaper-region {
+  background: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+/* Only the (non-positioned) modal needs a positioning context for the layer. */
+.modal.wallpaper-region {
+  position: relative;
+}
+.wp-region-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border-radius: inherit;
+  overflow: hidden;
+  pointer-events: none;
+  background-color: var(--glass-2);
+  background-image: var(--glass-sheen), linear-gradient(var(--glass), var(--glass)),
+    linear-gradient(rgba(0, 0, 0, var(--wallpaper-dim, 0)), rgba(0, 0, 0, var(--wallpaper-dim, 0))),
+    var(--wallpaper-image);
+  background-size: auto, auto, auto, var(--wallpaper-display-w, 100%) var(--wallpaper-display-h, 100%);
+  background-position: center, center, center, var(--wp-x, 0px) var(--wp-y, 0px);
+  background-repeat: no-repeat, no-repeat, no-repeat, no-repeat;
+  /* Apply the current material's blur / saturation (and the wallpaper blur) to
+     the region image itself. The liquid filter overrides this for liquid/shine. */
+  filter: blur(calc(var(--glass-blur, 0px) + var(--wallpaper-blur, 0px)))
+    saturate(var(--glass-saturate, 100%));
+}
+/* Dialogs apply only the wallpaper (no material): no tint / sheen, just the
+   (blurred, dimmed) region image. */
+.modal.wallpaper-region .wp-region-layer {
+  background-color: transparent;
+  background-image: linear-gradient(
+      rgba(0, 0, 0, var(--wallpaper-dim, 0)),
+      rgba(0, 0, 0, var(--wallpaper-dim, 0))
+    ),
+    var(--wallpaper-image);
+  background-size: auto, var(--wallpaper-display-w, 100%) var(--wallpaper-display-h, 100%);
+  background-position: center, var(--wp-x, 0px) var(--wp-y, 0px);
+  background-repeat: no-repeat, no-repeat;
+  filter: blur(var(--wallpaper-blur, 0px));
+}
+.wallpaper-region > *:not(.wp-region-layer) {
+  position: relative;
+  z-index: 1;
+}
+/* Clip the region layer's refracted edge inside the popup. */
+.glass-pop.wallpaper-region {
+  overflow: hidden;
+}
+/* Video wallpapers cannot be sampled this way: hide the layer, use the material
+   blur on the live backdrop instead. */
+:root[data-wallpaper-region='video'] .wp-region-layer {
+  display: none;
+}
+:root[data-wallpaper-region='video'] .wallpaper-region {
+  background-color: var(--glass-2);
+  background-image: var(--glass-sheen);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+}
+/* The pinned (default) method is slightly emphasised. */
+.method-card-pinned .method-index {
+  color: var(--fg-2);
 }
 
 

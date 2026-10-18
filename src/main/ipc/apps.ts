@@ -1,10 +1,11 @@
 import { app, dialog, ipcMain } from 'electron'
 import { randomUUID } from 'crypto'
 import { copyFile } from 'fs/promises'
-import { join } from 'path'
+import { basename, join } from 'path'
 import {
   DEFAULT_GLASS_APPEARANCE,
   DEFAULT_HOME_MODULE,
+  DEFAULT_WALLPAPER_SETTINGS,
   HOME_MODULES,
   LAUNCH_EFFECTS,
   type AppEntry,
@@ -13,10 +14,13 @@ import {
   type HomeModuleId,
   type HomeModuleState,
   type LaunchEffect,
+  type LaunchMethod,
   type NewAppEntry
 } from '@shared/types'
+import { currentWallpaper, defaultLaunchMethod, isVideoFile } from '@shared/appEntry'
 import { ADDONS } from '../addons/registry'
 import { AppStore } from '../services/appStore'
+import { applyAutoTheme } from '../services/accent'
 import { BgStore } from '../services/background'
 import { BrandStore } from '../services/brand'
 import { IconStore } from '../services/icon'
@@ -28,12 +32,6 @@ import { log } from '../services/logger'
 import { broadcast, notifyAppsChanged } from './context'
 import { decodeDataUrl, getDesktopWallpaper } from './util'
 
-/** Re-derives the theme colour from the app's background when auto-theme is on. */
-function applyAutoTheme(entry: AppEntry): void {
-  if (!entry.autoTheme || !entry.backgroundFile) return
-  const color = extractAccent(join(BgStore.bgDir(), entry.backgroundFile))
-  if (color) entry.themeColor = color
-}
 
 function requireApp(store: Awaited<ReturnType<typeof AppStore.load>>, appId: string): AppEntry {
   const entry = store.apps.find((a) => a.id === appId)
@@ -98,27 +96,49 @@ export function registerAppsIpc(): void {
     const store = await AppStore.load()
     const now = new Date().toISOString()
 
+    const methods: LaunchMethod[] = (input.launchMethods ?? []).map((m, index) => ({
+      id: randomUUID(),
+      name: m.name?.trim() || (index === 0 ? '默认' : `启动方式 ${index + 1}`),
+      targetPath: (m.targetPath ?? '').trim(),
+      arguments: m.arguments ?? '',
+      workingDirectory: m.workingDirectory ?? '',
+      runAsAdmin: m.runAsAdmin ?? true
+    }))
+    // An app may be created without any launch file yet (configure it later).
+    if (methods.length === 0) {
+      methods.push({
+        id: randomUUID(),
+        name: '默认',
+        targetPath: '',
+        arguments: '',
+        workingDirectory: '',
+        runAsAdmin: true
+      })
+    }
+
     let iconFile: string | null = null
-    try {
-      const image = await app.getFileIcon(input.targetPath, { size: 'large' })
-      if (!image.isEmpty()) iconFile = await IconStore.savePng(image.toPNG())
-    } catch {
-      /* icon extraction is best-effort */
+    if (methods[0].targetPath) {
+      try {
+        const image = await app.getFileIcon(methods[0].targetPath, { size: 'large' })
+        if (!image.isEmpty()) iconFile = await IconStore.savePng(image.toPNG())
+      } catch {
+        /* icon extraction is best-effort */
+      }
     }
 
     const entry: AppEntry = {
       id: randomUUID(),
       name: input.name?.trim() || '未命名应用',
       moduleLabel: input.moduleLabel?.trim() || null,
-      targetPath: input.targetPath,
-      arguments: input.arguments ?? '',
-      workingDirectory: input.workingDirectory ?? '',
+      launchMethods: methods,
+      defaultLaunchMethodId: methods[0].id,
       gameDirectory: input.gameDirectory ?? null,
       environmentVariables: input.environmentVariables ?? {},
-      runAsAdmin: input.runAsAdmin ?? true,
       addonId: input.addonId ?? null,
       iconFile,
-      backgroundFile: null,
+      wallpapers: [],
+      wallpaperSettings: { ...DEFAULT_WALLPAPER_SETTINGS },
+      wallpaperIndex: 0,
       themeColor: null,
       glass: { ...DEFAULT_GLASS_APPEARANCE },
       autoTheme: true,
@@ -127,23 +147,31 @@ export function registerAppsIpc(): void {
       screenshotDirectory: input.screenshotDirectory ?? null,
       monitorProcessNames: input.monitorProcessNames ?? [],
       gachaShowSecond: true,
+      linkedLaunchIds: [],
+      defaultLinkedLaunchId: null,
       launchEffect: input.launchEffect ?? 'none',
       createdAt: now,
       updatedAt: now
     }
     store.apps.push(entry)
 
-    // Default background: the current desktop wallpaper.
+    // Default wallpaper: the current desktop wallpaper.
     try {
       const wallpaper = await getDesktopWallpaper()
-      if (wallpaper) entry.backgroundFile = await BgStore.import(wallpaper)
+      if (wallpaper) {
+        entry.wallpapers.push({
+          id: randomUUID(),
+          file: await BgStore.import(wallpaper),
+          name: basename(wallpaper)
+        })
+      }
     } catch {
       /* ignore */
     }
     applyAutoTheme(entry)
 
     await AppStore.save()
-    log(`apps: added "${entry.name}" (${entry.targetPath})`)
+    log(`apps: added "${entry.name}" (${methods[0].targetPath})`)
     notifyAppsChanged()
     return entry
   })
@@ -162,7 +190,7 @@ export function registerAppsIpc(): void {
   ipcMain.handle('apps:remove', async (_e, id: string) => {
     const store = await AppStore.load()
     const entry = store.apps.find((a) => a.id === id)
-    if (entry?.backgroundFile) await BgStore.remove(entry.backgroundFile)
+    if (entry) for (const wallpaper of entry.wallpapers ?? []) await BgStore.remove(wallpaper.file)
     if (entry?.iconFile) await IconStore.remove(entry.iconFile)
     store.apps = store.apps.filter((a) => a.id !== id)
     await AppStore.save()
@@ -228,21 +256,6 @@ export function registerAppsIpc(): void {
   )
 
   // -------------------------------------------------------------- appearance
-  ipcMain.handle('apps:setBackground', async (_e, appId: string, sourcePath: string | null) => {
-    const store = await AppStore.load()
-    const entry = requireApp(store, appId)
-    if (entry.backgroundFile) {
-      await BgStore.remove(entry.backgroundFile)
-      entry.backgroundFile = null
-    }
-    if (sourcePath) entry.backgroundFile = await BgStore.import(sourcePath)
-    applyAutoTheme(entry)
-    entry.updatedAt = new Date().toISOString()
-    await AppStore.save()
-    notifyAppsChanged()
-    return entry
-  })
-
   ipcMain.handle('apps:setIcon', async (_e, appId: string, sourcePath: string | null) => {
     const store = await AppStore.load()
     const entry = requireApp(store, appId)
@@ -278,28 +291,15 @@ export function registerAppsIpc(): void {
       await IconStore.remove(entry.iconFile)
       entry.iconFile = null
     }
+    const method = defaultLaunchMethod(entry)
     try {
-      const image = await app.getFileIcon(entry.targetPath, { size: 'large' })
-      if (!image.isEmpty()) entry.iconFile = await IconStore.savePng(image.toPNG())
+      if (method?.targetPath) {
+        const image = await app.getFileIcon(method.targetPath, { size: 'large' })
+        if (!image.isEmpty()) entry.iconFile = await IconStore.savePng(image.toPNG())
+      }
     } catch {
       /* ignore */
     }
-    entry.updatedAt = new Date().toISOString()
-    await AppStore.save()
-    notifyAppsChanged()
-    return entry
-  })
-
-  ipcMain.handle('apps:resetBackground', async (_e, appId: string) => {
-    const store = await AppStore.load()
-    const entry = requireApp(store, appId)
-    if (entry.backgroundFile) {
-      await BgStore.remove(entry.backgroundFile)
-      entry.backgroundFile = null
-    }
-    const wallpaper = await getDesktopWallpaper()
-    if (wallpaper) entry.backgroundFile = await BgStore.import(wallpaper)
-    applyAutoTheme(entry)
     entry.updatedAt = new Date().toISOString()
     await AppStore.save()
     notifyAppsChanged()
@@ -409,8 +409,9 @@ export function registerAppsIpc(): void {
   ipcMain.handle('apps:extractThemeColor', async (_e, appId: string) => {
     const store = await AppStore.load()
     const entry = store.apps.find((a) => a.id === appId)
-    if (!entry?.backgroundFile) return null
-    const color = extractAccent(join(BgStore.bgDir(), entry.backgroundFile))
+    const wallpaper = entry ? currentWallpaper(entry) : null
+    if (!entry || !wallpaper || isVideoFile(wallpaper.file)) return null
+    const color = extractAccent(join(BgStore.bgDir(), wallpaper.file))
     if (!color) return null
     entry.themeColor = color
     entry.updatedAt = new Date().toISOString()
@@ -418,4 +419,29 @@ export function registerAppsIpc(): void {
     notifyAppsChanged()
     return entry
   })
+
+  ipcMain.handle(
+    'apps:setLaunchMethods',
+    async (_e, appId: string, methods: LaunchMethod[], defaultId: string) => {
+      const store = await AppStore.load()
+      const entry = requireApp(store, appId)
+      const cleaned: LaunchMethod[] = (Array.isArray(methods) ? methods : []).map((m, index) => ({
+        id: m.id || randomUUID(),
+        name: m.name?.trim() || (index === 0 ? '默认' : `启动方式 ${index + 1}`),
+        targetPath: (m.targetPath ?? '').trim(),
+        arguments: m.arguments ?? '',
+        workingDirectory: m.workingDirectory ?? '',
+        runAsAdmin: m.runAsAdmin ?? true
+      }))
+      if (cleaned.length === 0) throw new Error('请至少保留一种启动方式')
+      entry.launchMethods = cleaned
+      entry.defaultLaunchMethodId = cleaned.some((m) => m.id === defaultId)
+        ? defaultId
+        : cleaned[0].id
+      entry.updatedAt = new Date().toISOString()
+      await AppStore.save()
+      notifyAppsChanged()
+      return entry
+    }
+  )
 }

@@ -27,6 +27,9 @@ interface JellyDragOptions {
   damping?: number
   /** Clear the transform immediately on release (let a FLIP animation take over). */
   snapOnRelease?: boolean
+  /** Scroll container whose scroll offset is added to the drag (so the dragged
+   *  element keeps following the pointer while the container auto-scrolls). */
+  scrollRef?: RefObject<HTMLElement | null>
   onDrag?: (dx: number, dy: number, clientX: number, clientY: number) => void
   onDrop?: (dx: number, dy: number, clientX: number, clientY: number) => void
   onCancel?: () => void
@@ -135,6 +138,27 @@ export function useJellyDrag(
       return
     }
     event.preventDefault()
+    // Resolve the scroll container once (explicit ref, else nearest scrollable
+    // ancestor) and remember where it started.
+    const scrollEl = (): HTMLElement | null => {
+      const explicit = opts.current.scrollRef?.current
+      if (explicit) return explicit
+      let el = ref.current?.parentElement ?? null
+      while (el) {
+        const cs = getComputedStyle(el)
+        const canX =
+          (cs.overflowX === 'auto' || cs.overflowX === 'scroll') && el.scrollWidth > el.clientWidth
+        const canY =
+          (cs.overflowY === 'auto' || cs.overflowY === 'scroll') && el.scrollHeight > el.clientHeight
+        if (canX || canY) return el
+        el = el.parentElement
+      }
+      return null
+    }
+    const scroller = scrollEl()
+    const startScroll = scroller
+      ? { left: scroller.scrollLeft, top: scroller.scrollTop }
+      : { left: 0, top: 0 }
     s.drag = {
       px: event.clientX,
       py: event.clientY,
@@ -154,9 +178,17 @@ export function useJellyDrag(
     const move = (e: PointerEvent): void => {
       const d = s.drag
       if (!d) return
-      const dx = e.clientX - d.px
-      const dy = e.clientY - d.py
+      // Add the container's scroll delta so the element follows the pointer even
+      // while the container scrolls underneath it.
+      const sc = scroller ?? scrollEl()
+      const sdx = sc ? sc.scrollLeft - startScroll.left : 0
+      const sdy = sc ? sc.scrollTop - startScroll.top : 0
+      const dx = e.clientX - d.px + sdx
+      const dy = e.clientY - d.py + sdy
       if (!d.active) {
+        // Dragging may be disabled by the consumer mid-gesture (e.g. a long
+        // press opened a picker and now owns the pointer) — never activate then.
+        if (!opts.current.enabled) return
         if (Math.hypot(dx, dy) < (opts.current.threshold ?? 4)) return
         d.active = true
         s.pop.target = opts.current.popScale ?? 1.06

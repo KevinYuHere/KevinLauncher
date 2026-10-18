@@ -13,6 +13,9 @@
 import { DEFAULT_GLASS_APPEARANCE, type GlassAppearance, type GlassMaterial } from '@shared/types'
 import { buildLiquidFilter } from './liquidFilter'
 
+/** Refraction tier of a surface. */
+type Tier = 'control' | 'panel' | 'region'
+
 /** Large surfaces. */
 const PANEL_SELECTOR = [
   '.glass',
@@ -98,7 +101,7 @@ interface Geometry {
   maxScale: number
 }
 
-function geometryFor(minDim: number, tier: 'control' | 'panel'): Geometry {
+function geometryFor(minDim: number, tier: 'control' | 'panel' | 'region'): Geometry {
   if (tier === 'control') {
     return {
       glassThickness: clamp(minDim * 0.5, 18, 140),
@@ -107,7 +110,7 @@ function geometryFor(minDim: number, tier: 'control' | 'panel'): Geometry {
     }
   }
   return {
-    glassThickness: clamp(minDim * 0.4, 24, 220),
+    glassThickness: clamp(minDim * (tier === 'region' ? 0.35 : 0.4), 24, 220),
     refraction: refractionPanel,
     maxScale: minDim
   }
@@ -124,9 +127,11 @@ function clearElement(el: Element): void {
   const style = (el as HTMLElement).style
   style.removeProperty('backdrop-filter')
   style.removeProperty('-webkit-backdrop-filter')
+  style.removeProperty('filter')
+  style.removeProperty('-webkit-filter')
 }
 
-function applyElement(el: HTMLElement, tier: 'control' | 'panel'): void {
+function applyElement(el: HTMLElement, tier: Tier): void {
   // Use the layout box (not the visual rect) so transforms never change the map.
   const width = el.offsetWidth
   const height = el.offsetHeight
@@ -178,8 +183,15 @@ function applyElement(el: HTMLElement, tier: 'control' | 'panel'): void {
   else ensureDefs().appendChild(filter)
   filters.set(el, filter)
 
-  el.style.setProperty('backdrop-filter', `url(#${id})`)
-  el.style.setProperty('-webkit-backdrop-filter', `url(#${id})`)
+  if (tier === 'region') {
+    // The plan-A region layer paints the wallpaper region itself: distort that
+    // image (refraction + dispersion) instead of sampling the live backdrop.
+    el.style.setProperty('filter', `url(#${id})`)
+    el.style.setProperty('-webkit-filter', `url(#${id})`)
+  } else {
+    el.style.setProperty('backdrop-filter', `url(#${id})`)
+    el.style.setProperty('-webkit-backdrop-filter', `url(#${id})`)
+  }
 }
 
 function observe(el: Element): void {
@@ -192,16 +204,29 @@ function observe(el: Element): void {
   resizers.set(el, ro)
 }
 
-function collectTargets(): Map<HTMLElement, 'control' | 'panel'> {
-  const map = new Map<HTMLElement, 'control' | 'panel'>()
+function collectTargets(): Map<HTMLElement, Tier> {
+  const map = new Map<HTMLElement, Tier>()
   // An element *inside* a material surface must not get the refraction again
-  // (it uses a plain darkened veil instead).
-  const wrapped = (el: HTMLElement): boolean => !!el.parentElement?.closest(PANEL_SELECTOR)
+  // (it uses a plain darkened veil instead). A `.wallpaper-region` panel (plan-A
+  // dialog) carries no material, so its children are NOT wrapped and DO get it.
+  const wrapped = (el: HTMLElement): boolean => {
+    const panel = el.parentElement?.closest(PANEL_SELECTOR)
+    if (!panel) return false
+    return !panel.classList.contains('wallpaper-region')
+  }
   for (const el of document.querySelectorAll<HTMLElement>(PANEL_SELECTOR)) {
+    if (el.classList.contains('wallpaper-region')) continue // no material on it
+    if (el.querySelector('.wp-region-layer')) continue // material is on the region layer
     if (!wrapped(el)) map.set(el, 'panel')
   }
   for (const el of document.querySelectorAll<HTMLElement>(CONTROL_SELECTOR)) {
     if (!wrapped(el)) map.set(el, 'control')
+  }
+  // Plan-A region layers are children of panels but still take the material —
+  // except in a dialog (which shows the wallpaper only).
+  for (const el of document.querySelectorAll<HTMLElement>('.wp-region-layer')) {
+    if (el.closest('.modal.wallpaper-region')) continue
+    map.set(el, 'region')
   }
   return map
 }

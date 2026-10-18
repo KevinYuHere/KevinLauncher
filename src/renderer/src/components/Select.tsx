@@ -22,7 +22,13 @@ export default function Select({
 }: SelectProps): ReactElement {
   const [open, setOpen] = useState(false)
   const [closing, setClosing] = useState(false)
-  const [rect, setRect] = useState<{ left: number; top: number; width: number } | null>(null)
+  const [rect, setRect] = useState<{
+    left: number
+    top: number
+    width: number
+    up: boolean
+    maxHeight: number
+  } | null>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
 
@@ -39,7 +45,12 @@ export default function Select({
     const el = triggerRef.current
     if (!el) return
     const r = el.getBoundingClientRect()
-    setRect({ left: r.left, top: r.bottom + 6, width: r.width })
+    const below = window.innerHeight - r.bottom - 12
+    const above = r.top - 12
+    const up = below < 220 && above > below
+    const maxHeight = Math.max(140, Math.min(300, up ? above : below))
+    const left = Math.max(8, Math.min(window.innerWidth - r.width - 8, r.left))
+    setRect({ left, top: up ? r.top - 6 : r.bottom + 6, width: r.width, up, maxHeight })
     setOpen((v) => !v)
   }, [])
 
@@ -79,9 +90,16 @@ export default function Select({
         createPortal(
           <div
             ref={menuRef}
-            className={`select-menu${closing ? ' closing' : ''}`}
-            style={{ left: rect.left, top: rect.top, width: rect.width }}
+            className={`select-menu wallpaper-region${closing ? ' closing' : ''}`}
+            style={{
+              left: rect.left,
+              top: rect.top,
+              width: rect.width,
+              maxHeight: rect.maxHeight,
+              transform: rect.up ? 'translateY(-100%)' : undefined
+            }}
           >
+            <span className="wp-region-layer" aria-hidden="true" />
             {options.map((o) => (
               <button
                 key={o.value}
@@ -92,7 +110,7 @@ export default function Select({
                   requestClose()
                 }}
               >
-                {o.label}
+                <span className="select-option-label">{o.label}</span>
               </button>
             ))}
           </div>,

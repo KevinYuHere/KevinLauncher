@@ -156,6 +156,15 @@ export default function Rail({
       {updateSlot}
 
       <button
+        ref={ref('linkedLaunch')}
+        className={`rail-item${view === 'linkedLaunch' ? ' active' : ''}`}
+        title="关联启动"
+        onClick={() => onNavigate('linkedLaunch')}
+      >
+        <Icon name="link" />
+      </button>
+
+      <button
         ref={ref('settings')}
         className={`rail-item${view === 'settings' ? ' active' : ''}`}
         title="设置"
