@@ -1,8 +1,10 @@
 import { app } from 'electron'
+import { promises as fs } from 'fs'
 import { join } from 'path'
 import type { AppEntry, LinkedLaunch } from '@shared/types'
-import { writeFileAtomic } from './atomicFile'
+import { parseJsonLenient, writeFileAtomic } from './atomicFile'
 import { openJsonStore } from './jsonStore'
+import { log } from './logger'
 import { CURRENT_VERSION, migrateConfig } from './appMigrations'
 
 export interface LauncherConfig {
@@ -30,6 +32,8 @@ const DEFAULT_CONFIG: LauncherConfig = { version: CURRENT_VERSION, apps: [], lin
 let cache: LauncherConfig | null = null
 /** Set when the config file could not be read — writes are refused for the session. */
 let saveBlocked = false
+/** In-flight load, so concurrent callers share one read (and one quarantine). */
+let loading: Promise<LauncherConfig> | null = null
 
 /** Persisted `config.json` store (apps + UI + global launcher settings). */
 export class AppStore {
@@ -39,6 +43,13 @@ export class AppStore {
 
   static async load(): Promise<LauncherConfig> {
     if (cache) return cache
+    loading ??= AppStore.readConfig().finally(() => {
+      loading = null
+    })
+    return loading
+  }
+
+  private static async readConfig(): Promise<LauncherConfig> {
     const { data, writable } = await openJsonStore<LauncherConfig>(
       this.file(),
       () => structuredClone(DEFAULT_CONFIG),
@@ -49,8 +60,35 @@ export class AppStore {
     data.version = data.version ?? 1
     cache = data
     saveBlocked = !writable
+    // A quarantined config holds the apps the 1.2.2 write race moved aside while
+    // an empty file took their place: restore them before anything else runs.
+    if (writable) await this.restoreQuarantined(data)
     await this.migrate(cache)
     return cache
+  }
+
+  /**
+   * Restore from `config.json.corrupt` when the live config lost its apps. Only
+   * a *salvageable* quarantine (valid root JSON, e.g. the 1.2.2 trailing junk)
+   * is used, so an unrelated or truncated `.corrupt` can never resurrect data.
+   */
+  private static async restoreQuarantined(config: LauncherConfig): Promise<void> {
+    if (config.apps.length > 0) return
+    const quarantine = `${this.file()}.corrupt`
+    let salvaged: LauncherConfig | undefined
+    try {
+      salvaged = parseJsonLenient<LauncherConfig>(await fs.readFile(quarantine, 'utf-8'))
+    } catch {
+      return
+    }
+    if (!salvaged || !Array.isArray(salvaged.apps) || salvaged.apps.length === 0) return
+    log(`appStore: restoring ${salvaged.apps.length} app(s) from ${quarantine}`)
+    config.apps = salvaged.apps
+    if (Array.isArray(salvaged.linkedLaunches)) config.linkedLaunches = salvaged.linkedLaunches
+    if (salvaged.ui) config.ui = salvaged.ui
+    if (salvaged.launcher) config.launcher = salvaged.launcher
+    if (typeof salvaged.version === 'number') config.version = salvaged.version
+    await writeFileAtomic(this.file(), JSON.stringify(config, null, 2))
   }
 
   /** Runs version migrations and persists them once. */
@@ -66,6 +104,7 @@ export class AppStore {
   /** Drop the in-memory copy and read from disk again. */
   static async reload(): Promise<void> {
     cache = null
+    loading = null
     await this.load()
   }
 

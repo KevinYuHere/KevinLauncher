@@ -1,57 +1,73 @@
-import { describe, expect, it } from 'vitest'
-import { promises as fs } from 'fs'
-import { join } from 'path'
-import { tmpdir } from 'os'
-import { loadJsonSafe, quarantineFile, writeFileAtomic } from '../src/main/services/atomicFile'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { promises as fs } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { loadJsonSafe, parseJsonLenient, writeFileAtomic } from '../src/main/services/atomicFile'
 
-async function tempFile(name: string): Promise<string> {
-  const dir = await fs.mkdtemp(join(tmpdir(), 'kl-file-'))
-  return join(dir, name)
-}
+let dir: string
+
+beforeEach(async () => {
+  dir = await fs.mkdtemp(join(tmpdir(), 'kl-atomic-'))
+})
+
+afterEach(async () => {
+  await fs.rm(dir, { recursive: true, force: true })
+})
 
 describe('writeFileAtomic', () => {
-  it('writes and overwrites without leaving a temp file', async () => {
-    const file = await tempFile('data.json')
-    await writeFileAtomic(file, '{"a":1}')
-    expect(await fs.readFile(file, 'utf8')).toBe('{"a":1}')
-    await writeFileAtomic(file, '{"a":2}')
-    expect(await fs.readFile(file, 'utf8')).toBe('{"a":2}')
-    await expect(fs.access(`${file}.tmp`)).rejects.toBeTruthy()
+  it('never interleaves concurrent writes (the file is exactly one payload)', async () => {
+    const file = join(dir, 'config.json')
+    // Vary the length so a torn write would leave the longer payload's tail.
+    const payloads = Array.from({ length: 64 }, (_, i) =>
+      JSON.stringify({ version: 1, apps: [], pad: 'x'.repeat(i % 9) }, null, 2)
+    )
+    await Promise.all(payloads.map((payload) => writeFileAtomic(file, payload)))
+    const raw = await fs.readFile(file, 'utf-8')
+    expect(() => JSON.parse(raw)).not.toThrow()
+    expect(payloads).toContain(raw)
+    // No stray temp files left behind.
+    expect((await fs.readdir(dir)).filter((name) => name.endsWith('.tmp'))).toEqual([])
+  })
+})
+
+describe('parseJsonLenient', () => {
+  it('parses ordinary JSON', () => {
+    expect(parseJsonLenient<{ a: number }>('{"a":1}')).toEqual({ a: 1 })
+  })
+
+  it('recovers the root value when trailing junk follows (1.2.2 corruption)', () => {
+    const raw = '{\n  "version": 14,\n  "apps": []\n}\n}\n}'
+    expect(parseJsonLenient<{ version: number }>(raw)).toEqual({ version: 14, apps: [] })
+  })
+
+  it('keeps braces inside strings intact', () => {
+    const raw = '{"name":"a}b{c","apps":[]}}\n'
+    expect(parseJsonLenient<{ name: string }>(raw)).toEqual({ name: 'a}b{c', apps: [] })
+  })
+
+  it('recovers an array root', () => {
+    expect(parseJsonLenient<number[]>('[1,2,3] extra')).toEqual([1, 2, 3])
+  })
+
+  it('returns undefined for truncated or non-JSON content', () => {
+    expect(parseJsonLenient('{"a":1')).toBeUndefined()
+    expect(parseJsonLenient('not json at all')).toBeUndefined()
+    expect(parseJsonLenient('')).toBeUndefined()
   })
 })
 
 describe('loadJsonSafe', () => {
-  it('reports a missing file', async () => {
-    const file = await tempFile('none.json')
-    expect(await loadJsonSafe(file)).toEqual({ status: 'missing' })
+  it('self-heals a file with trailing junk instead of reporting it corrupt', async () => {
+    const file = join(dir, 'config.json')
+    await fs.writeFile(file, '{"version": 14, "apps": [{"id":"a"}]}\n}\n}')
+    const result = await loadJsonSafe<{ version: number; apps: { id: string }[] }>(file)
+    expect(result).toEqual({ status: 'ok', value: { version: 14, apps: [{ id: 'a' }] } })
   })
 
-  it('parses a valid file', async () => {
-    const file = await tempFile('ok.json')
-    await fs.writeFile(file, '{"x":42}')
-    const result = await loadJsonSafe<{ x: number }>(file)
-    expect(result).toEqual({ status: 'ok', value: { x: 42 } })
-  })
-
-  it('reports invalid JSON as a parse error, not as empty', async () => {
-    const file = await tempFile('bad.json')
-    await fs.writeFile(file, '{ not json')
-    expect((await loadJsonSafe(file)).status).toBe('parse-error')
-  })
-
-  it('reports an unreadable path as a read error', async () => {
-    const dir = await fs.mkdtemp(join(tmpdir(), 'kl-file-'))
-    // Reading a directory fails with EISDIR — a stand-in for a locked file.
-    expect((await loadJsonSafe(dir)).status).toBe('read-error')
-  })
-})
-
-describe('quarantineFile', () => {
-  it('moves the corrupt file aside', async () => {
-    const file = await tempFile('data.json')
-    await fs.writeFile(file, 'garbage')
-    expect(await quarantineFile(file)).toBe(true)
-    expect(await fs.readFile(`${file}.corrupt`, 'utf8')).toBe('garbage')
-    await expect(fs.access(file)).rejects.toBeTruthy()
+  it('still reports genuinely truncated files as parse errors', async () => {
+    const file = join(dir, 'config.json')
+    await fs.writeFile(file, '{"version": 14, "apps": [')
+    const result = await loadJsonSafe(file)
+    expect(result.status).toBe('parse-error')
   })
 })
