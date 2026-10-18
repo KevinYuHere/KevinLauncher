@@ -66,9 +66,15 @@ export function registerLaunchIpc(): void {
     }
     const result = await Launcher.launch(spec, entry.name)
     if (result.ok) {
-      runtime.start(linkedRunKey(entry.id), result.pid, result.elevated, [
-        basename(entry.targetPath)
-      ])
+      // Tracked live (running state / stop) but never counted as play time:
+      // a linked launch is not one of the launcher's apps.
+      runtime.start(
+        linkedRunKey(entry.id),
+        result.pid,
+        result.elevated,
+        [basename(entry.targetPath)],
+        false
+      )
     }
     return result
   })

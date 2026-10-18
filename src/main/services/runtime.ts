@@ -22,6 +22,8 @@ interface TrackedEntry {
   monitor: Set<string>
   /** True once the app has actually been seen running (a live pid exists). */
   armed: boolean
+  /** Whether the finished session should be recorded as play time. */
+  recordSession: boolean
 }
 
 const POLL_INTERVAL_MS = 4000
@@ -60,7 +62,7 @@ export class Runtime {
   /** Stop tracking an entry, optionally recording its play session. */
   private endEntry(entry: TrackedEntry, record: boolean): void {
     this.running.delete(entry.appId)
-    if (!record) return
+    if (!record || !entry.recordSession) return
     const endUtc = new Date().toISOString()
     const durationSec = Math.round((Date.now() - new Date(entry.startedAt).getTime()) / 1000)
     if (this.sessionListener && durationSec > 0) {
@@ -68,7 +70,17 @@ export class Runtime {
     }
   }
 
-  start(appId: string, rootPid: number | null, elevated: boolean, monitorNames: string[]): void {
+  /**
+   * Begin tracking a launch. `recordSession` is false for tasks that are only
+   * tracked live (e.g. linked launches) and must not count as play time.
+   */
+  start(
+    appId: string,
+    rootPid: number | null,
+    elevated: boolean,
+    monitorNames: string[],
+    recordSession = true
+  ): void {
     const now = Date.now()
     const entry: TrackedEntry = {
       appId,
@@ -78,7 +90,8 @@ export class Runtime {
       startedAt: new Date(now).toISOString(),
       pids: new Set(rootPid ? [rootPid] : []),
       monitor: new Set(monitorNames.map((n) => n.toLowerCase()).filter(Boolean)),
-      armed: rootPid !== null
+      armed: rootPid !== null,
+      recordSession
     }
     this.running.set(appId, entry)
     this.ensureTimer()
@@ -131,7 +144,7 @@ export class Runtime {
     const records: PlaySessionRecord[] = []
     for (const entry of [...this.running.values()]) {
       this.running.delete(entry.appId)
-      if (!entry.armed) continue
+      if (!entry.armed || !entry.recordSession) continue
       const endUtc = new Date().toISOString()
       const durationSec = Math.round((Date.now() - new Date(entry.startedAt).getTime()) / 1000)
       if (durationSec > 0) {

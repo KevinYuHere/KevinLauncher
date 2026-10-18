@@ -105,7 +105,7 @@ function HomeModule({
   live: { x: number; y: number } | null
   shift: { x: number; y: number } | null
   dragging: boolean
-  /** Overrides `state.draggable` (e.g. suspended while a picker is open). */
+  /** Extra gate that is ANDed with `state.draggable` (e.g. suspended while a picker is open). */
   dragEnabled?: boolean
   /** Lift above the launch drawer so it can cover the drawer's tucked edge. */
   raised?: boolean
@@ -119,7 +119,7 @@ function HomeModule({
   const wrapRef = useRef<HTMLDivElement>(null)
   const [stage, setStage] = useState({ w: 0, h: 0 })
   const [box, setBox] = useState({ w: 0, h: 0 })
-  const canDrag = dragEnabled ?? state.draggable
+  const canDrag = state.draggable && (dragEnabled ?? true)
 
   useEffect(() => {
     const el = stageRef.current
@@ -223,7 +223,10 @@ export default function HomeView({
 }: HomeViewProps): ReactElement {
   const [now, setNow] = useState(Date.now())
   const [launchW, setLaunchW] = useState(0)
-  const [linkedW, setLinkedW] = useState(0)
+  const [launchH, setLaunchH] = useState(0)
+  const [playtimeW, setPlaytimeW] = useState(0)
+  const [playtimeH, setPlaytimeH] = useState(0)
+  const [linkedH, setLinkedH] = useState(0)
   const [live, setLive] = useState<Record<string, { x: number; y: number }>>({})
   const [shifts, setShifts] = useState<Record<string, { x: number; y: number }>>({})
   const [override, setOverride] = useState<Record<string, { left: number; top: number }>>({})
@@ -793,7 +796,7 @@ export default function HomeView({
           moduleId="playtime"
           state={playtime}
           stageRef={stageRef}
-          anchor={{ right: 26 + launchW + (linkedW > 0 ? linkedW + 12 : 0), bottom: 26 }}
+          anchor={{ right: 26 + launchW + 12, bottom: 26 + (launchH - playtimeH) / 2 }}
           live={live.playtime ?? null}
           shift={shifts.playtime ?? null}
           dragging={dragId === 'playtime'}
@@ -801,6 +804,10 @@ export default function HomeView({
           register={register}
           onDrag={onDragModule}
           onDrop={onDropModule}
+          onMeasure={(w, h) => {
+            setPlaytimeW((prev) => (Math.abs(prev - w) > 1 ? w : prev))
+            setPlaytimeH((prev) => (Math.abs(prev - h) > 1 ? h : prev))
+          }}
         >
           <button className="playtime-pill glass" title="查看使用时间" onClick={onShowStats}>
             <Icon name="clock" size={16} />
@@ -814,7 +821,10 @@ export default function HomeView({
           moduleId="linkedLaunch"
           state={linked}
           stageRef={stageRef}
-          anchor={{ right: 26 + launchW + 12, bottom: 26 }}
+          anchor={{
+            right: 26 + launchW + 12 + (playtime.visible ? playtimeW + 12 : 0),
+            bottom: 26 + (launchH - linkedH) / 2
+          }}
           live={live.linkedLaunch ?? null}
           shift={shifts.linkedLaunch ?? null}
           dragging={dragId === 'linkedLaunch'}
@@ -824,7 +834,7 @@ export default function HomeView({
           register={register}
           onDrag={onDragModule}
           onDrop={onDropModule}
-          onMeasure={(w) => setLinkedW((prev) => (Math.abs(prev - w) > 1 ? w : prev))}
+          onMeasure={(_w, h) => setLinkedH((prev) => (Math.abs(prev - h) > 1 ? h : prev))}
         >
           <button
             ref={linkedBtnRef}
@@ -860,7 +870,10 @@ export default function HomeView({
           register={register}
           onDrag={onDragModule}
           onDrop={onDropModule}
-          onMeasure={(w) => setLaunchW((prev) => (Math.abs(prev - w) > 1 ? w : prev))}
+          onMeasure={(w, h) => {
+            setLaunchW((prev) => (Math.abs(prev - w) > 1 ? w : prev))
+            setLaunchH((prev) => (Math.abs(prev - h) > 1 ? h : prev))
+          }}
         >
           <DownloadButton
             label={<ScrollText text={launchLabel} maxWidth={150} />}
