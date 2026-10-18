@@ -393,19 +393,28 @@ export default function App(): ReactElement {
     []
   )
 
+  /** Play an app's launch effect, radiating from `el` (defaults to window centre). */
+  const presentLaunchFx = useCallback(
+    (effect: AppEntry['launchEffect'], el?: HTMLElement | null): void => {
+      if (effect === 'none') return
+      const r = el?.getBoundingClientRect()
+      setLaunchFx({
+        effect,
+        key: Date.now(),
+        originX: r && r.width ? (r.left + r.width / 2) / window.innerWidth : 0.5,
+        originY: r && r.height ? 1 - (r.top + r.height / 2) / window.innerHeight : 0.4
+      })
+    },
+    []
+  )
+
   const handleLaunch = useCallback(
     async (id: string, methodId?: string): Promise<void> => {
       const entry = apps.find((a) => a.id === id)
-      if (entry && entry.launchEffect !== 'none') {
-        const wrap = document.querySelector('.home .start-wrap') as HTMLElement | null
-        const r = wrap?.getBoundingClientRect()
-        setLaunchFx({
-          effect: entry.launchEffect,
-          key: Date.now(),
-          originX: r ? (r.left + r.width / 2) / window.innerWidth : 0.5,
-          originY: r ? 1 - (r.top + r.height / 2) / window.innerHeight : 0.4
-        })
-      }
+      presentLaunchFx(
+        entry?.launchEffect ?? 'none',
+        document.querySelector('.home .start-wrap') as HTMLElement | null
+      )
       const result = await window.api.launchApp(id, methodId)
       if (!result.ok) {
         showToast(result.error ?? '启动失败')
@@ -421,7 +430,7 @@ export default function App(): ReactElement {
       else if (action === 'tray') await window.api.hideToTray()
       else if (action === 'close') await window.api.windowClose()
     },
-    [apps, showToast, launcherSettings.afterLaunch]
+    [apps, showToast, launcherSettings.afterLaunch, presentLaunchFx]
   )
 
   const handleStop = useCallback(
@@ -588,11 +597,14 @@ export default function App(): ReactElement {
 
   // ---------------------------------------------------------- linked launches
   const handleLinkedLaunch = useCallback(
-    async (id: string): Promise<void> => {
+    async (id: string, origin?: HTMLElement | null): Promise<void> => {
+      // A linked launch is not bound to a single app: play the launch effect of
+      // the app you are currently viewing, radiating from the clicked control.
+      presentLaunchFx(current?.launchEffect ?? 'none', origin)
       const result = await window.api.launchLinkedLaunch(id)
       if (!result.ok) showToast(result.error ?? '启动失败')
     },
-    [showToast]
+    [current, showToast, presentLaunchFx]
   )
 
   const handleStopLinked = useCallback(
@@ -1099,7 +1111,7 @@ export default function App(): ReactElement {
               items={gamesRowLinked}
               visible={view === 'home'}
               runningKeys={linkedRunningKeys}
-              onLaunch={(id) => void handleLinkedLaunch(id)}
+              onLaunch={(id, el) => void handleLinkedLaunch(id, el)}
               onStop={(id) => void handleStopLinked(id)}
               onReorder={(ids) => void handleLinkedReorder(ids)}
             />
@@ -1152,7 +1164,7 @@ export default function App(): ReactElement {
               onPreDownloadToggle={() => void handleUpdate(current.id, 'preDownload')}
               onShowStats={() => setView('playtime')}
               onWallpaperStep={(delta) => void handleWallpaperStep(delta)}
-              onLaunchLinked={(id) => void handleLinkedLaunch(id)}
+              onLaunchLinked={(id, el) => void handleLinkedLaunch(id, el)}
               onStopLinked={(id) => void handleStopLinked(id)}
               onMoveModule={(moduleId, x, y) =>
                 void window.api.setHomeModule(current.id, moduleId, { x, y })

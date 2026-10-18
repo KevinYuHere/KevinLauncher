@@ -47,7 +47,7 @@ interface HomeViewProps {
   onPreDownloadToggle: () => void
   onShowStats: () => void
   onWallpaperStep: (delta: number) => void
-  onLaunchLinked: (id: string) => void
+  onLaunchLinked: (id: string, el?: HTMLElement | null) => void
   onStopLinked: (id: string) => void
   onMoveModule: (moduleId: HomeModuleId, x: number, y: number) => void
   /** Called when a module cannot be placed (home full) so it can be hidden. */
@@ -232,6 +232,7 @@ export default function HomeView({
   const [pickerClosing, setPickerClosing] = useState(false)
   const [pickHighlight, setPickHighlight] = useState<string | null>('default')
   const stageRef = useRef<HTMLDivElement>(null)
+  const linkedBtnRef = useRef<HTMLButtonElement>(null)
   const refs = useRef<Partial<Record<HomeModuleId, HTMLElement | null>>>({})
   const prevVisible = useRef<string>('')
 
@@ -689,9 +690,10 @@ export default function HomeView({
     if (picker?.kind === 'launch') {
       onLaunch(id === 'default' ? undefined : id)
     } else if (id === 'default') {
-      if (defaultLinkedId) onLaunchLinked(defaultLinkedId)
+      // Origin is the linked button itself (the drawer's anchor), not the window.
+      if (defaultLinkedId) onLaunchLinked(defaultLinkedId, linkedBtnRef.current)
     } else {
-      onLaunchLinked(id)
+      onLaunchLinked(id, linkedBtnRef.current)
     }
     closePicker()
   }
@@ -708,7 +710,7 @@ export default function HomeView({
     if (linkedPickerEnabled && !picker) openPicker('linked', rect)
   }
   const linkedLongPress = useLongPress(onLinkedLongPress)
-  const linkedClick = (): void => {
+  const linkedClick = (el?: HTMLElement): void => {
     if (linkedLongPress.consumeClick()) return
     if (picker?.kind === 'linked') {
       pickChoice('default')
@@ -716,7 +718,7 @@ export default function HomeView({
     }
     if (!defaultLinkedId) return
     if (linkedRunning) onStopLinked(defaultLinkedId)
-    else onLaunchLinked(defaultLinkedId)
+    else onLaunchLinked(defaultLinkedId, el)
   }
 
   return (
@@ -825,6 +827,7 @@ export default function HomeView({
           onMeasure={(w) => setLinkedW((prev) => (Math.abs(prev - w) > 1 ? w : prev))}
         >
           <button
+            ref={linkedBtnRef}
             className={`linked-launch-pill glass${linkedRunning ? ' running' : ''}${picker?.kind === 'linked' ? ' picker-open' : ''}${picker?.kind === 'linked' && pickHighlight === 'default' ? ' selected' : ''}`}
             title={
               defaultLinked
@@ -834,7 +837,7 @@ export default function HomeView({
                 : '关联启动'
             }
             onPointerDown={linkedLongPress.onPointerDown}
-            onClick={linkedClick}
+            onClick={(e) => linkedClick(e.currentTarget)}
           >
             <Icon name="link" size={16} />
             <ScrollText text={linkedLabel} maxWidth={96} />

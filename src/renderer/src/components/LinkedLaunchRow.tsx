@@ -16,7 +16,7 @@ interface LinkedLaunchRowProps {
   visible?: boolean
   /** Runtime keys currently running (includes `linked:<id>` tasks). */
   runningKeys: string[]
-  onLaunch: (id: string) => void
+  onLaunch: (id: string, el?: HTMLElement | null) => void
   onStop: (id: string) => void
   onReorder: (ids: string[]) => void
 }
@@ -106,7 +106,7 @@ export default function LinkedLaunchRow({
                 draggable={false}
                 className={`linked-cap${running ? ' running' : ''}${handle.dragging ? ' dragging' : ''}`}
                 title={running ? `停止「${item.name}」` : `启动「${item.name}」`}
-                onClick={() => (running ? onStop(item.id) : onLaunch(item.id))}
+                onClick={(e) => (running ? onStop(item.id) : onLaunch(item.id, e.currentTarget))}
                 onPointerDown={handle.onPointerDown}
               >
                 {running && <span className="linked-cap-dot" />}
