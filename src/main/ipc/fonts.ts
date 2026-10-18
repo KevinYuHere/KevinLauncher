@@ -1,6 +1,7 @@
 import { app, ipcMain } from 'electron'
 import { promises as fs } from 'fs'
 import { join } from 'path'
+import { writeFileAtomic } from '../services/atomicFile'
 import { runPowerShell } from '../services/powershell'
 
 /**
@@ -31,7 +32,7 @@ async function enumerateFonts(): Promise<string[]> {
     )
     fontCache = list
     const cache: FontCacheFile = { version: FONT_CACHE_VERSION, fonts: list }
-    await fs.writeFile(fontCacheFile(), JSON.stringify(cache), 'utf-8').catch(() => undefined)
+    await writeFileAtomic(fontCacheFile(), JSON.stringify(cache)).catch(() => undefined)
     return list
   } catch {
     return fontCache ?? []

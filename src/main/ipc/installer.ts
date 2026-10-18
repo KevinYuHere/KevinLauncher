@@ -28,6 +28,7 @@ import {
   switchDataDir,
   writeDataDir
 } from '../services/dataDir'
+import { backupUserData } from '../services/dataBackup'
 import { AppStore } from '../services/appStore'
 import { currentAppVersion } from '../services/appVersion'
 import { directorySize } from '../services/updateDownload'
@@ -75,6 +76,10 @@ export function registerInstallerIpc(): void {
     if (requestedDataDir && directoriesOverlap(dir, requestedDataDir)) {
       throw new Error('用户数据目录不能与安装目录相同，也不能互相包含')
     }
+
+    // Snapshot the user data before the install touches anything (rotating slot,
+    // overwrites the previous snapshot).
+    await backupUserData(`install ${currentAppVersion()}`)
 
     // The installer runs elevated from the start (see index.ts), so nothing has
     // to be relaunched here: a locked executable means the instance really could

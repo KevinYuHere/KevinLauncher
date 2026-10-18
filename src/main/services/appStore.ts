@@ -1,8 +1,9 @@
 import { app } from 'electron'
 import { promises as fs } from 'fs'
-import { join } from 'path'
+import { dirname, join } from 'path'
 import type { AppEntry, LinkedLaunch } from '@shared/types'
 import { parseJsonLenient, writeFileAtomic } from './atomicFile'
+import { BACKUP_DIR_NAME } from './dataBackup'
 import { openJsonStore } from './jsonStore'
 import { log } from './logger'
 import { CURRENT_VERSION, migrateConfig } from './appMigrations'
@@ -68,27 +69,34 @@ export class AppStore {
   }
 
   /**
-   * Restore from `config.json.corrupt` when the live config lost its apps. Only
-   * a *salvageable* quarantine (valid root JSON, e.g. the 1.2.2 trailing junk)
-   * is used, so an unrelated or truncated `.corrupt` can never resurrect data.
+   * Restore apps when the live config lost them, trying the quarantined file and
+   * then the pre-update backup. Only a *salvageable* source (valid root JSON,
+   * e.g. the 1.2.2 trailing junk) with a non-empty app list is used, so an
+   * unrelated or truncated file can never resurrect stale data.
    */
   private static async restoreQuarantined(config: LauncherConfig): Promise<void> {
     if (config.apps.length > 0) return
-    const quarantine = `${this.file()}.corrupt`
-    let salvaged: LauncherConfig | undefined
-    try {
-      salvaged = parseJsonLenient<LauncherConfig>(await fs.readFile(quarantine, 'utf-8'))
-    } catch {
+    const sources = [
+      `${this.file()}.corrupt`,
+      join(dirname(this.file()), BACKUP_DIR_NAME, 'config.json')
+    ]
+    for (const source of sources) {
+      let salvaged: LauncherConfig | undefined
+      try {
+        salvaged = parseJsonLenient<LauncherConfig>(await fs.readFile(source, 'utf-8'))
+      } catch {
+        continue
+      }
+      if (!salvaged || !Array.isArray(salvaged.apps) || salvaged.apps.length === 0) continue
+      log(`appStore: restoring ${salvaged.apps.length} app(s) from ${source}`)
+      config.apps = salvaged.apps
+      if (Array.isArray(salvaged.linkedLaunches)) config.linkedLaunches = salvaged.linkedLaunches
+      if (salvaged.ui) config.ui = salvaged.ui
+      if (salvaged.launcher) config.launcher = salvaged.launcher
+      if (typeof salvaged.version === 'number') config.version = salvaged.version
+      await writeFileAtomic(this.file(), JSON.stringify(config, null, 2))
       return
     }
-    if (!salvaged || !Array.isArray(salvaged.apps) || salvaged.apps.length === 0) return
-    log(`appStore: restoring ${salvaged.apps.length} app(s) from ${quarantine}`)
-    config.apps = salvaged.apps
-    if (Array.isArray(salvaged.linkedLaunches)) config.linkedLaunches = salvaged.linkedLaunches
-    if (salvaged.ui) config.ui = salvaged.ui
-    if (salvaged.launcher) config.launcher = salvaged.launcher
-    if (typeof salvaged.version === 'number') config.version = salvaged.version
-    await writeFileAtomic(this.file(), JSON.stringify(config, null, 2))
   }
 
   /** Runs version migrations and persists them once. */

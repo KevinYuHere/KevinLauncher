@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { promises as fs } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import { seedDataDir } from '../src/main/services/dataDir'
+import { isTransientEntry, seedDataDir } from '../src/main/services/dataDir'
 
 async function makeDir(prefix: string): Promise<string> {
   return fs.mkdtemp(join(tmpdir(), prefix))
@@ -44,5 +44,27 @@ describe('seedDataDir', () => {
     expect(await fs.readFile(join(target, 'playtime.json'), 'utf8')).toBe('{"sessions":["new"]}')
     expect(await fs.readFile(join(fallback, 'playtime.json'), 'utf8')).toBe('{"sessions":["old"]}')
     await fs.rm(root, { recursive: true, force: true })
+  })
+})
+
+describe('isTransientEntry', () => {
+  it('skips caches, staging and the pre-update backup slot', () => {
+    for (const name of [
+      'thumbs',
+      'update-staging',
+      'logs',
+      'update-backup',
+      'update-backup.new',
+      'launcher.log',
+      'GPUCache'
+    ]) {
+      expect(isTransientEntry(name)).toBe(true)
+    }
+  })
+
+  it('keeps real user data', () => {
+    for (const name of ['config.json', 'playtime.json', 'bg', 'icons', 'gacha', 'brand']) {
+      expect(isTransientEntry(name)).toBe(false)
+    }
   })
 })

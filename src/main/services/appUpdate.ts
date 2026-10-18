@@ -4,6 +4,7 @@ import { promises as fs } from 'fs'
 import type { AppUpdateInfo, AppUpdateState, AppUpdateStatus } from '@shared/types'
 import { isNewerVersion } from '@shared/version'
 import { downloadPayload, extractPayload } from './updateDownload'
+import { backupUserData } from './dataBackup'
 import { sha256File } from './hash'
 import { currentAppVersion } from './appVersion'
 import { writeFileAtomic } from './atomicFile'
@@ -605,6 +606,9 @@ export class AppUpdateChecker {
     const staging = join(app.getPath('userData'), 'update-staging', info.version)
     const archive = join(staging, 'app.zip')
     try {
+      // Snapshot the user data before anything changes, so a bad update can be
+      // rolled back. Covers both the hot path and the runtime/installer path.
+      await backupUserData(`update ${info.version}`)
       // A new Electron runtime cannot be swapped while the launcher is running:
       // download the full installer and hand over to it instead.
       if (info.electronVersion && info.electronVersion !== process.versions.electron) {

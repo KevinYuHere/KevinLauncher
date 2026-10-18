@@ -106,6 +106,7 @@ const TRANSIENT_ENTRIES = new Set([
   'dictionaries',
   'logs',
   'update-staging',
+  'thumbs',
   'predownload'
 ])
 
@@ -116,7 +117,10 @@ export function isTransientEntry(name: string): boolean {
     TRANSIENT_ENTRIES.has(lower) ||
     lower.endsWith('.log') ||
     lower.startsWith('simulate.') ||
-    lower.startsWith('singleton')
+    lower.startsWith('singleton') ||
+    // The pre-update backup slot (and its in-progress `.new`) are never part of
+    // the data being migrated / backed up.
+    lower.startsWith('update-backup')
   )
 }
 
