@@ -1,6 +1,5 @@
 import { parentPort } from 'worker_threads'
-import { promises as fs } from 'fs'
-import { join, dirname } from 'path'
+import { join } from 'path'
 import { getSophonBuild, downloadSophonBuild } from '../update/sophon'
 import { getPatchBuild, applySophonPatch } from '../update/sophonPatch'
 
@@ -8,31 +7,20 @@ interface StartMessage {
   type: 'start'
   branch: { branch: string; packageId: string; password: string }
   destDir: string
+  /** Installed game dir: patch/chunk originals + delta comparison. */
+  originDir?: string
   mode: 'update' | 'preDownload'
-  skipUnchanged: boolean
   localVersion?: string
   hpatchzPath?: string
-  promoteFrom?: string
+  audioLanguages?: string[]
+  ignoreFields?: string[]
+  /** Install versions a patch build can update from (`branch.diff_tags`). */
+  diffTags?: string[]
+  /** Files listed in the game's resource blacklist. */
+  blacklist?: string[]
 }
 
 let controller: AbortController | null = null
-
-async function copyDir(from: string, to: string, signal?: AbortSignal): Promise<void> {
-  const entries = await fs.readdir(from, { withFileTypes: true })
-  for (const entry of entries) {
-    if (signal?.aborted) throw new Error('cancelled')
-    if (entry.name === 'state.json') continue
-    const src = join(from, entry.name)
-    const dst = join(to, entry.name)
-    if (entry.isDirectory()) {
-      await fs.mkdir(dst, { recursive: true })
-      await copyDir(src, dst, signal)
-    } else {
-      await fs.mkdir(dirname(dst), { recursive: true })
-      await fs.copyFile(src, dst)
-    }
-  }
-}
 
 parentPort?.on('message', async (message: unknown) => {
   const msg = message as StartMessage | { type: 'cancel' }
@@ -46,59 +34,86 @@ parentPort?.on('message', async (message: unknown) => {
   const emitProgress = (downloaded: number, total: number): void => {
     parentPort?.postMessage({ type: 'progress', downloaded, total })
   }
+  const post = (payload: Record<string, unknown>): void => {
+    parentPort?.postMessage(payload)
+  }
 
   try {
     const build = await getSophonBuild(msg.branch)
-    parentPort?.postMessage({ type: 'meta', tag: build.tag })
+    post({ type: 'meta', tag: build.tag })
 
-    // Promote a completed (or partial) pre-download into the target directory
-    // first; the following download then only fills in what is missing.
-    if (msg.promoteFrom) {
-      try {
-        await fs.access(msg.promoteFrom)
-        parentPort?.postMessage({ type: 'phase', message: '正在应用已预下载的文件…' })
-        await copyDir(msg.promoteFrom, msg.destDir, controller.signal)
-      } catch {
-        /* no usable pre-download */
-      }
-    }
-
+    // Pre-download only fills the caches (`chunk/`, `ldiff/`); the formal update
+    // assembles/applies them. `destDir` is always the install dir.
+    const installDir = msg.destDir
+    const cacheOnly = msg.mode === 'preDownload'
     let patched = false
-    if (msg.mode === 'update' && msg.localVersion && msg.hpatchzPath) {
+
+    // Patch mode (diff from the installed version) is used for pre-download too:
+    // originals come from the game dir and only changed files are staged. Like
+    // Starward, only try when `diff_tags` lists the installed version.
+    const canPatch = msg.diffTags ? msg.diffTags.includes(msg.localVersion ?? '') : true
+    if (msg.localVersion && msg.hpatchzPath && canPatch) {
       try {
         const patchBuild = await getPatchBuild(msg.branch)
         if (patchBuild.categories.some((c) => c.versions[msg.localVersion as string])) {
-          parentPort?.postMessage({ type: 'phase', message: '正在应用增量补丁…' })
+          post({ type: 'phase', message: '正在应用增量补丁…' })
           await applySophonPatch(
             patchBuild,
             build,
             msg.localVersion,
-            msg.destDir,
+            installDir,
+            installDir,
             msg.hpatchzPath,
             emitProgress,
-            controller.signal
+            controller.signal,
+            msg.audioLanguages ?? [],
+            msg.ignoreFields ?? [],
+            join(installDir, 'ldiff'),
+            cacheOnly,
+            msg.blacklist ?? [],
+            msg.mode === 'update'
           )
           patched = true
         }
       } catch {
-        // Patch failed — fall back to full/incremental download.
-        parentPort?.postMessage({ type: 'phase', message: '补丁不可用，改为文件级增量下载…' })
+        // Patch failed — fall back to file-level incremental download.
+        post({ type: 'phase', message: '补丁不可用，改为文件级增量下载…' })
       }
     }
 
     if (!patched) {
+      // The installed version's manifests let unchanged chunks be copied from
+      // the local game files instead of being downloaded again.
+      let localBuild: Awaited<ReturnType<typeof getSophonBuild>> | undefined
+      if (msg.localVersion) {
+        try {
+          localBuild = await getSophonBuild(msg.branch, msg.localVersion)
+        } catch {
+          localBuild = undefined
+        }
+      }
       await downloadSophonBuild(
         build,
-        msg.destDir,
+        installDir,
         (progress) => emitProgress(progress.downloaded, progress.total),
         controller.signal,
-        msg.skipUnchanged
+        {
+          skipUnchanged: true,
+          originDir: installDir,
+          audioLanguages: msg.audioLanguages,
+          ignoreFields: msg.ignoreFields,
+          localBuild,
+          cacheDir: join(installDir, 'chunk'),
+          cacheOnly,
+          blacklist: msg.blacklist ?? []
+        }
       )
     }
-    parentPort?.postMessage({ type: 'done' })
+
+    post({ type: 'done' })
   } catch (error) {
     const message = (error as Error).message
-    parentPort?.postMessage({ type: 'error', message: message === 'cancelled' ? '已取消' : message })
+    post({ type: 'error', message: message === 'cancelled' ? '已取消' : message })
   } finally {
     controller = null
   }

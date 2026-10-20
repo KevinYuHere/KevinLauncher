@@ -30,6 +30,8 @@ interface DownloadButtonProps {
   boundsRef?: RefObject<HTMLElement>
   /** Long-press handler (opens the special launch-method picker). */
   onLongPress?: (rect: DOMRect) => void
+  /** Click on the cap circle (update / pre-download control); falls back to onButtonClick. */
+  onCircleClick?: () => void
   /** Highlighted as the selected choice of the launch drawer (theme colour). */
   selected?: boolean
 }
@@ -51,6 +53,7 @@ export default function DownloadButton({
   popup,
   boundsRef,
   onLongPress,
+  onCircleClick,
   selected
 }: DownloadButtonProps): ReactElement {
   const circleRef = useRef<HTMLButtonElement>(null)
@@ -81,7 +84,7 @@ export default function DownloadButton({
           <button
             ref={circleRef}
             className={`pre-circle${ringTone === 'update' ? ' update-circle' : ''}`}
-            onClick={onButtonClick}
+            onClick={onCircleClick ?? onButtonClick}
             title={active ? '点击暂停 / 继续' : '下载'}
           >
             {active ? (

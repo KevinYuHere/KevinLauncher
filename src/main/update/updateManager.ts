@@ -1,12 +1,24 @@
 import { app } from 'electron'
-import { join } from 'path'
+import { dirname, join } from 'path'
 import { promises as fs, createReadStream, createWriteStream } from 'fs'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { pipeline } from 'stream/promises'
 import type { GachaGame, UpdateMode, UpdateStatus } from '@shared/types'
 import { downloadFile } from '../services/downloader'
-import { getGameBranches, readGameVersion } from './hoyoplay'
+import { writeFileAtomic } from '../services/atomicFile'
+import {
+  audioEnumNames,
+  compareVersion,
+  detectAudioLanguages,
+  getGameBranches,
+  getGameChannelSDK,
+  getGameConfig,
+  getGameDeprecatedFiles,
+  getHoYoPackages,
+  getWPFPackageVersion,
+  readGameVersion
+} from './hoyoplay'
 import { getArknightsLatest, readLocalVersion, type AkPack } from './arknightsUpdate'
 import sophonWorkerPath from '../workers/sophonWorker?modulePath'
 import arknightsWorkerPath from '../workers/arknightsWorker?modulePath'
@@ -235,68 +247,174 @@ export class UpdateManager {
     controller: AbortController,
     status: UpdateStatus
   ): Promise<void> {
+    const gameConfig = await getGameConfig(game).catch(() => null)
+    // Only the installed voice languages are downloaded (size differs per player).
+    const audioLanguages = await detectAudioLanguages(gameDir)
+    // Non-chunk games use the compressed-package flow (Starward: DefaultDownloadMode).
+    const defaultMode = gameConfig?.defaultDownloadMode ?? ''
+    if (
+      defaultMode &&
+      defaultMode !== 'DOWNLOAD_MODE_CHUNK' &&
+      defaultMode !== 'DOWNLOAD_MODE_LDIFF'
+    ) {
+      await this.runHoYoPackage(appId, mode, game, gameDir, controller, status, audioLanguages)
+      return
+    }
+
     const branches = await getGameBranches(game)
     const target = mode === 'preDownload' ? branches.preDownload : branches.main
     if (!target) {
       throw new Error(mode === 'preDownload' ? '当前没有可预下载的版本' : '未找到更新分支')
     }
 
-    // Pre-download goes to a staging directory; update is applied in place
-    // (only changed files are downloaded — file-level incremental + resume).
-    const destDir =
-      mode === 'preDownload'
-        ? join(app.getPath('userData'), 'predownload', appId, target.tag)
-        : gameDir
-    await fs.mkdir(destDir, { recursive: true })
-
+    const localVersion = await readGameVersion(gameDir)
+    const hpatchzPath = app.isPackaged
+      ? join(process.resourcesPath, 'hpatchz.exe')
+      : join(app.getAppPath(), 'resources', 'hpatchz.exe')
+    // Resource categories the game config marks as deleted are skipped (Starward
+    // reads `res_category_launcher`; a missing file simply means "none").
+    const ignoreFields = gameConfig?.resCategoryDir
+      ? await readIgnoreFields(gameDir, gameConfig.resCategoryDir)
+      : []
+    const blacklist =
+      gameConfig?.enableBlacklist && gameConfig.blacklistDir
+        ? await readBlacklist(gameDir, gameConfig.blacklistDir)
+        : []
+    // Chunk/patch caches live inside the install dir (`chunk/`, `ldiff/`) so a run
+    // interrupted mid-way resumes from them. Pre-download only fills the cache;
+    // the formal update assembles the files from the local game + cache.
     status.phase = 'downloading'
     status.progress = 0
     status.message = mode === 'preDownload' ? '正在预下载…' : '正在下载更新…'
     this.emit(status)
 
-    const localVersion = mode === 'update' ? await readGameVersion(gameDir) : ''
-    const hpatchzPath = app.isPackaged
-      ? join(process.resourcesPath, 'hpatchz.exe')
-      : join(app.getAppPath(), 'resources', 'hpatchz.exe')
-
-    // Reuse a (possibly partial) pre-download for this version if present.
-    const predownloadDir = join(app.getPath('userData'), 'predownload', appId, target.tag)
-    let promoteFrom: string | undefined
-    if (mode === 'update') {
-      try {
-        await fs.access(predownloadDir)
-        promoteFrom = predownloadDir
-      } catch {
-        /* no pre-download */
-      }
-    }
-
-    // The heavy download/decompress/assembly runs in a worker thread so the
-    // main process (and the UI) never blocks.
     await this.runWorker(
       sophonWorkerPath,
       {
         type: 'start',
         branch: target,
-        destDir,
+        destDir: gameDir,
+        originDir: gameDir,
         mode,
-        skipUnchanged: true,
         localVersion,
         hpatchzPath,
-        promoteFrom
+        audioLanguages,
+        ignoreFields,
+        blacklist,
+        diffTags: target.diffTags
       },
       controller,
       status
     )
 
     if (mode === 'preDownload') {
-      await fs.writeFile(
-        join(destDir, 'state.json'),
-        JSON.stringify({ version: target.tag, ready: true, finishedAt: new Date().toISOString() }, null, 2),
-        'utf-8'
-      )
+      // Completion is recorded in the game's config.ini (`predownload=`); the
+      // game_version stays unchanged until the formal update is applied.
+      await writeConfigIni(gameDir, {
+        predownload: `${localVersion},${target.tag},${audioEnumNames(audioLanguages)}`
+      })
+      status.message = '预下载完成'
+    } else {
+      // F29: delete files the official config marks as deprecated.
+      for (const name of await getGameDeprecatedFiles(game)) {
+        await fs.rm(join(gameDir, ...name.split('/')), { force: true }).catch(() => undefined)
+      }
+      // F32: hard-link audio from the cache dir into the resource dir.
+      if (gameConfig?.enableAudioPkgMgmt && gameConfig.audioCacheDir && gameConfig.audioResDir) {
+        await linkAudioFiles(gameDir, gameConfig.audioCacheDir, gameConfig.audioResDir).catch(
+          () => undefined
+        )
+      }
+      // F30: write the SDK / WPF versions the game expects.
+      await writeConfigIni(gameDir, {
+        gameVersion: target.tag,
+        predownload: null,
+        sdkVersion: await getGameChannelSDK(game),
+        wpfVersion: await getWPFPackageVersion(game)
+      })
+      // Post-update verification: the game's config.ini must now report the target.
+      const installed = await readGameVersion(gameDir)
+      if (installed && compareVersion(installed, target.tag) !== 0) {
+        log(`update: verification failed (config.ini ${installed} != ${target.tag})`)
+      }
+      status.message = '更新完成'
     }
-    status.message = mode === 'preDownload' ? '预下载完成' : '更新完成'
+  }
+  /**
+   * Compressed-package flow (games whose `DefaultDownloadMode` is not chunk).
+   * Downloads the listed zips (game + installed voice languages), then extracts
+   * them into the game dir; a pre-download stages the zips and the formal update
+   * extracts them.
+   */
+  private async runHoYoPackage(
+    appId: string,
+    mode: UpdateMode,
+    game: 'genshin' | 'starrail' | 'zzz',
+    gameDir: string,
+    controller: AbortController,
+    status: UpdateStatus,
+    audioLanguages: string[]
+  ): Promise<void> {
+    const pkgs = await getHoYoPackages(game)
+    const target = mode === 'preDownload' ? pkgs.preDownload : pkgs.main
+    if (!target) throw new Error(mode === 'preDownload' ? '当前没有可预下载的版本' : '未找到更新包')
+    const files = target.files.filter(
+      (file) => !file.language || audioLanguages.includes(file.language)
+    )
+    if (files.length === 0) throw new Error('没有可下载的安装包')
+    const staging = join(app.getPath('userData'), 'predownload', appId, target.version)
+
+    if (mode === 'update') {
+      const state = await readPredownloadState(staging)
+      if (state?.ready && state.mode === 'package' && state.version === target.version) {
+        status.phase = 'extracting'
+        status.progress = 0
+        status.message = '正在应用预下载…'
+        this.emit(status)
+        await extractPackages(staging, gameDir)
+        await fs.rm(staging, { recursive: true, force: true }).catch(() => undefined)
+        await writeConfigIni(gameDir, { gameVersion: target.version, predownload: null })
+        status.message = '更新完成'
+        return
+      }
+    }
+
+    const work =
+      mode === 'preDownload'
+        ? staging
+        : await fs.mkdtemp(join(app.getPath('userData'), 'update-pkg-'))
+    await fs.mkdir(work, { recursive: true })
+    status.phase = 'downloading'
+    status.progress = 0
+    status.message = mode === 'preDownload' ? '正在预下载…' : '正在下载更新…'
+    this.emit(status)
+    await this.downloadList(
+      files.map((file) => ({
+        url: file.url,
+        name: file.name,
+        size: file.size,
+        md5: file.md5,
+        dest: join(work, file.name)
+      })),
+      controller,
+      status
+    )
+    if (mode === 'preDownload') {
+      await writeFileAtomic(
+        join(staging, 'state.json'),
+        JSON.stringify({ version: target.version, ready: true, deletes: [], mode: 'package' }, null, 2)
+      )
+      status.message = '预下载完成'
+      return
+    }
+    status.phase = 'extracting'
+    status.progress = 0
+    status.message = '正在应用更新（解压）…'
+    this.emit(status)
+    await extractPackages(work, gameDir)
+    await fs.rm(work, { recursive: true, force: true }).catch(() => undefined)
+    await writeConfigIni(gameDir, { gameVersion: target.version, predownload: null })
+    status.message = '更新完成'
   }
 
   /**
@@ -435,6 +553,147 @@ export class UpdateManager {
       /* keep downloaded archives on failure */
     }
     status.message = '更新完成'
+  }
+}
+
+/** Read `<res_category_dir>` lines (`{"category":"…","is_delete":true}`). */
+async function readIgnoreFields(gameDir: string, relative: string): Promise<string[]> {
+  try {
+    const text = await fs.readFile(join(gameDir, ...relative.split('/')), 'utf-8')
+    const fields: string[] = []
+    for (const line of text.split(/\r?\n/)) {
+      if (!line.trim()) continue
+      try {
+        const obj = JSON.parse(line) as { category?: string; is_delete?: boolean }
+        if (obj?.is_delete && obj.category) fields.push(String(obj.category))
+      } catch {
+        /* ignore malformed lines */
+      }
+    }
+    return fields
+  } catch {
+    return []
+  }
+}
+
+async function readBlacklist(gameDir: string, relative: string): Promise<string[]> {
+  try {
+    const text = await fs.readFile(join(gameDir, ...relative.split('/')), 'utf-8')
+    const files: string[] = []
+    for (const line of text.split(/\r?\n/)) {
+      if (!line.trim()) continue
+      try {
+        const obj = JSON.parse(line) as Record<string, unknown>
+        const name = obj.fileName ?? obj.file_name ?? obj.filename ?? obj.name
+        if (typeof name === 'string' && name) files.push(name)
+      } catch {
+        /* ignore malformed lines */
+      }
+    }
+    return files
+  } catch {
+    return []
+  }
+}
+/** Hard-link audio files from the cache dir into the resource dir (Starward F32). */
+async function linkAudioFiles(installDir: string, cacheDir: string, resDir: string): Promise<void> {
+  if (cacheDir.toLowerCase() === resDir.toLowerCase()) return
+  const from = join(installDir, ...cacheDir.split('/'))
+  const to = join(installDir, ...resDir.split('/'))
+  const walk = async (dir: string, rel: string): Promise<void> => {
+    let entries
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      const nextRel = rel ? `${rel}/${entry.name}` : entry.name
+      const src = join(dir, entry.name)
+      if (entry.isDirectory()) {
+        await walk(src, nextRel)
+        continue
+      }
+      if (!entry.isFile()) continue
+      const dst = join(to, ...nextRel.split('/'))
+      try {
+        await fs.access(dst)
+        continue
+      } catch {
+        /* target missing */
+      }
+      await fs.mkdir(dirname(dst), { recursive: true })
+      try {
+        await fs.link(src, dst)
+      } catch {
+        await fs.copyFile(src, dst).catch(() => undefined)
+      }
+    }
+  }
+  await walk(from, '')
+}
+interface PredownloadState {
+  version?: string
+  ready?: boolean
+  deletes?: string[]
+  /** `chunk` (patch/chunk staging) or `package` (compressed-package zips). */
+  mode?: string
+}
+
+async function readPredownloadState(dir: string): Promise<PredownloadState | null> {
+  try {
+    return JSON.parse(await fs.readFile(join(dir, 'state.json'), 'utf-8')) as PredownloadState
+  } catch {
+    return null
+  }
+}
+
+/** Edit the game's `config.ini` the way Starward does (last `game_version=`). */
+async function writeConfigIni(
+  gameDir: string,
+  opts: {
+    gameVersion?: string
+    predownload?: string | null
+    sdkVersion?: string | null
+    wpfVersion?: string | null
+  }
+): Promise<void> {
+  const file = join(gameDir, 'config.ini')
+  let text: string
+  try {
+    text = await fs.readFile(file, 'utf-8')
+  } catch {
+    return
+  }
+  // Starward drops the legacy [General] header line before rewriting keys.
+  const lines = text.split(/\r?\n/).filter((line) => !/\[General\]/i.test(line))
+  const setLine = (key: string, value: string | null): void => {
+    const re = new RegExp(`^\\s*${key}\\s*=`)
+    let index = -1
+    for (let i = 0; i < lines.length; i++) if (re.test(lines[i])) index = i
+    if (value == null) {
+      if (index >= 0) lines.splice(index, 1)
+      return
+    }
+    const next = `${key}=${value}`
+    if (index >= 0) lines[index] = next
+    else lines.push(next)
+  }
+  if (opts.gameVersion !== undefined) setLine('game_version', opts.gameVersion)
+  if (opts.predownload !== undefined) setLine('predownload', opts.predownload)
+  if (opts.sdkVersion) setLine('sdk_version', opts.sdkVersion)
+  if (opts.wpfVersion) setLine('wpf_version', opts.wpfVersion)
+  // CN launcher channel fields (Starward writes these on every update).
+  setLine('channel', '1')
+  setLine('sub_channel', '1')
+  setLine('cps', 'hyp_mihoyo')
+  await writeFileAtomic(file, lines.join('\r\n'))
+}
+
+/** Extract every `.zip` in `dir` into the game dir (compressed-package flow). */
+async function extractPackages(dir: string, gameDir: string): Promise<void> {
+  for (const name of await fs.readdir(dir)) {
+    if (name.toLowerCase().endsWith('.zip')) await extractZip(join(dir, name), gameDir)
   }
 }
 

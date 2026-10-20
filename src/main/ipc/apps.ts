@@ -245,6 +245,7 @@ export function registerAppsIpc(): void {
         afterLaunch?: 'none' | 'minimize' | 'tray' | 'close'
         autoStart?: 'off' | 'window' | 'tray'
         sidebarMaterial?: boolean
+        updateChannel?: 'stable' | 'beta'
       }
     ) => {
       await AppStore.setLauncher(patch)

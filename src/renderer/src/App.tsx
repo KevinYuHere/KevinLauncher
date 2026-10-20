@@ -38,7 +38,7 @@ import UpdateRing from './components/UpdateRing'
 import { ConfirmHost, confirm } from './components/confirm'
 import IconCropper from './components/IconCropper'
 import type { ViewId } from './viewTypes'
-import { backgroundUrl, brandUrl, defaultIconUrl } from './media'
+import { backgroundUrl, brandUrl, defaultIconUrl, fileUrl } from './media'
 import { directoriesOverlap } from '@shared/paths'
 import { updateChromeContrast } from './contrast'
 import { applyGlass, applyTheme } from './theme'
@@ -93,7 +93,8 @@ export default function App(): ReactElement {
     closeAction: 'close',
     afterLaunch: 'none',
     autoStart: 'off',
-    sidebarMaterial: true
+    sidebarMaterial: true,
+    updateChannel: 'stable'
   })
   const [fonts, setFonts] = useState<string[]>([])
   const [version, setVersion] = useState('')
@@ -121,6 +122,8 @@ export default function App(): ReactElement {
   } | null>(null)
   const [updateCheckText, setUpdateCheckText] = useState('')
   const [dataDir, setDataDir] = useState('')
+  /** Windows desktop wallpaper — background when the launcher has no apps. */
+  const [desktopWall, setDesktopWall] = useState<string | null>(null)
   const [programDir, setProgramDir] = useState('')
   const [usage, setUsage] = useState<UsageReport | null>(null)
 
@@ -185,6 +188,7 @@ export default function App(): ReactElement {
     void window.api.getLauncherSettings().then(setLauncherSettings)
     void window.api.listFonts().then(setFonts)
     void window.api.appVersion().then(setVersion)
+    void window.api.desktopWallpaper().then(setDesktopWall)
     void window.api.dataDirGet().then((info) => {
       setDataDir(info.current)
       setProgramDir(info.programDir)
@@ -772,9 +776,13 @@ export default function App(): ReactElement {
         onPickLauncherIcon={() => void pickLauncherIcon()}
         onClearLauncherIcon={() => void clearLauncherIcon()}
         onSetFont={(family) => void setLauncherFont(family)}
-        onSetBehavior={(patch) =>
-          void window.api.setLauncherBehavior(patch).then(setLauncherSettings)
-        }
+        onSetBehavior={(patch) => {
+          void window.api.setLauncherBehavior(patch).then((settings) => {
+            setLauncherSettings(settings)
+            // Switching channel re-checks immediately so the indicator is accurate.
+            if (patch.updateChannel) void handleCheckUpdate()
+          })
+        }}
         onExportData={() => void exportData()}
         onImportData={() => void importData()}
         dataDir={dataDir}
@@ -794,8 +802,10 @@ export default function App(): ReactElement {
   }
 
   const wallpaper = current ? currentWallpaper(current) : null
-  const bg = backgroundUrl(wallpaper?.file ?? null)
-  const isVideo = isVideoFile(wallpaper?.file)
+  // With no apps, fall back to the Windows desktop wallpaper (never a black window).
+  const desktopBg = !current && desktopWall ? fileUrl(desktopWall) : null
+  const bg = desktopBg ?? backgroundUrl(wallpaper?.file ?? null)
+  const isVideo = desktopBg ? isVideoFile(desktopWall) : isVideoFile(wallpaper?.file)
 
   useEffect(() => {
     applyTheme(current?.themeColor ?? null)
@@ -827,7 +837,7 @@ export default function App(): ReactElement {
       return
     }
     const blur = current?.backgroundBlur ?? 0
-    const dim = current?.backgroundDim ?? 100
+    const dim = current ? current.backgroundDim : 0
     const commit = (): void => setBgDisplay({ src: bg, kind: isVideo ? 'video' : 'image', blur, dim })
     if (isVideo) {
       commit()

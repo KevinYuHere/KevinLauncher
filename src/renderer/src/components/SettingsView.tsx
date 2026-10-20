@@ -13,6 +13,7 @@ import type {
   AppEntry,
   AutoStartMode,
   CloseAction,
+  UpdateChannel,
   GlassAppearance,
   GlassMaterial,
   GlassPatch,
@@ -102,6 +103,7 @@ interface SettingsViewProps {
     afterLaunch?: AfterLaunchAction
     autoStart?: AutoStartMode
     sidebarMaterial?: boolean
+    updateChannel?: UpdateChannel
   }) => void
   onExportData: () => void
   onImportData: () => void
@@ -899,6 +901,24 @@ export default function SettingsView({
               />
 
               <Row name="当前版本" desc={version} />
+              <Row
+                name="更新通道"
+                desc={
+                  launcher.updateChannel === 'beta'
+                    ? '测试版：优先接收预发布版本'
+                    : '正式版：仅接收稳定版本'
+                }
+                action={
+                  <Segmented
+                    value={launcher.updateChannel}
+                    onChange={(value) => onSetBehavior({ updateChannel: value as UpdateChannel })}
+                    options={[
+                      { value: 'stable', label: '正式版' },
+                      { value: 'beta', label: '测试版' }
+                    ]}
+                  />
+                }
+              />
 
               <Row
                 name="导出日志"

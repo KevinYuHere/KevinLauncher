@@ -37,6 +37,7 @@ const api: KevinApi = {
   readImage: (path: string) => ipcRenderer.invoke('image:read', path),
   listFonts: () => ipcRenderer.invoke('fonts:list'),
   appVersion: () => ipcRenderer.invoke('app:version'),
+  desktopWallpaper: () => ipcRenderer.invoke('wallpaper:desktop'),
   getLauncherSettings: () => ipcRenderer.invoke('launcher:getSettings'),
   setLauncherIcon: (dataUrl: string | null) => ipcRenderer.invoke('launcher:setIcon', dataUrl),
   setLauncherFont: (family: string | null) => ipcRenderer.invoke('launcher:setFont', family),

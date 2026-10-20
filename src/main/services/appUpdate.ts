@@ -10,12 +10,15 @@ import { currentAppVersion } from './appVersion'
 import { writeFileAtomic } from './atomicFile'
 import { flushBeforeShutdown } from './shutdown'
 import { markQuitting } from './behavior'
+import { AppStore } from './appStore'
 import { log } from './logger'
 
 /** Owner/repository used for release checks (public GitHub API). */
 export const GITHUB_REPO = 'KevinYuHere/KevinLauncher'
 
 const RELEASES_API = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`
+/** Full release list (includes pre-releases) used by the beta channel. */
+const RELEASES_LIST_API = `https://api.github.com/repos/${GITHUB_REPO}/releases`
 /**
  * Stable URL that always redirects to the newest release's manifest.
  *
@@ -52,6 +55,8 @@ interface GitHubRelease {
   body?: string
   html_url?: string
   published_at?: string
+  draft?: boolean
+  prerelease?: boolean
   assets?: { id?: number; name?: string; browser_download_url?: string; size?: number }[]
 }
 
@@ -196,38 +201,14 @@ async function apiAssetUrls(kind: 'payload' | 'installer'): Promise<string[]> {
   return asset ? assetUrls(asset) : []
 }
 
-/** Reads the newest published release, or `null` when the repo has none. */
-async function fetchLatestRelease(): Promise<AppUpdateInfo | null> {
-  // 1) Free path first (no rate limit, no auth).
-  try {
-    const info = await fetchReleaseViaLatestUrl()
-    if (info) return info
-  } catch (error) {
-    log(`appUpdate: latest/download path unavailable (${(error as Error).message})`)
-  }
-
-  // 2) GitHub API (rate limited to 60/hour per IP, but reachable where
-  //    github.com is blocked).
-  const response = await fetch(RELEASES_API, {
-    headers: { accept: 'application/vnd.github+json', 'user-agent': USER_AGENT }
-  })
-  // A repository with no releases yet (or a renamed repo) answers 404.
-  if (response.status === 404) return null
-  if (!response.ok) throw new Error(`GitHub 返回 HTTP ${response.status}`)
-
-  const release = (await response.json()) as GitHubRelease
-  const version = String(release.tag_name ?? '')
-    .trim()
-    .replace(/^v/i, '')
-  if (!version) throw new Error('发布信息缺少版本号')
-
+/** Build AppUpdateInfo from a GitHub release object. */
+async function infoFromRelease(release: GitHubRelease): Promise<AppUpdateInfo | null> {
+  const version = String(release.tag_name ?? '').trim().replace(/^v/i, '')
+  if (!version) return null
   const assets = release.assets ?? []
   const payload = assets.find((item) => /KevinLauncher-.*\.zip$/i.test(item.name ?? ''))
   const installer = assets.find((item) => /KevinLauncher-Installer.*\.exe$/i.test(item.name ?? ''))
   const manifest = assets.find((item) => /update-manifest\.json$/i.test(item.name ?? ''))
-
-  // The manifest carries the unpacked size (install progress denominator), the
-  // payload hash and — for runtime upgrades — the full installer's details.
   let installSize = 0
   let payloadSha256: string | null = null
   let electronVersion: string | null = null
@@ -254,7 +235,6 @@ async function fetchLatestRelease(): Promise<AppUpdateInfo | null> {
       log(`appUpdate: manifest unreadable (${(error as Error).message})`)
     }
   }
-
   return {
     version,
     name: release.name?.trim() || `v${version}`,
@@ -273,6 +253,44 @@ async function fetchLatestRelease(): Promise<AppUpdateInfo | null> {
   }
 }
 
+/**
+ * Newest published release. `stable` ignores pre-releases (the
+ * `releases/latest` endpoint); `beta` scans the release list (newest first) and
+ * includes pre-releases.
+ */
+async function fetchLatestRelease(channel: 'stable' | 'beta'): Promise<AppUpdateInfo | null> {
+  if (channel === 'beta') {
+    const response = await fetch(RELEASES_LIST_API, {
+      headers: { accept: 'application/vnd.github+json', 'user-agent': USER_AGENT }
+    })
+    if (response.status === 404) return null
+    if (!response.ok) throw new Error(`GitHub 返回 HTTP ${response.status}`)
+    const list = (await response.json()) as GitHubRelease[]
+    for (const release of list) {
+      if (release.draft) continue
+      const info = await infoFromRelease(release)
+      if (info) return info
+    }
+    return null
+  }
+
+  // 1) Free path first (no rate limit, no auth).
+  try {
+    const info = await fetchReleaseViaLatestUrl()
+    if (info) return info
+  } catch (error) {
+    log(`appUpdate: latest/download path unavailable (${(error as Error).message})`)
+  }
+
+  // 2) GitHub API (rate limited to 60/hour per IP, but reachable where
+  //    github.com is blocked).
+  const response = await fetch(RELEASES_API, {
+    headers: { accept: 'application/vnd.github+json', 'user-agent': USER_AGENT }
+  })
+  if (response.status === 404) return null
+  if (!response.ok) throw new Error(`GitHub 返回 HTTP ${response.status}`)
+  return infoFromRelease((await response.json()) as GitHubRelease)
+}
 async function fileSize(path: string): Promise<number> {
   try {
     return (await fs.stat(path)).size
@@ -300,6 +318,17 @@ async function pathExists(path: string): Promise<boolean> {
  *
  * The user never sees the NSIS installer UI and never has to choose anything.
  */
+interface ChannelState {
+  auto: number
+  manual: number
+  failedAt: number
+  rateLimitedUntil: number
+  info: AppUpdateInfo | null
+}
+
+function emptyChannelState(): ChannelState {
+  return { auto: 0, manual: 0, failedAt: 0, rateLimitedUntil: 0, info: null }
+}
 export class AppUpdateChecker {
   private info: AppUpdateInfo | null = null
   private error: string | undefined
@@ -309,14 +338,48 @@ export class AppUpdateChecker {
   private state: AppUpdateState = { ...IDLE_STATE }
   private controller: AbortController | null = null
   private running = false
-  /** Timestamp of the last successful automatic check. */
+  /** Update channel the current result was computed for. */
+  private channel: 'stable' | 'beta' = 'stable'
+  /** Timestamp of the last successful automatic check (active channel). */
   private lastAutoCheck = 0
-  /** Timestamp of the last successful manual check (independent cooldown). */
+  /** Timestamp of the last successful manual check (active channel). */
   private lastManualCheck = 0
   /** Timestamp of the last failed attempt (retry backoff). */
   private failedAt = 0
   /** Automatic checks are skipped until this timestamp after a 403. */
   private rateLimitedUntil = 0
+  /** Per-channel state: switching channels reuses that channel's cache/cooldowns. */
+  private saved: Record<'stable' | 'beta', ChannelState> = {
+    stable: emptyChannelState(),
+    beta: emptyChannelState()
+  }
+
+  private snapshot(): ChannelState {
+    return {
+      auto: this.lastAutoCheck,
+      manual: this.lastManualCheck,
+      failedAt: this.failedAt,
+      rateLimitedUntil: this.rateLimitedUntil,
+      info: this.info
+    }
+  }
+
+  private applyChannel(channel: 'stable' | 'beta'): void {
+    const state = this.saved[channel]
+    this.channel = channel
+    this.lastAutoCheck = state.auto
+    this.lastManualCheck = state.manual
+    this.failedAt = state.failedAt
+    this.rateLimitedUntil = state.rateLimitedUntil
+    this.info = state.info && isNewerVersion(state.info.version, this.current()) ? state.info : null
+    this.announced = this.info?.version ?? null
+  }
+
+  private switchChannel(channel: 'stable' | 'beta'): void {
+    if (this.channel === channel) return
+    this.saved[this.channel] = this.snapshot()
+    this.applyChannel(channel)
+  }
 
   /** Currently installed version (from `resources/app-version.txt`). */
   current(): string {
@@ -391,6 +454,7 @@ export class AppUpdateChecker {
     if (this.info && !isNewerVersion(this.info.version, this.current())) {
       this.info = null
       this.announced = null
+      this.saved[this.channel].info = null
     }
     return { current: this.current(), hasUpdate: !!this.info, info: this.info, error: this.error }
   }
@@ -425,56 +489,59 @@ export class AppUpdateChecker {
   private async loadCache(): Promise<void> {
     try {
       const raw = JSON.parse(await fs.readFile(this.cacheFile(), 'utf8')) as {
-        /** Legacy single timestamp (treated as both kinds). */
-        checkedAt?: number
+        forVersion?: string
+        channel?: 'stable' | 'beta'
         autoCheckedAt?: number
         manualCheckedAt?: number
-        /** Version the cache was computed for (invalidate after an update). */
-        forVersion?: string
         info?: AppUpdateInfo | null
+        channels?: Partial<Record<'stable' | 'beta', ChannelState>>
       }
-      const auto = raw.autoCheckedAt ?? raw.checkedAt ?? 0
-      const manual = raw.manualCheckedAt ?? raw.checkedAt ?? 0
+      const channel = (await AppStore.launcherSettings()).updateChannel
       const current = this.current()
-      const stale = raw.forVersion && raw.forVersion !== current
-      const fresh = Date.now() - Math.max(auto, manual) < CHECK_CACHE_TTL
-      const usable =
-        !stale && fresh && !!raw.info && isNewerVersion(raw.info.version, current)
-      if (usable) {
-        this.lastAutoCheck = auto
-        this.lastManualCheck = manual
-        this.info = raw.info ?? null
-        log(
-          `appUpdate: using cached check (${Math.round((Date.now() - Math.max(auto, manual)) / 60000)} min old)`
-        )
-      } else if (stale) {
-        log(`appUpdate: cache is for ${raw.forVersion}, current is ${current} — discarding`)
+      if (raw.forVersion && raw.forVersion !== current) {
+        log(`appUpdate: cache is for ${raw.forVersion}, current is ${current} - discarding`)
+        this.channel = channel
+        return
       }
+      if (raw.channels) {
+        for (const key of ['stable', 'beta'] as const) {
+          const state = raw.channels[key]
+          if (state) {
+            this.saved[key] = {
+              auto: state.auto ?? 0,
+              manual: state.manual ?? 0,
+              failedAt: state.failedAt ?? 0,
+              rateLimitedUntil: state.rateLimitedUntil ?? 0,
+              info: state.info ?? null
+            }
+          }
+        }
+      } else {
+        // Legacy single-channel cache: attribute it to its recorded channel.
+        this.saved[raw.channel ?? 'stable'] = {
+          auto: raw.autoCheckedAt ?? 0,
+          manual: raw.manualCheckedAt ?? 0,
+          failedAt: 0,
+          rateLimitedUntil: 0,
+          info: raw.info ?? null
+        }
+      }
+      this.applyChannel(channel)
     } catch {
       /* no cache yet */
     }
   }
-
   private async saveCache(): Promise<void> {
     try {
+      this.saved[this.channel] = this.snapshot()
       await writeFileAtomic(
         this.cacheFile(),
-        JSON.stringify(
-          {
-            autoCheckedAt: this.lastAutoCheck,
-            manualCheckedAt: this.lastManualCheck,
-            forVersion: this.current(),
-            info: this.info
-          },
-          null,
-          2
-        )
+        JSON.stringify({ forVersion: this.current(), channels: this.saved }, null, 2)
       )
     } catch {
       /* caching is best effort */
     }
   }
-
   private cacheFile(): string {
     return join(app.getPath('userData'), 'update-check.json')
   }
@@ -503,6 +570,7 @@ export class AppUpdateChecker {
       }
       return this.status()
     }
+    this.switchChannel((await AppStore.launcherSettings()).updateChannel)
     const stamp = kind === 'auto' ? this.lastAutoCheck : this.lastManualCheck
     // Fresh for this kind (≤ 24 h) → answer from the cached result.
     if (stamp && now - stamp < CHECK_CACHE_TTL) return this.status()
@@ -511,7 +579,7 @@ export class AppUpdateChecker {
     if (this.failedAt && now - this.failedAt < FAILURE_RETRY) return this.status()
 
     try {
-      const latest = await fetchLatestRelease()
+      const latest = await fetchLatestRelease(this.channel)
       this.error = undefined
       this.info = latest && isNewerVersion(latest.version, this.current()) ? latest : null
       // Timestamp of the last *successful* check of this kind (persisted below).

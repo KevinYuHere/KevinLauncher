@@ -7,6 +7,7 @@ import { md5File } from '../services/hash'
 import {
   fetchChunk,
   fetchManifest,
+  isLanguageField,
   type SophonAsset,
   type SophonBuild
 } from './sophon'
@@ -17,9 +18,14 @@ const CONCURRENCY = 16
 
 export interface PatchCategory {
   categoryId: string
+  matchingField: string
   manifestId: string
   manifestUrlPrefix: string
+  manifestCompression: number
+  manifestSuffix: string
   diffUrlPrefix: string
+  diffCompression: number
+  diffSuffix: string
   versions: Record<string, { compressedSize: number; fileCount: number }>
 }
 export interface PatchBuild {
@@ -30,6 +36,8 @@ export interface PatchBuild {
 
 interface PatchChunk {
   patchName: string
+  patchFileSize: number
+  patchFileMd5: string
   patchOffset: number
   patchLength: number
   originalFileName: string
@@ -66,9 +74,10 @@ export async function getPatchBuild(branch: {
       tag: string
       manifests: {
         category_id: string
+        matching_field?: string
         manifest: { id: string }
-        manifest_download: { url_prefix: string }
-        diff_download: { url_prefix: string }
+        manifest_download: { url_prefix: string; compression?: number; url_suffix?: string }
+        diff_download: { url_prefix: string; compression?: number; url_suffix?: string }
         stats?: Record<string, { compressed_size?: string; file_count?: string }>
       }[]
     }
@@ -79,9 +88,14 @@ export async function getPatchBuild(branch: {
     tag: json.data.tag,
     categories: (json.data.manifests ?? []).map((m) => ({
       categoryId: m.category_id,
+      matchingField: m.matching_field ?? '',
       manifestId: m.manifest.id,
       manifestUrlPrefix: m.manifest_download.url_prefix,
+      manifestCompression: m.manifest_download.compression ?? 1,
+      manifestSuffix: m.manifest_download.url_suffix ?? '',
       diffUrlPrefix: m.diff_download.url_prefix,
+      diffCompression: m.diff_download.compression ?? 1,
+      diffSuffix: m.diff_download.url_suffix ?? '',
       versions: Object.fromEntries(
         Object.entries(m.stats ?? {}).map(([k, v]) => [
           k,
@@ -133,6 +147,8 @@ const str = (b: Uint8Array): string => Buffer.from(b).toString('utf8')
 function parsePatchChunk(buf: Uint8Array): PatchChunk {
   const chunk: PatchChunk = {
     patchName: '',
+    patchFileSize: 0,
+    patchFileMd5: '',
     patchOffset: 0,
     patchLength: 0,
     originalFileName: '',
@@ -142,10 +158,12 @@ function parsePatchChunk(buf: Uint8Array): PatchChunk {
   for (const f of fields(buf)) {
     if (f.wire === 2 && f.sub) {
       if (f.field === 1) chunk.patchName = str(f.sub)
+      else if (f.field === 5) chunk.patchFileMd5 = str(f.sub)
       else if (f.field === 8) chunk.originalFileName = str(f.sub)
       else if (f.field === 10) chunk.originalFileMd5 = str(f.sub)
     } else if (f.wire === 0 && f.num !== undefined) {
-      if (f.field === 6) chunk.patchOffset = Number(f.num)
+      if (f.field === 4) chunk.patchFileSize = Number(f.num)
+      else if (f.field === 6) chunk.patchOffset = Number(f.num)
       else if (f.field === 7) chunk.patchLength = Number(f.num)
       else if (f.field === 9) chunk.originalFileLength = Number(f.num)
     }
@@ -213,6 +231,8 @@ async function fileMatches(path: string, size: number, md5: string): Promise<boo
 async function writeChunks(
   asset: SophonAsset,
   chunkPrefix: string,
+  compression: number,
+  suffix: string,
   destPath: string,
   signal: AbortSignal | undefined,
   onBytes: (n: number) => void
@@ -223,7 +243,9 @@ async function writeChunks(
     for (let i = 0; i < asset.chunks.length; i += CONCURRENCY) {
       if (signal?.aborted) throw new Error('已取消')
       const batch = asset.chunks.slice(i, i + CONCURRENCY)
-      const datas = await Promise.all(batch.map((c) => fetchChunk(chunkPrefix, c.name, signal)))
+      const datas = await Promise.all(
+        batch.map((c) => fetchChunk(chunkPrefix, c.name, signal, compression, suffix))
+      )
       for (let j = 0; j < batch.length; j++) {
         await handle.write(datas[j], 0, datas[j].length, batch[j].offset)
         onBytes(datas[j].length)
@@ -242,93 +264,222 @@ export async function applySophonPatch(
   patchBuild: PatchBuild,
   mainBuild: SophonBuild,
   localVersion: string,
-  gameDir: string,
+  originDir: string,
+  destDir: string,
   hpatchzPath: string,
   onProgress: (downloaded: number, total: number) => void,
-  signal?: AbortSignal
-): Promise<void> {
-  // Index main build assets for the DownloadOver fallback.
-  const mainAssets = new Map<string, { asset: SophonAsset; chunkPrefix: string }>()
+  signal?: AbortSignal,
+  audioLanguages: string[] = [],
+  ignoreFields: string[] = [],
+  cacheDir?: string,
+  cacheOnly = false,
+  blacklist: string[] = [],
+  applyDeletes = true
+): Promise<string[]> {
+  // Original files are read from `originDir` (the installed game) while the new
+  // files are written to `destDir` — for a pre-download these differ, so the
+  // game stays playable and only changed files are staged.
+  const mainAssets = new Map<
+    string,
+    { asset: SophonAsset; chunkPrefix: string; compression: number; suffix: string }
+  >()
   for (const category of mainBuild.categories) {
     const assets = await fetchManifest(category)
-    for (const asset of assets) mainAssets.set(asset.name, { asset, chunkPrefix: category.chunkUrlPrefix })
+    for (const asset of assets) {
+      mainAssets.set(asset.name, {
+        asset,
+        chunkPrefix: category.chunkUrlPrefix,
+        compression: category.chunkCompression,
+        suffix: category.chunkSuffix
+      })
+    }
   }
 
+  const installedAudio = new Set(audioLanguages)
+  const ignored = new Set(ignoreFields)
+  const selected = (field: string): boolean =>
+    !ignored.has(field) && !(isLanguageField(field) && !installedAudio.has(field))
   let total = 0
   for (const category of patchBuild.categories) {
+    if (!selected(category.matchingField)) continue
     total += category.versions[localVersion]?.compressedSize ?? 0
   }
   let downloaded = 0
   const patchCache = new Map<string, Buffer>()
+  const cachedPatches = new Set<string>()
+  const deletes: string[] = []
+  if (cacheDir) await fs.mkdir(cacheDir, { recursive: true })
   onProgress(0, total)
 
   for (const category of patchBuild.categories) {
+    if (!selected(category.matchingField)) continue
     if (!category.versions[localVersion]) continue
-    const url = `${category.manifestUrlPrefix}/${category.manifestId}`
+    const url = `${category.manifestUrlPrefix}/${category.manifestId}${category.manifestSuffix}`
     const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } })
     if (!res.ok) continue
-    const proto = parsePatchProto(decompress(new Uint8Array(await res.arrayBuffer())))
+    const manifestBytes = new Uint8Array(await res.arrayBuffer())
+    const proto = parsePatchProto(
+      category.manifestCompression ? decompress(manifestBytes) : manifestBytes
+    )
 
     for (const unused of proto.unusedAssets) {
       if (unused.versionTag !== localVersion) continue
       for (const file of unused.files) {
-        try {
-          await fs.rm(join(gameDir, ...file.fileName.split('/')), { force: true })
-        } catch {
-          /* ignore */
+        deletes.push(file.fileName)
+        if (applyDeletes) {
+          try {
+            await fs.rm(join(destDir, ...file.fileName.split('/')), { force: true })
+          } catch {
+            /* ignore */
+          }
         }
       }
     }
 
     for (const asset of proto.patchAssets) {
       if (signal?.aborted) throw new Error('已取消')
+      if (blacklist.includes(asset.assetName)) continue
       const info = asset.infos.find((i) => i.versionTag === localVersion)
       if (!info) continue // unchanged
       const chunk = info.chunk
-      const targetPath = join(gameDir, ...asset.assetName.split('/'))
+      const targetPath = join(destDir, ...asset.assetName.split('/'))
       const originalPath = join(
-        gameDir,
+        originDir,
         ...(chunk.originalFileName || asset.assetName).split('/')
       )
 
+      // Already staged correctly (e.g. from a partially completed pre-download)
+      // → nothing to do; this is what makes reusing a partial pre-download work.
+      const targetAsset = mainAssets.get(asset.assetName)
+      if (
+        targetAsset &&
+        (await fileMatches(targetPath, targetAsset.asset.size, targetAsset.asset.md5))
+      ) {
+        continue
+      }
+
+      let applied = false
       if (await fileMatches(originalPath, chunk.originalFileLength, chunk.originalFileMd5)) {
-        let patchData = patchCache.get(chunk.patchName)
-        if (!patchData) {
-          const pr = await fetch(`${category.diffUrlPrefix}/${chunk.patchName}`, {
-            headers: { 'User-Agent': 'Mozilla/5.0' },
-            signal
-          })
-          if (!pr.ok) throw new Error(`下载补丁文件失败 HTTP ${pr.status}`)
-          patchData = Buffer.from(await pr.arrayBuffer())
-          patchCache.set(chunk.patchName, patchData)
-        }
-        const fragment = patchData.subarray(chunk.patchOffset, chunk.patchOffset + chunk.patchLength)
-        const diffTmp = `${targetPath}.hdiff.tmp`
-        const outTmp = `${targetPath}.new.tmp`
-        await fs.writeFile(diffTmp, fragment)
         try {
-          await exec(hpatchzPath, ['-f', originalPath, diffTmp, outTmp], {
-            windowsHide: true,
-            maxBuffer: 16 * 1024 * 1024
-          })
-          await fs.rm(targetPath, { force: true })
-          await fs.rename(outTmp, targetPath)
-        } finally {
-          await fs.rm(diffTmp, { force: true })
-          await fs.rm(outTmp, { force: true })
+          let raw: Uint8Array
+          const ldiffPath = cacheDir ? join(cacheDir, chunk.patchName) : null
+          if (ldiffPath) {
+            let present = false
+            try {
+              present = (await fs.stat(ldiffPath)).size === chunk.patchFileSize
+              if (present && chunk.patchFileMd5) {
+                present = (await md5File(ldiffPath)) === chunk.patchFileMd5
+              }
+            } catch {
+              present = false
+            }
+            if (!present) {
+              const pr = await fetch(
+                `${category.diffUrlPrefix}/${chunk.patchName}${category.diffSuffix}`,
+                { headers: { 'User-Agent': 'Mozilla/5.0' }, signal }
+              )
+              if (!pr.ok) throw new Error(`下载补丁文件失败 HTTP ${pr.status}`)
+              const data = Buffer.from(await pr.arrayBuffer())
+              await fs.writeFile(ldiffPath, data)
+              if (chunk.patchFileMd5 && (await md5File(ldiffPath)) !== chunk.patchFileMd5) {
+                throw new Error(`补丁文件校验失败：${chunk.patchName}`)
+              }
+              if (!cachedPatches.has(chunk.patchName)) {
+                cachedPatches.add(chunk.patchName)
+                downloaded += data.length
+                onProgress(downloaded, total)
+              }
+            } else if (!cachedPatches.has(chunk.patchName)) {
+              cachedPatches.add(chunk.patchName)
+              downloaded += chunk.patchFileSize
+              onProgress(downloaded, total)
+            }
+            if (cacheOnly) continue
+            const handle = await fs.open(ldiffPath, 'r')
+            const slice = Buffer.alloc(chunk.patchLength)
+            await handle.read(slice, 0, chunk.patchLength, chunk.patchOffset)
+            await handle.close()
+            raw = slice
+          } else {
+            let patchData = patchCache.get(chunk.patchName)
+            if (!patchData) {
+              const pr = await fetch(
+                `${category.diffUrlPrefix}/${chunk.patchName}${category.diffSuffix}`,
+                { headers: { 'User-Agent': 'Mozilla/5.0' }, signal }
+              )
+              if (!pr.ok) throw new Error(`下载补丁文件失败 HTTP ${pr.status}`)
+              patchData = Buffer.from(await pr.arrayBuffer())
+              patchCache.set(chunk.patchName, patchData)
+            }
+            raw = patchData.subarray(chunk.patchOffset, chunk.patchOffset + chunk.patchLength)
+          }
+          let fragment: Uint8Array = raw
+          if (category.diffCompression) {
+            // Starward's HPatch.PatchZstandard zstd-decompresses the diff stream;
+            // a failure falls through to a full-file download below.
+            fragment = decompress(raw)
+          }
+          const diffTmp = `${targetPath}.hdiff.tmp`
+          const outTmp = `${targetPath}.new.tmp`
+          await fs.writeFile(diffTmp, fragment)
+          try {
+            await exec(hpatchzPath, ['-f', originalPath, diffTmp, outTmp], {
+              windowsHide: true,
+              maxBuffer: 16 * 1024 * 1024
+            })
+            await fs.rm(targetPath, { force: true })
+            await fs.rename(outTmp, targetPath)
+            // E27: verify the patched file against the target manifest; a mismatch
+            // fails the update (no full-file fallback, like Starward).
+            if (
+              targetAsset &&
+              !(await fileMatches(targetPath, targetAsset.asset.size, targetAsset.asset.md5))
+            ) {
+              throw new Error(`文件校验失败：${asset.assetName}`)
+            }
+            applied = true
+            if (!cacheDir) downloaded += chunk.patchLength
+          } finally {
+            await fs.rm(diffTmp, { force: true })
+            await fs.rm(outTmp, { force: true })
+          }
+        } catch (error) {
+          // Starward fails the patch here; we do not fall back to a full download.
+          throw new Error(`补丁应用失败：${asset.assetName}（${(error as Error).message}）`)
         }
-        downloaded += chunk.patchLength
-      } else {
-        // Original file missing/mismatched → download the full file.
+      }
+      if (cacheOnly) continue
+      if (!applied) {
         const entry = mainAssets.get(asset.assetName)
         if (entry) {
-          await writeChunks(entry.asset, entry.chunkPrefix, targetPath, signal, (n) => {
-            downloaded += n
-            onProgress(downloaded, total)
-          })
+          await writeChunks(
+            entry.asset,
+            entry.chunkPrefix,
+            entry.compression,
+            entry.suffix,
+            targetPath,
+            signal,
+            (n) => {
+              downloaded += n
+              onProgress(downloaded, total)
+            }
+          )
+          // Verify the full-file fallback too (Starward checks every file).
+          if (
+            targetAsset &&
+            !(await fileMatches(targetPath, targetAsset.asset.size, targetAsset.asset.md5))
+          ) {
+            throw new Error(`文件校验失败：${asset.assetName}`)
+          }
         }
       }
       onProgress(downloaded, total)
     }
   }
+
+  // The ldiff cache is no longer needed once the files are patched.
+  if (cacheDir && !cacheOnly) {
+    await fs.rm(cacheDir, { recursive: true, force: true }).catch(() => undefined)
+  }
+  return deletes
 }

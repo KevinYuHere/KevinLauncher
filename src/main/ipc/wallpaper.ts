@@ -26,6 +26,10 @@ function clampIndex(entry: AppEntry): void {
 
 /** Wallpaper lists (add / remove / reorder / rotate) for the picked app. */
 export function registerWallpaperIpc(): void {
+  // Current Windows desktop wallpaper — used as the background when the
+  // launcher has no apps yet.
+  ipcMain.handle('wallpaper:desktop', () => getDesktopWallpaper())
+
   ipcMain.handle('wallpaper:pick', async () => {
     const result = await dialog.showOpenDialog({
       properties: ['openFile', 'multiSelections'],

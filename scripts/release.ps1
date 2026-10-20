@@ -15,7 +15,8 @@ param(
   [string]$Notes = '',
   [string]$FakeElectron = '',
   [switch]$SkipUpload,
-  [switch]$Draft
+  [switch]$Draft,
+  [switch]$Prerelease
 )
 
 $ErrorActionPreference = 'Stop'
@@ -98,9 +99,11 @@ $ErrorActionPreference = 'Stop'
 if ($exists) {
   Write-Host "release $tag exists -> uploading with --clobber" -ForegroundColor Yellow
   & $gh release upload $tag @assets --clobber
+  if ($Prerelease) { & $gh release edit $tag --prerelease }
 } else {
   $createArgs = @('release', 'create', $tag) + $assets + @('--title', "KevinLauncher $Version", '--notes-file', $notesFile)
   if ($Draft) { $createArgs += '--draft' }
+  if ($Prerelease) { $createArgs += '--prerelease' }
   & $gh @createArgs
 }
 if ($LASTEXITCODE -ne 0) { throw 'gh release failed' }

@@ -25,6 +25,7 @@ export interface LauncherConfig {
     afterLaunch?: 'none' | 'minimize' | 'tray' | 'close'
     autoStart?: 'off' | 'window' | 'tray'
     sidebarMaterial?: boolean
+    updateChannel?: 'stable' | 'beta'
   }
 }
 
@@ -128,6 +129,7 @@ export class AppStore {
     afterLaunch: 'none' | 'minimize' | 'tray' | 'close'
     autoStart: 'off' | 'window' | 'tray'
     sidebarMaterial: boolean
+    updateChannel: 'stable' | 'beta'
   }> {
     const config = await this.load()
     return {
@@ -136,7 +138,8 @@ export class AppStore {
       closeAction: config.launcher?.closeAction ?? 'close',
       afterLaunch: config.launcher?.afterLaunch ?? 'none',
       autoStart: config.launcher?.autoStart ?? 'off',
-      sidebarMaterial: config.launcher?.sidebarMaterial ?? true
+      sidebarMaterial: config.launcher?.sidebarMaterial ?? true,
+      updateChannel: config.launcher?.updateChannel ?? 'stable'
     }
   }
 
@@ -147,6 +150,7 @@ export class AppStore {
     afterLaunch?: 'none' | 'minimize' | 'tray' | 'close'
     autoStart?: 'off' | 'window' | 'tray'
     sidebarMaterial?: boolean
+    updateChannel?: 'stable' | 'beta'
   }): Promise<void> {
     const config = await this.load()
     config.launcher = { ...config.launcher, ...patch }

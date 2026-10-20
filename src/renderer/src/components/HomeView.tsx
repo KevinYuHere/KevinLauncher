@@ -255,7 +255,9 @@ export default function HomeView({
   const progress = status?.progress ?? 0
   const preActive = (active || paused) && status?.mode === 'preDownload'
   const mainActive = (active || paused) && status?.mode === 'update'
-  const preAvailable = !active && !paused && !!updateInfo?.preDownloadVersion
+  const preDone = status?.phase === 'done' && status?.mode === 'preDownload'
+  const preAvailable =
+    !active && !paused && !preDone && !updateInfo?.preDownloadFinished && !!updateInfo?.preDownloadVersion
   const updateAvailable = !!updateInfo?.hasUpdate
 
   const remaining =
@@ -634,7 +636,11 @@ export default function HomeView({
   let launchProgress: number | null = null
   let launchRing: RingTone = 'pre'
   let launchClick = onLaunch
-  const idleLaunch = !running && !mainActive && !updateAvailable && !preActive && !preAvailable
+  // The cap circle is the update / pre-download control. A pre-download merely
+  // being *available* must never replace the launch action (that made the launch
+  // button dead whenever a pre-download existed).
+  let circleClick: (() => void) | undefined
+  const idleLaunch = !running && !mainActive && !updateAvailable && !preActive
   if (running) {
     launchLabel = '停止'
     launchTone = 'stop'
@@ -645,6 +651,7 @@ export default function HomeView({
     launchProgress = progress
     launchRing = 'update'
     launchClick = onUpdateToggle
+    circleClick = onUpdateToggle
   } else if (updateAvailable) {
     launchLabel = '开始更新'
     launchTone = 'update'
@@ -652,8 +659,9 @@ export default function HomeView({
   } else if (preActive) {
     launchProgress = progress
     launchClick = onPreDownloadToggle
+    circleClick = onPreDownloadToggle
   } else if (preAvailable) {
-    launchClick = onPreDownloadToggle
+    circleClick = onPreDownloadToggle
   }
   // While the drawer is open the button shows the default method's name.
   if (idleLaunch && picker?.kind === 'launch') {
@@ -884,6 +892,7 @@ export default function HomeView({
             idleIcon={launchIcon}
             selected={picker?.kind === 'launch' && pickHighlight === 'default'}
             onButtonClick={launchButtonClick}
+            onCircleClick={circleClick}
             popup={popup}
             boundsRef={stageRef}
             onLongPress={

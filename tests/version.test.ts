@@ -16,9 +16,12 @@ describe('compareVersions', () => {
     expect(compareVersions('1.9.9', '2.0.0')).toBeLessThan(0)
   })
 
-  it('ignores pre-release / build suffixes', () => {
-    expect(compareVersions('1.4.0-beta.2', '1.4.0')).toBe(0)
+  it('orders pre-releases below the release and ignores build metadata', () => {
+    expect(compareVersions('1.4.0-beta.2', '1.4.0')).toBeLessThan(0)
     expect(compareVersions('1.4.0+build7', '1.4.0')).toBe(0)
+    expect(compareVersions('1.4.0-beta.2', '1.4.0-beta.10')).toBeLessThan(0)
+    expect(compareVersions('1.4.0-alpha', '1.4.0-beta')).toBeLessThan(0)
+    expect(compareVersions('1.4.0-beta', '1.3.9')).toBeGreaterThan(0)
   })
 
   it('handles missing segments', () => {
@@ -33,5 +36,9 @@ describe('isNewerVersion', () => {
     expect(isNewerVersion('v0.1.0', '0.0.9')).toBe(true)
     expect(isNewerVersion('0.0.1', '0.0.1')).toBe(false)
     expect(isNewerVersion('0.0.1', '0.0.2')).toBe(false)
+    // A release is newer than its pre-release; a newer core beats both.
+    expect(isNewerVersion('1.4.0', '1.4.0-beta.2')).toBe(true)
+    expect(isNewerVersion('1.4.0-beta.2', '1.4.0')).toBe(false)
+    expect(isNewerVersion('1.4.0-beta.2', '1.4.0-beta.10')).toBe(false)
   })
 })

@@ -64,7 +64,14 @@ function makeAsset(name: string, chunkNames: string[]): SophonAsset {
   let offset = 0
   const chunks: SophonChunk[] = []
   for (const c of chunkNames) {
-    chunks.push({ name: c, offset, size: 4, sizeDecompressed: 4 })
+    chunks.push({
+      name: c,
+      uncompressedMd5: '',
+      compressedMd5: '',
+      offset,
+      size: zstd(chunkBody(c)).length,
+      sizeDecompressed: 4
+    })
     offset += 4
     chunkBodies.set(c, chunkBody(c))
   }
@@ -137,9 +144,14 @@ function makeBuild(): SophonBuild {
       {
         categoryId: 'cat',
         categoryName: 'cat',
+        matchingField: 'game',
         manifestId: 'manifest-1',
         manifestUrlPrefix: `${baseUrl}/manifest`,
+        manifestCompression: 1,
+        manifestSuffix: '',
         chunkUrlPrefix: `${baseUrl}/chunk`,
+        chunkCompression: 1,
+        chunkSuffix: '',
         compressedSize: 0
       }
     ]
@@ -206,34 +218,51 @@ describe.skipIf(!hasZstd)('downloadSophonBuild', () => {
     const dest = await tmpDir()
     await fs.writeFile(join(dest, 'keep.bin'), expectedContent(['k1', 'k2']))
 
-    await downloadSophonBuild(makeBuild(), dest, () => {}, undefined, true)
+    await downloadSophonBuild(makeBuild(), dest, () => {}, undefined, { skipUnchanged: true })
 
     expect(chunkReqs.size).toBe(0)
   })
 
-  it('completes an update from a partially pre-downloaded build', async () => {
+  it('resumes from the raw chunk cache (pre-download)', async () => {
     const done = makeAsset('done.bin', ['d1', 'd2'])
-    const partial = makeAsset('partial.bin', ['p1', 'p2'])
-    manifestZstd = zstd(encodeManifest([done, partial]))
+    const changed = makeAsset('partial.bin', ['p1', 'p2'])
+    manifestZstd = zstd(encodeManifest([done, changed]))
 
-    // Pre-download was cancelled halfway: done.bin is complete, partial.bin only
-    // has its first chunk.
-    const pre = await tmpDir()
-    await fs.writeFile(join(pre, 'done.bin'), expectedContent(['d1', 'd2']))
-    await fs.writeFile(join(pre, 'partial.bin'), expectedContent(['p1']))
+    const dest = await tmpDir()
+    const cache = await tmpDir()
+    // `done.bin` is already installed; `p1` was cached by an earlier run.
+    await fs.writeFile(join(dest, 'done.bin'), expectedContent(['d1', 'd2']))
+    await fs.writeFile(join(cache, 'p1'), zstd(chunkBody('p1')))
 
-    // "promote": updateManager copies the staged pre-download into the game dir.
-    const game = await tmpDir()
-    await fs.cp(pre, game, { recursive: true })
+    await downloadSophonBuild(makeBuild(), dest, () => {}, undefined, {
+      skipUnchanged: true,
+      cacheDir: cache
+    })
 
-    await downloadSophonBuild(makeBuild(), game, () => {}, undefined, true)
-
-    expect(md5(await read(join(game, 'done.bin')))).toBe(done.md5)
-    expect(md5(await read(join(game, 'partial.bin')))).toBe(partial.md5)
-    // The complete file is reused, the incomplete one is re-downloaded.
+    expect(md5(await read(join(dest, 'partial.bin')))).toBe(changed.md5)
+    // Unchanged file and cached chunk are reused; only `p2` is fetched.
     expect(chunkReqs.has('d1')).toBe(false)
     expect(chunkReqs.has('d2')).toBe(false)
-    expect(chunkReqs.get('p1')).toBe(1)
+    expect(chunkReqs.has('p1')).toBe(false)
     expect(chunkReqs.get('p2')).toBe(1)
+    // The cache is removed once the files are assembled.
+    await expect(fs.readdir(cache)).rejects.toBeTruthy()
+  })
+
+  it('pre-download only fills the chunk cache (cacheOnly)', async () => {
+    const changed = makeAsset('partial.bin', ['p1', 'p2'])
+    manifestZstd = zstd(encodeManifest([changed]))
+    const dest = await tmpDir()
+    const cache = await tmpDir()
+
+    await downloadSophonBuild(makeBuild(), dest, () => {}, undefined, {
+      skipUnchanged: true,
+      cacheDir: cache,
+      cacheOnly: true
+    })
+
+    // Both chunks cached, but no game file assembled yet.
+    expect((await fs.readdir(cache)).sort()).toEqual(['p1', 'p2'])
+    await expect(fs.stat(join(dest, 'partial.bin'))).rejects.toBeTruthy()
   })
 })

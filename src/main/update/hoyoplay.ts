@@ -1,6 +1,8 @@
 import { promises as fs } from 'fs'
 import { join } from 'path'
 import type { UpdateInfo } from '@shared/types'
+import { getSophonBuild, isLanguageField } from './sophon'
+import { getPatchBuild } from './sophonPatch'
 
 const API_BASE = 'https://hyp-api.mihoyo.com/hyp/hyp-connect/api'
 /** China official HoYoPlay launcher id (Global is VYTpXlbWo8). */
@@ -16,6 +18,8 @@ export interface PackageFile {
   md5?: string
   size: number
   name: string
+  /** Voice-language field for audio packages (`zh-cn`, …); absent for game pkgs. */
+  language?: string
 }
 
 export interface VersionPackage {
@@ -51,9 +55,15 @@ function basename(url: string): string {
   }
 }
 
-function toFile(pkg: RawPkg): PackageFile {
+function toFile(pkg: RawPkg & { language?: string }): PackageFile {
   const url = pkg.url ?? ''
-  return { url, md5: pkg.md5, size: Number(pkg.size ?? 0), name: basename(url) }
+  return {
+    url,
+    md5: pkg.md5,
+    size: Number(pkg.size ?? 0),
+    name: basename(url),
+    language: pkg.language
+  }
 }
 
 function toVersionPackage(pkg: RawPackage | undefined): VersionPackage | null {
@@ -75,7 +85,7 @@ export async function getHoYoPackages(
   const url = new URL(`${API_BASE}/getGamePackages`)
   url.searchParams.set('launcher_id', LAUNCHER_ID)
   url.searchParams.set('game_ids[]', GAME_IDS[game])
-  url.searchParams.set('language', 'zh-cn')
+  url.searchParams.set('language', 'en-us')
 
   const res = await fetch(url.toString(), { headers: { 'User-Agent': 'Mozilla/5.0' } })
   const json = (await res.json()) as {
@@ -88,6 +98,39 @@ export async function getHoYoPackages(
   return {
     main: toVersionPackage(pkg?.main),
     preDownload: toVersionPackage(pkg?.pre_download)
+  }
+}
+
+/** Advertised update size: patch delta when available, else the chunk build total. */
+async function computeTargetSize(
+  branch: BranchPackage,
+  localVersion: string | null,
+  audio: string[]
+): Promise<number> {
+  const wanted = (field: string): boolean => !isLanguageField(field) || audio.includes(field)
+  try {
+    const patch = await getPatchBuild(branch)
+    if (localVersion) {
+      let sum = 0
+      for (const category of patch.categories) {
+        if (!wanted(category.matchingField)) continue
+        sum += category.versions[localVersion]?.compressedSize ?? 0
+      }
+      if (sum > 0) return sum
+    }
+  } catch {
+    /* no patch build */
+  }
+  try {
+    const build = await getSophonBuild(branch)
+    let sum = 0
+    for (const category of build.categories) {
+      if (!wanted(category.matchingField)) continue
+      sum += category.compressedSize
+    }
+    return sum
+  } catch {
+    return 0
   }
 }
 
@@ -107,11 +150,49 @@ export async function getHoYoUpdateInfo(
   }
   try {
     info.currentVersion = (await readGameVersion(gameDir)) || null
-    const branches = await getGameBranches(game)
-    info.latestVersion = branches.main?.tag ?? null
-    info.preDownloadVersion = branches.preDownload?.tag ?? null
-    if (info.currentVersion && info.latestVersion) {
-      info.hasUpdate = compareVersion(info.currentVersion, info.latestVersion) < 0
+    let latest: string | null = null
+    let pd: string | null = null
+    let mainBranch: BranchPackage | null = null
+    let preBranch: BranchPackage | null = null
+    try {
+      const branches = await getGameBranches(game)
+      mainBranch = branches.main
+      preBranch = branches.preDownload
+      latest = mainBranch?.tag ?? null
+      pd = preBranch?.tag ?? null
+    } catch {
+      /* branch API unavailable — fall back to the package API below */
+    }
+    if (!latest) {
+      const packages = await getHoYoPackages(game)
+      latest = packages.main?.version ?? null
+      pd = packages.preDownload?.version ?? null
+    }
+    info.latestVersion = latest
+    if (info.currentVersion && latest) {
+      info.hasUpdate = compareVersion(info.currentVersion, latest) < 0
+    }
+    // Starward only offers a pre-download when it is *newer* than the installed
+    // version (`predownload > local`); completion is recorded by a
+    // `predownload=local,version` marker in the game's config.ini.
+    const pdNewer = !!info.currentVersion && !!pd && compareVersion(info.currentVersion, pd) < 0
+    info.preDownloadVersion = pdNewer ? pd : null
+    if (pdNewer && info.currentVersion && pd) {
+      const langs = audioEnumNames(await detectAudioLanguages(gameDir))
+      info.preDownloadFinished =
+        (await readPredownloadMarker(gameDir)) === `${info.currentVersion},${pd},${langs}`
+    }
+    // F35: advertised sizes (patch delta, or the chunk build total).
+    try {
+      const audio = await detectAudioLanguages(gameDir)
+      if (mainBranch) {
+        info.mainSizeBytes = await computeTargetSize(mainBranch, info.currentVersion, audio)
+      }
+      if (preBranch && info.preDownloadVersion) {
+        info.preDownloadSizeBytes = await computeTargetSize(preBranch, info.currentVersion, audio)
+      }
+    } catch {
+      /* sizes are best-effort */
     }
     if (!info.hasUpdate) info.message = '已是最新版本'
   } catch (error) {
@@ -120,15 +201,67 @@ export async function getHoYoUpdateInfo(
   return info
 }
 
-/** Read the installed game version from `<gameDir>/config.ini`. */
+/** Read the installed game version from `<gameDir>/config.ini` (last match, like Starward). */
 export async function readGameVersion(gameDir: string): Promise<string> {
   try {
     const ini = await fs.readFile(join(gameDir, 'config.ini'), 'utf-8')
-    const match = /(?:^|\n)\s*game_version\s*=\s*([0-9][0-9.]*)/i.exec(ini)
-    return match ? match[1].trim() : ''
+    const matches = [...ini.matchAll(/(?:^|\n)\s*game_version\s*=\s*([0-9][0-9.]*)/gi)]
+    const value = matches.length ? (matches[matches.length - 1][1] ?? '').trim() : ''
+    // `.NET Version.TryParse` accepts 1–4 numeric parts; reject anything else.
+    return /^\d+(\.\d+){0,3}$/.test(value) ? value : ''
   } catch {
     return ''
   }
+}
+
+/** The `predownload=` marker Starward writes into `config.ini` (or null). */
+export async function readPredownloadMarker(gameDir: string): Promise<string | null> {
+  try {
+    const ini = await fs.readFile(join(gameDir, 'config.ini'), 'utf-8')
+    const matches = [...ini.matchAll(/(?:^|\n)\s*predownload\s*=\s*([^\r\n]*)/gi)]
+    const value = matches.length ? matches[matches.length - 1][1].trim() : ''
+    return value || null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Voice languages already installed — KevinLauncher has no voice-language setting,
+ * so the `Audio_<lang>_pkg_version` files in the game root are the source (a
+ * player may have several).
+ */
+export async function detectAudioLanguages(gameDir: string): Promise<string[]> {
+  const table: [string, string][] = [
+    ['Audio_Chinese_pkg_version', 'zh-cn'],
+    ['Audio_English(US)_pkg_version', 'en-us'],
+    ['Audio_Japanese_pkg_version', 'ja-jp'],
+    ['Audio_Korean_pkg_version', 'ko-kr']
+  ]
+  const installed: string[] = []
+  for (const [file, field] of table) {
+    try {
+      await fs.access(join(gameDir, file))
+      installed.push(field)
+    } catch {
+      /* not installed */
+    }
+  }
+  return installed
+}
+
+/** Format voice languages like Starward's `AudioLanguage.ToString()` ("Chinese, Japanese"). */
+export function audioEnumNames(fields: string[]): string {
+  const names: Record<string, string> = {
+    'zh-cn': 'Chinese',
+    'en-us': 'English',
+    'ja-jp': 'Japanese',
+    'ko-kr': 'Korean'
+  }
+  return fields
+    .map((field) => names[field])
+    .filter((name): name is string => !!name)
+    .join(', ')
 }
 
 interface GameBranchPackage {
@@ -136,6 +269,7 @@ interface GameBranchPackage {
   branch?: string
   password?: string
   tag?: string
+  diff_tags?: string[]
 }
 interface GameBranchEntry {
   main?: GameBranchPackage
@@ -147,11 +281,19 @@ export interface BranchPackage {
   branch: string
   password: string
   tag: string
+  /** Install versions a patch (diff) build can update from. */
+  diffTags: string[]
 }
 
 function toBranchPackage(pkg: GameBranchPackage | undefined): BranchPackage | null {
   if (!pkg?.package_id || !pkg.branch || !pkg.password) return null
-  return { packageId: pkg.package_id, branch: pkg.branch, password: pkg.password, tag: pkg.tag ?? '' }
+  return {
+    packageId: pkg.package_id,
+    branch: pkg.branch,
+    password: pkg.password,
+    tag: pkg.tag ?? '',
+    diffTags: Array.isArray(pkg.diff_tags) ? pkg.diff_tags : []
+  }
 }
 
 /**
@@ -164,7 +306,7 @@ export async function getGameBranches(
   const url = new URL(`${API_BASE}/getGameBranches`)
   url.searchParams.set('launcher_id', LAUNCHER_ID)
   url.searchParams.set('game_ids[]', GAME_IDS[game])
-  url.searchParams.set('language', 'zh-cn')
+  url.searchParams.set('language', 'en-us')
   const res = await fetch(url.toString(), { headers: { 'User-Agent': 'Mozilla/5.0' } })
   const json = (await res.json()) as {
     retcode: number
@@ -179,6 +321,115 @@ export async function getGameBranches(
   }
 }
 
+export interface HoYoGameConfig {
+  defaultDownloadMode: string
+  audioScanDir: string
+  audioResDir: string
+  audioCacheDir: string
+  resCategoryDir: string
+  blacklistDir: string
+  enableBlacklist: boolean
+  enableAudioPkgMgmt: boolean
+}
+
+/** Launcher config: download mode, audio dirs, resource-category / blacklist. */
+export async function getGameConfig(
+  game: 'genshin' | 'starrail' | 'zzz'
+): Promise<HoYoGameConfig | null> {
+  const url = new URL(`${API_BASE}/getGameConfigs`)
+  url.searchParams.set('launcher_id', LAUNCHER_ID)
+  url.searchParams.set('game_ids[]', GAME_IDS[game])
+  url.searchParams.set('language', 'en-us')
+  const res = await fetch(url.toString(), { headers: { 'User-Agent': 'Mozilla/5.0' } })
+  const json = (await res.json()) as {
+    retcode: number
+    message: string
+    data?: {
+      launch_configs?: {
+        default_download_mode?: string
+        audio_pkg_scan_dir?: string
+        audio_pkg_res_dir?: string
+        audio_pkg_cache_dir?: string
+        res_category_dir?: string
+        blacklist_dir?: string
+        enable_resource_blacklist?: boolean
+        enable_audio_pkg_mgmt?: boolean
+      }[]
+    }
+  }
+  if (json.retcode !== 0) throw new Error(json.message || `getGameConfigs 返回 ${json.retcode}`)
+  const c = json.data?.launch_configs?.[0]
+  if (!c) return null
+  return {
+    defaultDownloadMode: c.default_download_mode ?? '',
+    audioScanDir: c.audio_pkg_scan_dir ?? '',
+    audioResDir: c.audio_pkg_res_dir ?? '',
+    audioCacheDir: c.audio_pkg_cache_dir ?? '',
+    resCategoryDir: c.res_category_dir ?? '',
+    blacklistDir: c.blacklist_dir ?? '',
+    enableBlacklist: !!c.enable_resource_blacklist,
+    enableAudioPkgMgmt: !!c.enable_audio_pkg_mgmt
+  }
+}
+
+export async function getGameChannelSDK(
+  game: 'genshin' | 'starrail' | 'zzz'
+): Promise<string | null> {
+  try {
+    const url = new URL(`${API_BASE}/getGameChannelSDKs`)
+    url.searchParams.set('launcher_id', LAUNCHER_ID)
+    url.searchParams.set('game_ids[]', GAME_IDS[game])
+    url.searchParams.set('language', 'en-us')
+    const res = await fetch(url.toString(), { headers: { 'User-Agent': 'Mozilla/5.0' } })
+    const json = (await res.json()) as {
+      retcode: number
+      data?: { game_channel_sdks?: { version?: string }[] }
+    }
+    return json.data?.game_channel_sdks?.[0]?.version ?? null
+  } catch {
+    return null
+  }
+}
+
+export async function getGameDeprecatedFiles(
+  game: 'genshin' | 'starrail' | 'zzz'
+): Promise<string[]> {
+  try {
+    const url = new URL(`${API_BASE}/getGameDeprecatedFileConfigs`)
+    url.searchParams.set('launcher_id', LAUNCHER_ID)
+    url.searchParams.set('game_ids[]', GAME_IDS[game])
+    url.searchParams.set('language', 'en-us')
+    const res = await fetch(url.toString(), { headers: { 'User-Agent': 'Mozilla/5.0' } })
+    const json = (await res.json()) as {
+      retcode: number
+      data?: { deprecated_file_configs?: { deprecated_files?: { name?: string }[] }[] }
+    }
+    return (json.data?.deprecated_file_configs?.[0]?.deprecated_files ?? [])
+      .map((file) => file.name)
+      .filter((name): name is string => !!name)
+  } catch {
+    return []
+  }
+}
+
+export async function getWPFPackageVersion(
+  game: 'genshin' | 'starrail' | 'zzz'
+): Promise<string | null> {
+  try {
+    const url = new URL(`${API_BASE}/getWPFPackages`)
+    url.searchParams.set('launcher_id', LAUNCHER_ID)
+    url.searchParams.set('game_ids[]', GAME_IDS[game])
+    url.searchParams.set('language', 'en-us')
+    const res = await fetch(url.toString(), { headers: { 'User-Agent': 'Mozilla/5.0' } })
+    const json = (await res.json()) as {
+      retcode: number
+      data?: { wpf_packages?: { wpf_package?: { version?: string } }[] }
+    }
+    return json.data?.wpf_packages?.[0]?.wpf_package?.version ?? null
+  } catch {
+    return null
+  }
+}
 /** Numeric dotted-version comparison. */
 export function compareVersion(a: string, b: string): number {
   const pa = a.split('.').map((n) => parseInt(n, 10) || 0)

@@ -441,6 +441,8 @@ export interface UpdateInfo {
   currentVersion: string | null
   latestVersion: string | null
   preDownloadVersion: string | null
+  /** A pre-download for `preDownloadVersion` is already completed (config.ini marker). */
+  preDownloadFinished?: boolean
   hasUpdate: boolean
   /** Whether this launcher can download/apply the update. */
   supported: boolean
@@ -488,6 +490,8 @@ export type CloseAction = 'close' | 'tray'
 export type AfterLaunchAction = 'none' | 'minimize' | 'tray' | 'close'
 /** Launch-at-login behaviour: off, show the window, or start hidden in the tray. */
 export type AutoStartMode = 'off' | 'window' | 'tray'
+/** Which GitHub releases the launcher self-updater follows. */
+export type UpdateChannel = 'stable' | 'beta'
 
 /** Launcher-wide (global) appearance + behavior settings. */
 export interface LauncherSettings {
@@ -501,6 +505,8 @@ export interface LauncherSettings {
   autoStart: AutoStartMode
   /** 侧边栏是否应用当前应用的玻璃材质（否则用主题色）。 */
   sidebarMaterial: boolean
+  /** Follow stable releases or also pre-releases (测试版). */
+  updateChannel: UpdateChannel
 }
 
 /** A newer release found on GitHub (self-update). */
@@ -653,6 +659,8 @@ export interface KevinApi {
   /** Installed font family names (for the launcher font picker). */
   listFonts(): Promise<string[]>
   appVersion(): Promise<string>
+  /** Current Windows desktop wallpaper path (used when there are no apps). */
+  desktopWallpaper(): Promise<string | null>
   getLauncherSettings(): Promise<LauncherSettings>
   setLauncherIcon(dataUrl: string | null): Promise<LauncherSettings>
   setLauncherFont(family: string | null): Promise<LauncherSettings>
@@ -661,6 +669,7 @@ export interface KevinApi {
     afterLaunch?: AfterLaunchAction
     autoStart?: AutoStartMode
     sidebarMaterial?: boolean
+    updateChannel?: UpdateChannel
   }): Promise<LauncherSettings>
   /** 抽卡记录里是否显示次高品级（每个应用独立）。 */
   setGachaShowSecond(appId: string, value: boolean): Promise<AppEntry>

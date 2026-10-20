@@ -119,13 +119,17 @@ jobs:
             fi
             ls -lh "$asset"
           done
+          # Pre-release versions (`1.2.5-beta.1`) are published as pre-releases, so
+          # the stable channel (`releases/latest`) keeps ignoring them.
+          prerelease_flag=()
+          if [[ "$version" == *-* ]]; then prerelease_flag=(--prerelease); fi
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" "${assets[@]}" --clobber
-            gh release edit "$tag" --notes-file release/RELEASE_NOTES.md
+            gh release edit "$tag" --notes-file release/RELEASE_NOTES.md "${prerelease_flag[@]}"
           else
             gh release create "$tag" "${assets[@]}" \
               --title "KevinLauncher $version" \
-              --notes-file release/RELEASE_NOTES.md
+              --notes-file release/RELEASE_NOTES.md "${prerelease_flag[@]}"
           fi
 
       - name: Upload build artifacts (for inspection)
