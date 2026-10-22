@@ -134,6 +134,51 @@ const SHEEN =
   'linear-gradient(120deg, rgba(255,255,255,0) 30%, rgba(255,255,255,0.2) 47%, rgba(255,255,255,0) 64%)'
 
 /**
+ * 星霜 texture: sparse frost-shard triangles with a few star glints, tiled.
+ * The tile is deliberately large (360px) so the repeat is hard to spot on a
+ * wide card; `grain` controls its opacity, keeping the material setting useful.
+ */
+function frostDataUri(grain: number): string {
+  const a = (Math.max(0, Math.min(100, grain)) / 100) * 0.55
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="360" height="360">` +
+    `<g fill="none" stroke="#e6f6ff" stroke-opacity="${a.toFixed(3)}" stroke-width=".6">` +
+    `<path d="M28 46 64 108H-4z"/>` +
+    `<path d="M216 24 246 72H186z"/>` +
+    `<path d="M300 150 340 214H260z"/>` +
+    `<path d="M120 236 144 278H96z"/>` +
+    `<path d="M304 58 330 98H278z"/>` +
+    `<path d="M52 286 80 332H24z"/>` +
+    `<path d="M188 150 214 192H162z"/>` +
+    `<path d="M330 288 356 330H304z"/>` +
+    `<path d="M140 30 160 62H120z"/>` +
+    `<path d="M250 250 276 292H224z"/>` +
+    `<path d="M14 214 34 246H-6z"/>` +
+    `<path d="M268 118 288 150H248z"/>` +
+    `</g>` +
+    `<g fill="#8b7cf6" fill-opacity="${(a * 0.72).toFixed(3)}">` +
+    `<path d="M164 92 186 126H142z"/>` +
+    `<path d="M24 180 45 214H3z"/>` +
+    `<path d="M286 200 306 232H266z"/>` +
+    `<path d="M96 124 112 150H80z"/>` +
+    `<path d="M204 316 224 348H184z"/>` +
+    `</g>` +
+    `<g fill="#7dd3fc" fill-opacity="${(a * 0.55).toFixed(3)}">` +
+    `<path d="M230 310 252 344H208z"/>` +
+    `<path d="M60 60 76 86H44z"/>` +
+    `<path d="M154 196 170 222H138z"/>` +
+    `</g>` +
+    `<g fill="#f5d48a" fill-opacity="${(a * 0.9).toFixed(3)}">` +
+    `<circle cx="37" cy="171" r=".9"/><circle cx="321" cy="55" r=".7"/>` +
+    `<circle cx="176" cy="317" r=".55"/><circle cx="15" cy="8" r=".55"/>` +
+    `<circle cx="128" cy="184" r=".7"/><circle cx="300" cy="272" r=".8"/>` +
+    `<circle cx="72" cy="248" r=".55"/><circle cx="244" cy="104" r=".6"/>` +
+    `<circle cx="338" cy="174" r=".5"/><circle cx="92" cy="332" r=".5"/>` +
+    `</g></svg>`
+  return `url("data:image/svg+xml,${encodeURIComponent(svg)}")`
+}
+
+/**
  * Apply the app's glass appearance.
  *
  * `brightness` tints the surfaces (and the scrim, continuously); `opacity`
@@ -184,11 +229,15 @@ export function applyGlass(appearance: GlassAppearance | null | undefined): void
   root.dataset.material = material
   root.style.colorScheme = lightUi ? 'light' : 'dark'
 
-  // Surface texture: cloud/mica grain, or the shine light band (never both).
+  // Surface texture: cloud/mica grain, star-frost shards, or the shine light band.
   if (material === 'mica' && grain > 0) {
     root.style.setProperty('--glass-sheen', grainDataUri(grain))
     root.style.setProperty('--glass-repeat', 'repeat')
     root.style.setProperty('--glass-size', '140px 140px')
+  } else if (material === 'starfrost') {
+    root.style.setProperty('--glass-sheen', frostDataUri(grain))
+    root.style.setProperty('--glass-repeat', 'repeat')
+    root.style.setProperty('--glass-size', '360px 360px')
   } else if (material === 'shine') {
     root.style.setProperty('--glass-sheen', SHEEN)
     root.style.setProperty('--glass-repeat', 'no-repeat')

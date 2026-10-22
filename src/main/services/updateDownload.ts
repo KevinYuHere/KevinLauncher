@@ -1,6 +1,7 @@
 import { createWriteStream, createReadStream, promises as fs } from 'fs'
 import { spawn } from 'child_process'
 import { dirname, join } from 'path'
+import { throttle } from './rateLimit'
 
 /**
  * Downloading / unpacking the update payload of a new launcher version.
@@ -129,6 +130,7 @@ export async function downloadPayload(
               for (;;) {
                 const { done, value } = await reader.read()
                 if (done) break
+                if (value.length) await throttle(value.length)
                 await handle.write(value)
                 bytes += value.length
                 have.set(part.path, bytes)

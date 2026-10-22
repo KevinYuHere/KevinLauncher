@@ -3,6 +3,9 @@ import type { AppUpdateInfo, AppUpdateState } from '@shared/types'
 import { formatBytes, formatEta } from '../format'
 import Icon from './Icon'
 import Ring from './Ring'
+import AtomShield from './AtomShield'
+import RailShield from './RailShield'
+import { useAreaTheme } from '../theme/ThemeScope'
 
 interface UpdateRingProps {
   /** Set when a newer release is available (not yet downloaded). */
@@ -30,9 +33,11 @@ export default function UpdateRing({
   onToggle
 }: UpdateRingProps): ReactElement | null {
   const [hover, setHover] = useState(false)
+  const themedRing = useAreaTheme('downloadRing') !== 'default'
 
   const installing = state.phase === 'installing' || state.phase === 'done'
   const paused = state.phase === 'paused'
+  const critical = state.critical === true || info?.critical === true
   const active =
     state.phase === 'downloading' || paused || installing || state.phase === 'error'
   if (!info && !active) return null
@@ -52,31 +57,50 @@ export default function UpdateRing({
     : paused
       ? `已暂停 ${percent}%`
       : state.phase === 'error'
-        ? '更新失败，点击重试'
+        ? critical
+          ? '重要更新失败，点击重试'
+          : '更新失败，点击重试'
         : state.phase === 'idle'
-          ? `发现新版本 ${info?.version ?? ''}，点击下载`
-          : `正在下载更新 ${percent}%`
+          ? `${critical ? '重要更新' : '发现新版本'} ${info?.version ?? ''}，点击下载`
+          : `${critical ? '重要更新' : '正在下载更新'} ${percent}%${critical ? '（不可暂停）' : ''}`
 
   const click = (): void => {
     if (state.phase === 'idle' || state.phase === 'error') onStart()
-    else if (!installing) onToggle()
+    else if (!installing && !critical) onToggle()
   }
 
   return (
     <div
-      className="rail-update"
+      className={`rail-update${critical ? ' is-critical' : ''}`}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
     >
       <button className="rail-item rail-update-btn" title={label} onClick={click}>
         {state.phase === 'idle' || state.phase === 'error' ? (
           <span className="rail-update-icon">
+            {themedRing && <RailShield />}
             <Icon name="launcherUpdate" size={22} />
             <span className="rail-update-dot" />
+            {critical && <span className="rail-update-critical">!</span>}
           </span>
         ) : (
           <span className="rail-ring">
-            <Ring value={value} size={30} stroke={3} />
+            {themedRing && <RailShield />}
+            {themedRing ? (
+              <AtomShield
+                state={
+                  installing
+                    ? 'applying'
+                    : paused
+                      ? 'paused'
+                      : 'downloading'
+                }
+                progress={value}
+                size={30}
+              />
+            ) : (
+              <Ring value={value} size={30} stroke={3} />
+            )}
             <span className="rail-ring-percent">{percent}</span>
           </span>
         )}
@@ -88,6 +112,7 @@ export default function UpdateRing({
         <div className="rail-pop glass wallpaper-region">
           <span className="wp-region-layer" aria-hidden="true" />
           <div className="rail-pop-head">
+            {critical ? '重要更新 · ' : ''}
             {installing ? '正在安装更新' : paused ? '已暂停' : '正在下载更新'}
           </div>
           <div className="rail-pop-percent">{percent}%</div>
@@ -96,7 +121,7 @@ export default function UpdateRing({
               {installing ? '安装' : '下载'} {formatBytes(shownBytes)} /{' '}
               {formatBytes(installing ? (info?.installSize ?? 0) : state.total)}
             </span>
-            <span>{installing ? '请勿关闭' : formatEta(remaining)}</span>
+            <span>{installing ? '请勿关闭' : critical ? '不可暂停' : formatEta(remaining)}</span>
           </div>
         </div>
       )}

@@ -1,4 +1,4 @@
-﻿# Builds and publishes a release:
+# Builds and publishes a release:
 #   1. electron-vite build
 #   2. electron-builder --dir  (then rcedit applies the exe icon locally)
 #   3. electron-builder --prepackaged   -> self-drawn installer (portable target)
@@ -16,16 +16,47 @@ param(
   [string]$FakeElectron = '',
   [switch]$SkipUpload,
   [switch]$Draft,
-  [switch]$Prerelease
+  [switch]$Prerelease,
+  # Mark the release as critical (no postpone, auto download).
+  [switch]$Critical
 )
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
+$packageVersion = (Get-Content (Join-Path $root 'package.json') -Raw | ConvertFrom-Json).version
 if (-not $Version) {
-  $Version = (Get-Content (Join-Path $root 'package.json') -Raw | ConvertFrom-Json).version
+  $Version = $packageVersion
+} elseif ($Version -ne $packageVersion) {
+  # ASCII only: Windows PowerShell 5.1 reads this UTF-8 file as ANSI.
+  throw "Version $Version does not match package.json ($packageVersion); bump package.json first"
 }
+# The client compares releases with a SemVer comparator. A non-SemVer version
+# would be ordered as 0.0.0 and silently never offered again, so reject it here
+# instead of failing halfway through the build.
+if ($Version -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$') {
+  throw "Version $Version is not SemVer (expected 1.2.3 or 1.2.3-beta.1); the updater cannot compare it"
+}
+
+# The release policy belongs to exactly one version: it is embedded in that
+# version's payload and applied on its first start. A stale file must be removed
+# before the next release (or re-targeted) - never silently inherited.
+$policyPath = Join-Path $root 'theme-policy.json'
+if (Test-Path $policyPath) {
+  try {
+    $policy = [System.IO.File]::ReadAllText($policyPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+  } catch {
+    throw "theme-policy.json cannot be parsed: $($_.Exception.Message)"
+  }
+  if ($policy.version -ne $Version) {
+    throw "theme-policy.json belongs to $($policy.version), but this release is $Version. Delete it, or set its version to $Version if this release also changes user settings."
+  }
+}
+# A pre-release version always publishes as a GitHub pre-release (the same rule
+# the CI workflow applies); otherwise stable users would be served the beta via
+# `releases/latest`.
+$isPrerelease = [bool]$Prerelease -or ($Version -match '-')
 $tag = "v$Version"
 Write-Host "== releasing $tag ==" -ForegroundColor Cyan
 
@@ -61,11 +92,12 @@ if ($LASTEXITCODE -ne 0) { throw 'electron-builder failed' }
 
 # --------------------------------------- 4. update payload assets
 # The release notes come from CHANGELOG.md (newest version first). Publishing is
-# refused when the file is missing or has no section for this version — the same
+# refused when the file is missing or has no section for this version - the same
 # rule the CI workflow enforces.
 $notesFile = Join-Path $root 'release\RELEASE_NOTES.md'
 node scripts/extract-changelog.mjs $Version $notesFile
-if ($LASTEXITCODE -ne 0) { throw "CHANGELOG.md 缺少 $Version 的段落，已拒绝发布" }
+if ($LASTEXITCODE -ne 0) { throw "CHANGELOG.md has no section for $Version; refusing to publish" }
+if ($Critical) { $env:KL_CRITICAL_UPDATE = '1' } else { Remove-Item Env:\KL_CRITICAL_UPDATE -ErrorAction SilentlyContinue }
 if ($FakeElectron) {
   node scripts/build-update-payload.mjs (Join-Path $root 'release\win-unpacked') $Version $FakeElectron
 } else {
@@ -99,11 +131,11 @@ $ErrorActionPreference = 'Stop'
 if ($exists) {
   Write-Host "release $tag exists -> uploading with --clobber" -ForegroundColor Yellow
   & $gh release upload $tag @assets --clobber
-  if ($Prerelease) { & $gh release edit $tag --prerelease }
+  if ($isPrerelease) { & $gh release edit $tag --prerelease }
 } else {
   $createArgs = @('release', 'create', $tag) + $assets + @('--title', "KevinLauncher $Version", '--notes-file', $notesFile)
   if ($Draft) { $createArgs += '--draft' }
-  if ($Prerelease) { $createArgs += '--prerelease' }
+  if ($isPrerelease) { $createArgs += '--prerelease' }
   & $gh @createArgs
 }
 if ($LASTEXITCODE -ne 0) { throw 'gh release failed' }

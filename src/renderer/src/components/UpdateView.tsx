@@ -84,7 +84,7 @@ export default function UpdateView({
     speed > 0 && status.totalBytes > 0 ? (status.totalBytes - status.downloadedBytes) / speed : null
 
   return (
-    <div className="page">
+    <div className="page update-page">
       <div className="page-header">
         <div>
           <h1 className="page-title">更新 · {entry.name}</h1>

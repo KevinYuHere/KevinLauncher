@@ -12,7 +12,7 @@ export type AddonId = 'genshin' | 'starrail' | 'zzz' | 'arknights'
  * - `liquid` 液态玻璃（边缘折射）
  * - `shine` 高光（液态玻璃 + 高光反射）
  */
-export type GlassMaterial = 'blur' | 'mica' | 'liquid' | 'shine'
+export type GlassMaterial = 'blur' | 'mica' | 'liquid' | 'shine' | 'starfrost'
 
 /**
  * Appearance of the glass across an app. Two independent perceptual axes:
@@ -71,6 +71,21 @@ export const MATERIAL_DEFAULTS: Record<GlassMaterial, GlassAppearance> = {
     highlight: 42,
     highlightAngle: 60,
     dispersion: 0
+  },
+  // 星霜（霆骇列律特别版）：磨砂底 + 碎晶三角，保留可读的底色。
+  starfrost: {
+    brightness: 0,
+    opacity: 85,
+    material: 'starfrost',
+    blur: 40,
+    saturation: 125,
+    grain: 45,
+    refraction: 100,
+    panelRefraction: 120,
+    edgeWidth: 28,
+    highlight: 45,
+    highlightAngle: 60,
+    dispersion: 8
   },
   // 云母 (per the 崩坏：星穹铁道 preset)
   mica: {
@@ -156,14 +171,16 @@ export const DEFAULT_HOME_MODULE: HomeModuleState = {
 }
 
 /** Full-screen transition played when a game is launched. */
-export type LaunchEffect = 'none' | 'shockwave' | 'melt' | 'glitch'
+export type LaunchEffect = 'none' | 'shockwave' | 'melt' | 'glitch' | 'gravity' | 'shatter'
 
 /** Registry of launch effects (label + description). */
 export const LAUNCH_EFFECTS: { id: LaunchEffect; label: string; desc: string }[] = [
   { id: 'none', label: '无', desc: '不播放启动特效' },
   { id: 'shockwave', label: '折射激波', desc: '带色散的激波扫过整个窗口' },
   { id: 'melt', label: '液态熔蚀', desc: '液态融化 + 方块故障' },
-  { id: 'glitch', label: '赛博故障', desc: '撕裂 / 方块 / RGB 故障' }
+  { id: 'glitch', label: '赛博故障', desc: '撕裂 / 方块 / RGB 故障' },
+  { id: 'gravity', label: '引力奇点', desc: '启动按钮的霆核膨胀，吞掉整页碎片' },
+  { id: 'shatter', label: '星屑碎裂', desc: '整页壁纸炸成三角碎片向外飞散' }
 ]
 
 export const DEFAULT_LAUNCH_EFFECT: LaunchEffect = 'none'
@@ -493,6 +510,64 @@ export type AutoStartMode = 'off' | 'window' | 'tray'
 /** Which GitHub releases the launcher self-updater follows. */
 export type UpdateChannel = 'stable' | 'beta'
 
+/** 特别版主题标识（可扩展；`default` 表示不套用主题）。 */
+export type SpecialThemeId = 'default' | 'starsnow' | (string & {})
+
+/** 可独立选择主题的 UI 区域。 */
+export type SpecialAreaId =
+  | 'titlebar'
+  | 'focusRing'
+  | 'textAccent'
+  | 'toast'
+  | 'transition'
+  | 'sidebar'
+  | 'navSelected'
+  | 'updateIndicator'
+  | 'cards'
+  | 'launchButton'
+  | 'gamesBar'
+  | 'avatars'
+  | 'emptyState'
+  | 'updatePage'
+  | 'downloadOverlay'
+  | 'downloadRing'
+  | 'dialogs'
+  | 'forms'
+  | 'dropdowns'
+  | 'drawer'
+  | 'segmented'
+  | 'slider'
+  | 'switch'
+  | 'tabs'
+  | 'inputs'
+  | 'clickEffect'
+  | 'gallery'
+  | 'skeleton'
+
+/** 发布方可选的强制主题策略（见 `theme-policy.json`）。 */
+export interface ThemePolicy {
+  /** 策略版本；同一版本只应用一次（`appliedThemePolicyVersion`）。 */
+  version: string
+  themeId: SpecialThemeId
+  areas: 'all' | SpecialAreaId[]
+  /** 旧字段：兼容旧清单，策略不会再锁定区域（用户之后可自由修改）。 */
+  locked: boolean
+  /** `force` 覆盖用户选择；`default` 只填充尚未设置主题的区域。 */
+  mode?: 'force' | 'default'
+  /**
+   * 同时把**每个应用**的玻璃材质替换为该材质（连同该材质的推荐参数，与设置里
+   * 切换材质的行为一致）。缺省 = 不改动材质。
+   */
+  material?: GlassMaterial
+  /** 同时把**每个应用**的启动特效替换为该特效。缺省 = 不改动启动特效。 */
+  launchEffect?: LaunchEffect
+  /**
+   * 把本次发布标记为重要更新（写入 `update-manifest.json` 的 `critical`）。
+   * 仅在仓库根目录的策略文件里生效，只影响发布产物，不影响客户端行为。
+   */
+  critical?: boolean
+}
+
 /** Launcher-wide (global) appearance + behavior settings. */
 export interface LauncherSettings {
   iconFile: string | null
@@ -507,12 +582,22 @@ export interface LauncherSettings {
   sidebarMaterial: boolean
   /** Follow stable releases or also pre-releases (测试版). */
   updateChannel: UpdateChannel
+  /** Download speed limit in MB/s (0 = unlimited). */
+  downloadLimitMbps: number
+  /** 特别版主题：每个区域独立选择；缺省 = default。 */
+  themeAreas: Partial<Record<SpecialAreaId, SpecialThemeId>>
+  /** 由发布策略锁定的区域（用户不可修改）。 */
+  themeLocks: Partial<Record<SpecialAreaId, SpecialThemeId>>
+  /** 已经应用过的主题策略版本（同一版本不再覆盖用户选择）。 */
+  themePolicyVersion: string | null
 }
 
 /** A newer release found on GitHub (self-update). */
 export interface AppUpdateInfo {
   /** Version parsed from the release tag (leading `v` stripped). */
   version: string
+  /** 重要更新：不可跳过，检测到即自动开始。 */
+  critical?: boolean
   /** Release title. */
   name: string
   /** Release notes (Markdown). */
@@ -572,6 +657,10 @@ export interface AppUpdateState {
   installPercent: number
   message: string
   error?: string
+  /** 当前下载是重要更新：不可暂停 / 跳过，失败会自动重试。 */
+  critical?: boolean
+  /** 重要更新的自动重试序号（1 起）；0 表示没有在重试。 */
+  retry?: number
 }
 
 /** A KevinLauncher installation found on this machine. */
@@ -670,6 +759,8 @@ export interface KevinApi {
     autoStart?: AutoStartMode
     sidebarMaterial?: boolean
     updateChannel?: UpdateChannel
+    downloadLimitMbps?: number
+    themeAreas?: LauncherSettings['themeAreas']
   }): Promise<LauncherSettings>
   /** 抽卡记录里是否显示次高品级（每个应用独立）。 */
   setGachaShowSecond(appId: string, value: boolean): Promise<AppEntry>

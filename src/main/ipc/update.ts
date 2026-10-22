@@ -41,9 +41,15 @@ export function registerUpdateIpc(): void {
       info.supported = true
       if (preview.hasUpdate) {
         info.hasUpdate = true
-        info.latestVersion = info.latestVersion ?? '9.9.9'
+        info.latestVersion = '9.9.9'
+        info.message = '发现新版本 9.9.9'
       }
-      if (preview.preDownloadVersion) info.preDownloadVersion = preview.preDownloadVersion
+      if (preview.preDownloadVersion) {
+        info.preDownloadVersion = preview.preDownloadVersion
+        info.message = info.hasUpdate
+          ? `发现新版本 9.9.9 · 可预下载 ${preview.preDownloadVersion}`
+          : `可预下载 ${preview.preDownloadVersion}`
+      }
     }
     return info
   })

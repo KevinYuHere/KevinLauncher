@@ -1,17 +1,27 @@
 import { useEffect, useRef, type ReactElement } from 'react'
 import type { LaunchEffect } from '@shared/types'
+import { captureWallpaperBackground } from '../wallpaperTexture'
+import WallpaperShatter from './WallpaperShatter'
+import WallpaperBurst from './WallpaperBurst'
 
 interface LaunchTransitionProps {
   /** Effect + a nonce that changes on each launch (null = idle). */
-  trigger: { effect: LaunchEffect; key: number; originX?: number; originY?: number } | null
+  trigger: {
+    effect: LaunchEffect
+    key: number
+    originX?: number
+    originY?: number
+  } | null
   onDone: () => void
 }
 
-// Shader modes: 0 shockwave, 1 melt, 2 glitch.
+// Shader modes: 0 shockwave, 1 melt, 2 glitch, 3 gravity.
 const MODE: Record<Exclude<LaunchEffect, 'none'>, number> = {
   shockwave: 0,
   melt: 1,
-  glitch: 2
+  glitch: 2,
+  gravity: 3,
+  shatter: 4
 }
 
 const VS = `
@@ -69,7 +79,7 @@ const FS = `
       float edge = smoothstep(0.0,1.0,p)*1.6;
       float diss = smoothstep(edge+0.30, edge-0.30, dist2(uv)+n*0.40);
       col = mix(col, uTheme*0.10 + vec3(0.015,0.018,0.03), diss);
-    } else {
+    } else if (uMode == 2) {
       vec2 uvg = uv;
       float slice = floor(uv.y*42.0), r1 = hash(vec2(slice,floor(uTime*24.0)));
       uvg.x += (r1-0.5)*0.22*step(0.62,r1)*smoothstep(0.10,0.5,p)*(1.0-smoothstep(0.65,0.98,p));
@@ -85,6 +95,52 @@ const FS = `
       float fl = step(0.9, hash(vec2(floor(uTime*30.0),5.0)))*smoothstep(0.15,0.5,p)*(1.0-smoothstep(0.6,0.95,p));
       col = mix(col, vec3(1.0)-col, fl*0.6);
       col = mix(col, uTheme, smoothstep(0.55,1.0,p)*0.30);
+    } else if (uMode == 3) {
+      // 引力奇点: the nucleus grows, its gravity spirals the whole wallpaper in.
+      float pull = smoothstep(0.0, 0.86, p);
+      vec2 d = (uv - uOrigin); d.x *= uRes.x / uRes.y;
+      float dist = length(d);
+      float ang = atan(d.y, d.x);
+      float spin = (3.2 * p) / (0.18 + dist);
+      mat2 rot = mat2(cos(spin), -sin(spin), sin(spin), cos(spin));
+      vec2 suv = uOrigin + rot * (uv - uOrigin) * (1.0 - 0.86 * pull);
+      float ca = 0.012 + 0.070 * pull;
+      vec3 c;
+      c.r = tex(suv + vec2(ca, 0.0)).r;
+      c.g = tex(suv).g;
+      c.b = tex(suv - vec2(ca, 0.0)).b;
+      vec3 radial = vec3(0.0);
+      for (int i = 1; i <= 6; i++) {
+        float t = float(i) / 6.0 * 0.22 * pull;
+        radial += tex(suv - (uv - uOrigin) * t);
+      }
+      c = mix(c, radial / 6.0, pull * 0.6);
+      col = c * (1.0 - 0.62 * pull);
+      float gap = smoothstep(0.42, 0.92, abs(cos(ang * 3.0 + uTime * 1.4)));
+      float ringA = exp(-pow((dist - (0.10 + p * 0.52)) / 0.010, 2.0));
+      float ringB = exp(-pow((dist - (0.34 + p * 0.78)) / 0.016, 2.0));
+      float ringC = exp(-pow((dist - (0.58 + p * 0.92)) / 0.024, 2.0));
+      vec3 glow = mix(uTheme, vec3(0.62, 0.90, 1.0), 0.55);
+      col += glow * (ringA * 1.15 + ringB * 0.55 + ringC * 0.30) * (0.35 + 0.65 * gap) * (1.0 - smoothstep(0.78, 1.0, p));
+      float arcs = pow(abs(cos(ang * 9.0 + sin(dist * 18.0 + uTime * 2.6) * 2.0)), 32.0);
+      col += vec3(0.72, 0.92, 1.0) * arcs * exp(-dist * 5.0) * (1.0 - p) * 0.9;
+      float stars = step(0.9985, hash(floor(uv * 420.0) + floor(uTime * 7.0)));
+      col += vec3(0.85, 0.96, 1.0) * stars * (1.0 - p) * 0.85;
+      float coreR = 0.016 + p * p * 1.08;
+      float core = smoothstep(coreR, coreR - 0.018, dist);
+      vec3 inner = mix(vec3(0.52, 0.90, 1.0), uTheme * 1.35, 0.35);
+      float plasma = 0.5 + 0.5 * sin(ang * 8.0 + dist * 52.0 - uTime * 5.0);
+      float spokes = pow(abs(cos(ang * 6.0 + dist * 26.0 + uTime * 1.5)), 18.0);
+      inner *= 0.68 + 0.32 * plasma;
+      inner += vec3(0.72, 0.94, 1.0) * spokes * 0.42;
+      inner = mix(inner, vec3(1.0), smoothstep(coreR * 0.58, 0.0, dist));
+      float rim = exp(-pow((dist - coreR) / 0.011, 2.0)) * (0.62 + 0.38 * cos(ang * 6.0 + uTime * 3.6));
+      float hexRim = exp(-pow((dist - coreR * 1.22) / 0.008, 2.0)) * (0.55 + 0.45 * cos(ang * 3.0 + uTime * 2.2));
+      col = mix(col, inner, core);
+      col += mix(vec3(0.62, 0.92, 1.0), vec3(1.0), 0.45) * hexRim * 1.55;
+      col += mix(uTheme, vec3(1.0), 0.68) * rim * 1.6;
+      col += vec3(1.0) * exp(-dist * dist / max(0.00001, coreR * coreR * 0.20)) * 1.35;
+      col += vec3(1.0) * pow(smoothstep(0.42, 1.0, p), 3.0) * 0.95;
     }
     col = mix(col, vec3(1.0), smoothstep(0.84,1.0,p));
     gl_FragColor = vec4(col, 1.0);
@@ -98,70 +154,8 @@ function compile(gl: WebGLRenderingContext, type: number, src: string): WebGLSha
 }
 
 /**
- * The wallpaper **as it is actually shown**: the `object-fit: cover` crop of the
- * `.bg-layer` for the window (the layer is inset −64px and centre-cropped), with
- * the current wallpaper blur and dimming baked in. The effect therefore warps
- * exactly the pixels behind it instead of the whole (uncropped) image — which
- * used to be stretched across the window and read wrong whenever the wallpaper
- * aspect ratio did not match.
- */
-function captureBackground(dpr: number): HTMLCanvasElement | null {
-  const layer = document.querySelector<HTMLImageElement | HTMLVideoElement>('.bg-layer')
-  if (!layer) return null
-  const video = layer instanceof HTMLVideoElement
-  const iw = video ? layer.videoWidth : layer.naturalWidth
-  const ih = video ? layer.videoHeight : layer.naturalHeight
-  const W = window.innerWidth
-  const H = window.innerHeight
-  if (!iw || !ih || W < 2 || H < 2) return null
-
-  // object-fit: cover over the (W+128)×(H+128) layer; the window sees the
-  // central W×H of that box (see `.bg-layer` / wallpaperRegion.ts).
-  const s = Math.max((W + 128) / iw, (H + 128) / ih)
-  const imgX = (W + 128 - iw * s) / 2 - 64
-  const imgY = (H + 128 - ih * s) / 2 - 64
-
-  const style = getComputedStyle(document.documentElement)
-  const blur = parseFloat(style.getPropertyValue('--wallpaper-blur')) || 0
-  const dim = Math.min(1, Math.max(0, parseFloat(style.getPropertyValue('--wallpaper-dim')) || 0))
-  // Pad by the blur radius so blurring never fades the window edges.
-  const pad = blur > 0 ? Math.ceil(blur * 3) : 0
-  const srcX = (-pad - imgX) / s
-  const srcY = (-pad - imgY) / s
-  const srcW = (W + 2 * pad) / s
-  const srcH = (H + 2 * pad) / s
-
-  const out = document.createElement('canvas')
-  out.width = Math.round(W * dpr)
-  out.height = Math.round(H * dpr)
-  const ctx = out.getContext('2d')
-  if (!ctx) return null
-  try {
-    if (pad > 0) {
-      const tmp = document.createElement('canvas')
-      tmp.width = Math.round((W + 2 * pad) * dpr)
-      tmp.height = Math.round((H + 2 * pad) * dpr)
-      const tctx = tmp.getContext('2d')
-      if (!tctx) return null
-      tctx.filter = `blur(${blur * dpr}px)`
-      tctx.drawImage(layer, srcX, srcY, srcW, srcH, 0, 0, tmp.width, tmp.height)
-      ctx.drawImage(tmp, pad * dpr, pad * dpr, W * dpr, H * dpr, 0, 0, out.width, out.height)
-    } else {
-      ctx.drawImage(layer, srcX, srcY, srcW, srcH, 0, 0, out.width, out.height)
-    }
-    if (dim > 0) {
-      ctx.fillStyle = `rgba(0, 0, 0, ${dim})`
-      ctx.fillRect(0, 0, out.width, out.height)
-    }
-  } catch {
-    return null
-  }
-  return out
-}
-
-/**
  * Full-window launch transition. Renders the wallpaper through one of the
- * launch-effect shaders (refraction shockwave / liquid melt / cyber glitch) for
+ * launch-effect shaders (refraction shockwave / liquid melt / cyber glitch / gravity) for
  * ~1.3s, then fades out. The wallpaper is used as the source so the effect reads
  * as the whole window warping (a live video frame is frozen).
  */
@@ -170,6 +164,10 @@ export default function LaunchTransition({ trigger, onDone }: LaunchTransitionPr
   const glRef = useRef<WebGLRenderingContext | null>(null)
   const uRef = useRef<Record<string, WebGLUniformLocation | null>>({})
   const themeRef = useRef<[number, number, number]>([0.4, 0.36, 0.9])
+  // These are ordinary launch effects, independent of the visual theme.
+  const atomShatter = trigger?.effect === 'gravity'
+  const outwardShatter = trigger?.effect === 'shatter'
+  const active = !!trigger && !atomShatter && !outwardShatter && trigger.effect !== 'none'
   // Latest onDone without re-triggering the effect (an inline callback would
   // otherwise restart the animation on every App render).
   const onDoneRef = useRef(onDone)
@@ -209,7 +207,9 @@ export default function LaunchTransition({ trigger, onDone }: LaunchTransitionPr
   }, [])
 
   useEffect(() => {
-    if (!trigger || trigger.effect === 'none') return
+    if (!trigger) return
+    if (trigger.effect === 'gravity' || trigger.effect === 'shatter') return
+    if (trigger.effect === 'none') return
     const gl = glRef.current
     const canvas = canvasRef.current
     if (!gl || !canvas) return
@@ -226,7 +226,7 @@ export default function LaunchTransition({ trigger, onDone }: LaunchTransitionPr
     canvas.height = Math.round(window.innerHeight * dpr)
     gl.viewport(0, 0, canvas.width, canvas.height)
 
-    const src = captureBackground(dpr)
+    const src = captureWallpaperBackground(dpr)
     gl.activeTexture(gl.TEXTURE0)
     // (re)create texture content
     const tex = gl.createTexture()
@@ -238,11 +238,12 @@ export default function LaunchTransition({ trigger, onDone }: LaunchTransitionPr
     if (src) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src)
     const U = uRef.current
     const mode = MODE[trigger.effect]
+    const duration = 1450
     const origin: [number, number] = [trigger.originX ?? 0.5, trigger.originY ?? 0.5]
     const start = performance.now()
     let raf = 0
     const tick = (now: number): void => {
-      const k = Math.min(1, (now - start) / 1350)
+      const k = Math.min(1, (now - start) / duration)
       const p = k < 0.5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2
       gl.uniform2f(U.uRes!, canvas.width, canvas.height)
       gl.uniform1f(U.uTime!, (now - start) / 1000)
@@ -259,5 +260,23 @@ export default function LaunchTransition({ trigger, onDone }: LaunchTransitionPr
     return () => cancelAnimationFrame(raf)
   }, [trigger])
 
-  return <canvas ref={canvasRef} className={`launch-fx${trigger && trigger.effect !== 'none' ? ' on' : ''}`} />
+  return (
+    <>
+      <canvas ref={canvasRef} className={`launch-fx${active ? ' on' : ''}`} />
+      {atomShatter && trigger && (
+        <WallpaperShatter
+          originX={trigger.originX ?? 0.5}
+          originY={1 - (trigger.originY ?? 0.4)}
+          onDone={onDone}
+        />
+      )}
+      {outwardShatter && trigger && (
+        <WallpaperBurst
+          originX={trigger.originX ?? 0.5}
+          originY={1 - (trigger.originY ?? 0.4)}
+          onDone={onDone}
+        />
+      )}
+    </>
+  )
 }

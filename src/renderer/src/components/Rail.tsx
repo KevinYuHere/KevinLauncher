@@ -7,7 +7,10 @@ import {
   type ReactNode
 } from 'react'
 import Icon, { type IconName } from './Icon'
+import AtomShield from './AtomShield'
+import RailShield from './RailShield'
 import { useJelly } from '../drag/useJelly'
+import { useAreaTheme } from '../theme/ThemeScope'
 import type { ViewId } from '../viewTypes'
 
 // Left navigation rail. The active highlight is a *moving* themed thumb plus a
@@ -53,6 +56,9 @@ export default function Rail({
   const [pressed, setPressed] = useState(false)
   const viewRef = useRef(view)
   viewRef.current = view
+  // With the star-core selection, the moving highlight is replaced by the
+  // AtomShield inside the active item (CSS hides `.rail-thumb` / `.rail-bar`).
+  const starSelected = useAreaTheme('navSelected') === 'starsnow'
 
   // Drag-to-select (same feel as the segmented control): pick the item under the
   // pointer while dragging, live.
@@ -126,7 +132,7 @@ export default function Rail({
     >
       {/* Real element (not a pseudo) so the material engine can filter it. */}
       <div className="rail-glass" aria-hidden="true" />
-      {geom && (
+      {geom && !starSelected && (
         <>
           <span
             ref={thumbRef}
@@ -148,6 +154,12 @@ export default function Rail({
             onClick={() => onNavigate(e.id)}
           >
             <Icon name={e.icon} />
+            {starSelected && view === e.id && (
+              <span className="rail-atom" aria-hidden="true">
+                <RailShield />
+                <AtomShield state="selected" size={48} />
+              </span>
+            )}
           </button>
         ))}
 
@@ -162,6 +174,12 @@ export default function Rail({
         onClick={() => onNavigate('linkedLaunch')}
       >
         <Icon name="link" />
+        {starSelected && view === 'linkedLaunch' && (
+          <span className="rail-atom" aria-hidden="true">
+            <RailShield />
+                <AtomShield state="selected" size={48} />
+          </span>
+        )}
       </button>
 
       <button
@@ -171,6 +189,12 @@ export default function Rail({
         onClick={() => onNavigate('settings')}
       >
         <Icon name="settings" />
+        {starSelected && view === 'settings' && (
+          <span className="rail-atom" aria-hidden="true">
+            <RailShield />
+                <AtomShield state="selected" size={48} />
+          </span>
+        )}
       </button>
     </nav>
   )

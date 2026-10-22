@@ -4,6 +4,7 @@ import { get as httpGet } from 'http'
 import { dirname } from 'path'
 import type { IncomingMessage } from 'http'
 import { md5File } from './hash'
+import { createThrottleTransform } from './rateLimit'
 
 export interface DownloadOptions {
   url: string
@@ -63,7 +64,7 @@ export async function downloadFile(options: DownloadOptions): Promise<void> {
       res.on('error', reject)
       stream.on('error', reject)
       stream.on('finish', () => resolve())
-      res.pipe(stream)
+      res.pipe(createThrottleTransform()).pipe(stream)
     })
     request.on('error', reject)
     if (options.signal) {

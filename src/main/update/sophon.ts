@@ -3,9 +3,12 @@ import { createHash } from 'crypto'
 import { join, dirname } from 'path'
 import { decompress } from 'fzstd'
 import { md5File } from '../services/hash'
+import { readBodyThrottled } from '../services/rateLimit'
 
 const CHUNK_API = 'https://downloader-api.mihoyo.com/downloader/sophon_chunk/api'
 const CONCURRENCY = 16
+
+export class BuildNotFound extends Error {}
 
 export interface SophonCategory {
   categoryId: string
@@ -75,6 +78,7 @@ export async function getSophonBuild(
       }[]
     }
   }
+  if (json.retcode === -202) throw new BuildNotFound(json.message || 'build not found')
   if (json.retcode !== 0 || !json.data) throw new Error(json.message || 'getBuild failed')
   return {
     buildId: json.data.build_id,
@@ -188,7 +192,7 @@ function parseManifest(buf: Uint8Array): SophonAsset[] {
 }
 
 /** Fetch with a small exponential backoff (Starward retries transient failures). */
-async function fetchRetry(url: string, init?: RequestInit, attempts = 3): Promise<Response> {
+export async function fetchRetry(url: string, init?: RequestInit, attempts = 6): Promise<Response> {
   let last: unknown
   for (let i = 0; i < attempts; i++) {
     try {
@@ -196,7 +200,8 @@ async function fetchRetry(url: string, init?: RequestInit, attempts = 3): Promis
     } catch (error) {
       if (init?.signal?.aborted) throw error
       last = error
-      if (i < attempts - 1) await new Promise((resolve) => setTimeout(resolve, 300 * (i + 1)))
+      // Starward Polly: MaxRetryAttempts = 5, linear backoff (2s, 4s, 6s, 8s, 10s).
+      if (i < attempts - 1) await new Promise((resolve) => setTimeout(resolve, 2000 * (i + 1)))
     }
   }
   throw last
@@ -221,7 +226,7 @@ export async function fetchChunk(
     signal
   })
   if (!res.ok) throw new Error(`download chunk failed HTTP ${res.status}`)
-  const bytes = new Uint8Array(await res.arrayBuffer())
+  const bytes = new Uint8Array(await readBodyThrottled(res))
   return Buffer.from(compression ? decompress(bytes) : bytes)
 }
 
@@ -279,7 +284,7 @@ export async function fetchChunkRaw(
     signal
   })
   if (!res.ok) throw new Error(`download chunk failed HTTP ${res.status}`)
-  return Buffer.from(await res.arrayBuffer())
+  return await readBodyThrottled(res)
 }
 
 /** Reuse a cached chunk when present (+size match), else fetch and cache it. */
@@ -362,37 +367,46 @@ export async function downloadSophonBuild(
   const wanted = (field: string): boolean =>
     !ignored.has(field) && !(isLanguageField(field) && !installedAudio.has(field))
 
-  // Target manifests, per selected category.
+  // Target manifests, per selected category (fetched concurrently: sequential
+  // fetches of ~120 categories looked like a stuck 0% progress bar).
   const targetCats: { category: SophonCategory; assets: SophonAsset[] }[] = []
-  for (const category of build.categories) {
-    if (!wanted(category.matchingField)) continue
-    targetCats.push({ category, assets: await fetchManifest(category) })
-  }
+  await runPool(
+    build.categories.filter((category) => wanted(category.matchingField)),
+    8,
+    async (category) => {
+      targetCats.push({ category, assets: await fetchManifest(category) })
+    }
+  )
 
   // Installed version manifests → `file → (uncompressedMd5 → {offset, size})`.
   const localChunks = new Map<string, Map<string, { offset: number; size: number }>>()
   if (localBuild && originDir) {
-    for (const category of localBuild.categories) {
-      if (!wanted(category.matchingField)) continue
-      let assets: SophonAsset[]
-      try {
-        assets = await fetchManifest(category)
-      } catch {
-        continue
-      }
-      for (const asset of assets) {
-        const map = new Map<string, { offset: number; size: number }>()
-        for (const chunk of asset.chunks) {
-          if (chunk.uncompressedMd5 && !map.has(chunk.uncompressedMd5)) {
-            map.set(chunk.uncompressedMd5, {
-              offset: chunk.offset,
-              size: chunk.sizeDecompressed
-            })
-          }
+    await runPool(
+      localBuild.categories.filter((category) => wanted(category.matchingField)),
+      8,
+      async (category) => {
+        let assets: SophonAsset[]
+        try {
+          assets = await fetchManifest(category)
+        } catch (error) {
+          // A category absent from the local build is skipped; real errors abort.
+          if (/HTTP 404/.test((error as Error).message)) return
+          throw error
         }
-        localChunks.set(asset.name, map)
+        for (const asset of assets) {
+          const map = new Map<string, { offset: number; size: number }>()
+          for (const chunk of asset.chunks) {
+            if (chunk.uncompressedMd5 && !map.has(chunk.uncompressedMd5)) {
+              map.set(chunk.uncompressedMd5, {
+                offset: chunk.offset,
+                size: chunk.sizeDecompressed
+              })
+            }
+          }
+          localChunks.set(asset.name, map)
+        }
       }
-    }
+    )
   }
 
   // Plan: which chunks can be copied from the installed file, which must be
@@ -428,9 +442,9 @@ export async function downloadSophonBuild(
   let downloaded = 0
   onProgress({ downloaded, total, currentFile: '' })
 
-  if (cacheDir) await fs.mkdir(cacheDir, { recursive: true })
-  if (cacheOnly) {
-    // Pre-download: only fill the raw chunk cache (parallel over unique chunks).
+  if (cacheDir) {
+    await fs.mkdir(cacheDir, { recursive: true })
+    // Starward's order: download and verify every missing chunk first, then assemble.
     const unique = new Map<string, { category: SophonCategory; chunk: SophonChunk; file: string }>()
     for (const { category, asset, reuse } of plans) {
       for (let i = 0; i < asset.chunks.length; i++) {
@@ -444,8 +458,8 @@ export async function downloadSophonBuild(
       downloaded += chunk.sizeDecompressed
       onProgress({ downloaded, total, currentFile: file })
     })
-    return
   }
+  if (cacheOnly) return
 
   await runPool(plans, 4, async ({ category, asset, reuse }) => {
     if (signal?.aborted) throw new Error('cancelled')

@@ -247,7 +247,7 @@ export class UpdateManager {
     controller: AbortController,
     status: UpdateStatus
   ): Promise<void> {
-    const gameConfig = await getGameConfig(game).catch(() => null)
+    const gameConfig = await getGameConfig(game)
     // Only the installed voice languages are downloaded (size differs per player).
     const audioLanguages = await detectAudioLanguages(gameDir)
     // Non-chunk games use the compressed-package flow (Starward: DefaultDownloadMode).
@@ -283,6 +283,16 @@ export class UpdateManager {
     // Chunk/patch caches live inside the install dir (`chunk/`, `ldiff/`) so a run
     // interrupted mid-way resumes from them. Pre-download only fills the cache;
     // the formal update assembles the files from the local game + cache.
+    // Starward fetches these during preparation, before any download; a failure
+    // aborts instead of silently degrading later.
+    let deprecatedFiles: string[] = []
+    let channelSdk: string | null = null
+    let wpfVersion: string | null = null
+    if (mode === 'update') {
+      deprecatedFiles = await getGameDeprecatedFiles(game)
+      channelSdk = await getGameChannelSDK(game)
+      wpfVersion = await getWPFPackageVersion(game)
+    }
     status.phase = 'downloading'
     status.progress = 0
     status.message = mode === 'preDownload' ? '正在预下载…' : '正在下载更新…'
@@ -316,7 +326,7 @@ export class UpdateManager {
       status.message = '预下载完成'
     } else {
       // F29: delete files the official config marks as deprecated.
-      for (const name of await getGameDeprecatedFiles(game)) {
+      for (const name of deprecatedFiles) {
         await fs.rm(join(gameDir, ...name.split('/')), { force: true }).catch(() => undefined)
       }
       // F32: hard-link audio from the cache dir into the resource dir.
@@ -329,8 +339,8 @@ export class UpdateManager {
       await writeConfigIni(gameDir, {
         gameVersion: target.tag,
         predownload: null,
-        sdkVersion: await getGameChannelSDK(game),
-        wpfVersion: await getWPFPackageVersion(game)
+        sdkVersion: channelSdk,
+        wpfVersion
       })
       // Post-update verification: the game's config.ini must now report the target.
       const installed = await readGameVersion(gameDir)
@@ -571,8 +581,9 @@ async function readIgnoreFields(gameDir: string, relative: string): Promise<stri
       }
     }
     return fields
-  } catch {
-    return []
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+    throw error
   }
 }
 
@@ -591,8 +602,9 @@ async function readBlacklist(gameDir: string, relative: string): Promise<string[
       }
     }
     return files
-  } catch {
-    return []
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+    throw error
   }
 }
 /** Hard-link audio files from the cache dir into the resource dir (Starward F32). */

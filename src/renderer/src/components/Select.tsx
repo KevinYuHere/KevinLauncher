@@ -11,6 +11,8 @@ interface SelectProps {
   options: SelectOption[]
   onChange: (value: string) => void
   placeholder?: string
+  /** Shown greyed out and non-interactive (e.g. a developer-locked theme area). */
+  disabled?: boolean
 }
 
 /** A frosted, theme-aware dropdown (replaces the unstyled native <select>). */
@@ -18,7 +20,8 @@ export default function Select({
   value,
   options,
   onChange,
-  placeholder
+  placeholder,
+  disabled = false
 }: SelectProps): ReactElement {
   const [open, setOpen] = useState(false)
   const [closing, setClosing] = useState(false)
@@ -80,6 +83,7 @@ export default function Select({
         ref={triggerRef}
         type="button"
         className={`select-trigger${open ? ' open' : ''}`}
+        disabled={disabled}
         onClick={toggle}
       >
         <span className="select-value">{current ? current.label : (placeholder ?? '请选择')}</span>

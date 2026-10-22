@@ -658,7 +658,8 @@ export default function HomeView({
     launchClick = onUpdateToggle
   } else if (preActive) {
     launchProgress = progress
-    launchClick = onPreDownloadToggle
+    // The ring pauses/resumes the pre-download; the main button still launches
+    // the game, exactly like an idle pre-download state.
     circleClick = onPreDownloadToggle
   } else if (preAvailable) {
     circleClick = onPreDownloadToggle

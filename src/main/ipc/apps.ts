@@ -9,7 +9,6 @@ import {
   HOME_MODULES,
   LAUNCH_EFFECTS,
   type AppEntry,
-  type GlassMaterial,
   type GlassPatch,
   type HomeModuleId,
   type HomeModuleState,
@@ -23,6 +22,7 @@ import { AppStore } from '../services/appStore'
 import { applyAutoTheme } from '../services/accent'
 import { BgStore } from '../services/background'
 import { BrandStore } from '../services/brand'
+import { mergeGlass } from '../services/glass'
 import { IconStore } from '../services/icon'
 import { applyAutoStart } from '../services/autostart'
 import { applyLauncherIcon } from '../services/appIcon'
@@ -37,33 +37,6 @@ function requireApp(store: Awaited<ReturnType<typeof AppStore.load>>, appId: str
   const entry = store.apps.find((a) => a.id === appId)
   if (!entry) throw new Error('应用不存在')
   return entry
-}
-
-const GLASS_MATERIALS: readonly GlassMaterial[] = ['blur', 'mica', 'liquid', 'shine']
-
-const clamp = (value: number, min: number, max: number): number =>
-  Math.max(min, Math.min(max, Math.round(value) || 0))
-
-/** Merge a patch over the (default-filled) current glass appearance, clamping. */
-function mergeGlass(current: Partial<AppEntry['glass']> | undefined, patch: GlassPatch): AppEntry['glass'] {
-  const base = { ...DEFAULT_GLASS_APPEARANCE, ...current }
-  const pick = (v: number | undefined, lo: number, hi: number, fallback: number): number =>
-    v != null ? clamp(v, lo, hi) : fallback
-  return {
-    brightness: pick(patch.brightness, 0, 100, base.brightness),
-    opacity: pick(patch.opacity, 0, 100, base.opacity),
-    material:
-      patch.material && GLASS_MATERIALS.includes(patch.material) ? patch.material : base.material,
-    blur: pick(patch.blur, 0, 60, base.blur),
-    saturation: pick(patch.saturation, 50, 200, base.saturation),
-    grain: pick(patch.grain, 0, 100, base.grain),
-    refraction: pick(patch.refraction, 0, 200, base.refraction),
-    panelRefraction: pick(patch.panelRefraction, 0, 200, base.panelRefraction),
-    edgeWidth: pick(patch.edgeWidth, 4, 100, base.edgeWidth),
-    highlight: pick(patch.highlight, 0, 100, base.highlight),
-    highlightAngle: pick(patch.highlightAngle, 0, 360, base.highlightAngle),
-    dispersion: pick(patch.dispersion, 0, 100, base.dispersion)
-  }
 }
 
 export function registerAppsIpc(): void {
@@ -246,6 +219,8 @@ export function registerAppsIpc(): void {
         autoStart?: 'off' | 'window' | 'tray'
         sidebarMaterial?: boolean
         updateChannel?: 'stable' | 'beta'
+        downloadLimitMbps?: number
+        themeAreas?: Partial<Record<string, string>>
       }
     ) => {
       await AppStore.setLauncher(patch)

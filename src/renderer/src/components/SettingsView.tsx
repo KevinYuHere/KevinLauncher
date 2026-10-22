@@ -18,6 +18,7 @@ import type {
   GlassMaterial,
   GlassPatch,
   LauncherSettings,
+  SpecialThemeId,
   UsageReport
 } from '@shared/types'
 import { DEFAULT_GLASS_APPEARANCE, MATERIAL_DEFAULTS } from '@shared/types'
@@ -34,6 +35,8 @@ import Icon from './Icon'
 import Segmented from './Segmented'
 import Select from './Select'
 import Switch from './Switch'
+
+import { SPECIAL_AREAS, SPECIAL_AREA_GROUPS, SPECIAL_THEMES, specialThemeLabel, themedAreaCount, withAllThemes, withAreaTheme } from '@shared/specialTheme'
 
 /** Project repository (shown in the "About" section). */
 const REPO_URL = 'https://github.com/KevinYuHere/KevinLauncher'
@@ -68,14 +71,16 @@ const GLASS_MATERIAL_LABEL: Record<GlassMaterial, string> = {
   blur: '毛玻璃',
   mica: '云母',
   liquid: '液态',
-  shine: '高光'
+  shine: '高光',
+  starfrost: '星霜'
 }
 
 const GLASS_MATERIAL_DESC: Record<GlassMaterial, string> = {
   blur: '毛玻璃：经典磨砂质感',
   mica: '云母：更致密的磨砂质感',
   liquid: '液态玻璃：外轮廓膨胀折射',
-  shine: '高光：液态玻璃 + 随环境着色的边缘高光'
+  shine: '高光：液态玻璃 + 随环境着色的边缘高光',
+  starfrost: '星霜：碎晶三角 + 星屑微光 + 紫青虹彩'
 }
 
 // Settings page with two tabs that slide on the card itself (so the frosted
@@ -104,6 +109,8 @@ interface SettingsViewProps {
     autoStart?: AutoStartMode
     sidebarMaterial?: boolean
     updateChannel?: UpdateChannel
+    downloadLimitMbps?: number
+    themeAreas?: LauncherSettings['themeAreas']
   }) => void
   onExportData: () => void
   onImportData: () => void
@@ -257,10 +264,24 @@ export default function SettingsView({
   const [showColor, setShowColor] = useState(false)
   const [glassOpen, setGlassOpen] = useState(false)
   const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [themeOpen, setThemeOpen] = useState(false)
+  const [bulkTheme, setBulkTheme] = useState<SpecialThemeId>('starsnow')
   const autoTheme = entry.autoTheme ?? true
   const currentIcon = iconUrl(entry.iconFile)
   const wallpaper = currentWallpaper(entry)
   const canExtractTheme = !!wallpaper && !isVideoFile(wallpaper.file)
+  const themedCount = themedAreaCount(launcher.themeAreas)
+  const themedNames = [
+    ...new Set(
+      SPECIAL_AREAS.map((area) => launcher.themeAreas[area.id]).filter(
+        (id): id is SpecialThemeId => !!id && id !== 'default'
+      )
+    )
+  ].map((id) => specialThemeLabel(id))
+  const themeSummary =
+    themedCount === 0
+      ? '默认（未套用主题）'
+      : `${themedNames.join(' + ')} · ${themedCount}/${SPECIAL_AREAS.length} 个区域`
 
   const pickDir = async (kind: 'game' | 'shot'): Promise<void> => {
     const path = await window.api.pickDirectory()
@@ -579,7 +600,7 @@ export default function SettingsView({
                     <Segmented
                       value={glass.material}
                       onChange={(value) => updateGlass({ material: value as GlassMaterial })}
-                      options={(['blur', 'mica', 'liquid', 'shine'] as GlassMaterial[]).map(
+                      options={(['blur', 'mica', 'liquid', 'shine', 'starfrost'] as GlassMaterial[]).map(
                         (material) => ({ value: material, label: GLASS_MATERIAL_LABEL[material] })
                       )}
                     />
@@ -640,11 +661,15 @@ export default function SettingsView({
                   onChange={(saturation) => updateGlass({ saturation })}
                 />
               )}
-              {glass.material === 'mica' && (
+              {(glass.material === 'mica' || glass.material === 'starfrost') && (
                 <RangeRow
                   name="颗粒"
                   value={glass.grain}
-                  hint="云母表面的颗粒质感"
+                  hint={
+                    glass.material === 'starfrost'
+                      ? '碎晶三角与星屑微光的强度'
+                      : '云母表面的颗粒质感'
+                  }
                   min={0}
                   max={100}
                   suffix=""
@@ -735,6 +760,88 @@ export default function SettingsView({
                 onPick={onPickLauncherIcon}
                 onClear={launcher.iconFile ? onClearLauncherIcon : undefined}
               />
+              <Row
+                name="主题"
+                desc={themeSummary}
+                action={
+                  <button
+                    className={`btn sm ghost module-caret${themeOpen ? ' open' : ''}`}
+                    title="逐项主题设置"
+                    aria-expanded={themeOpen}
+                    onClick={() => setThemeOpen((value) => !value)}
+                  >
+                    <Icon name="chevronDown" size={16} />
+                  </button>
+                }
+              />
+              <Collapse open={themeOpen}>
+                <Row
+                  name="批量设置"
+                  desc="把所选主题应用到全部区域"
+                  action={
+                    <div className="media-row" style={{ gap: 8 }}>
+                      <Select
+                        value={bulkTheme}
+                        onChange={(value) => setBulkTheme(value as SpecialThemeId)}
+                        options={SPECIAL_THEMES.map((theme) => ({
+                          value: theme.id,
+                          label: theme.label
+                        }))}
+                      />
+                      <button
+                        className="btn sm"
+                        onClick={() =>
+                          onSetBehavior({
+                            themeAreas: withAllThemes(launcher.themeAreas, bulkTheme)
+                          })
+                        }
+                      >
+                        应用到全部
+                      </button>
+                      <button
+                        className="btn sm ghost"
+                        onClick={() =>
+                          onSetBehavior({
+                            themeAreas: withAllThemes({}, 'default')
+                          })
+                        }
+                      >
+                        恢复默认
+                      </button>
+                    </div>
+                  }
+                />
+                {SPECIAL_AREA_GROUPS.map((group) => (
+                  <div className="theme-group" key={group}>
+                    <div className="settings-group-title">{group}</div>
+                    {SPECIAL_AREAS.filter((area) => area.group === group).map((area) => (
+                      <Row
+                        key={area.id}
+                        name={area.label}
+                        desc={area.hint}
+                        action={
+                          <Select
+                            value={launcher.themeAreas[area.id] ?? 'default'}
+                            onChange={(value) =>
+                              onSetBehavior({
+                                themeAreas: withAreaTheme(
+                                  launcher.themeAreas,
+                                  area.id,
+                                  value as SpecialThemeId
+                                )
+                              })
+                            }
+                            options={SPECIAL_THEMES.map((theme) => ({
+                              value: theme.id,
+                              label: theme.label
+                            }))}
+                          />
+                        }
+                      />
+                    ))}
+                  </div>
+                ))}
+              </Collapse>
 
               <Row
                 name="字体"
@@ -920,6 +1027,26 @@ export default function SettingsView({
                 }
               />
 
+              <Row
+                name="下载限速"
+                desc={
+                  launcher.downloadLimitMbps > 0
+                    ? `限制所有下载（游戏预下载 / 更新与启动器更新）为 ${launcher.downloadLimitMbps} MB/s`
+                    : '限制所有下载（游戏预下载 / 更新与启动器更新）的速度；0 表示不限速（MB/s）'
+                }
+                action={
+                  <InlineEdit
+                    className="wide"
+                    value={String(launcher.downloadLimitMbps)}
+                    placeholder="0"
+                    onCommit={(v) =>
+                      onSetBehavior({
+                        downloadLimitMbps: Math.max(0, Math.min(10240, parseInt(v, 10) || 0))
+                      })
+                    }
+                  />
+                }
+              />
               <Row
                 name="导出日志"
                 desc="把运行日志复制到你选择的目录，便于反馈问题"

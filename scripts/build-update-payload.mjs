@@ -33,6 +33,14 @@ const root = resolve(import.meta.dirname, '..')
 const unpacked = resolve(process.argv[2] ?? join(root, 'release', 'win-unpacked'))
 const version =
   process.argv[3] ?? JSON.parse(await fs.readFile(join(root, 'package.json'), 'utf8')).version
+
+// The update check orders releases with a SemVer comparator; a version that is
+// not SemVer-shaped would be ordered as 0.0.0 and silently never offered again.
+if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) {
+  throw new Error(
+    `版本号 "${version}" 不是 SemVer（应为 1.2.3 或 1.2.3-beta.1）：更新检查将无法比较，已拒绝打包`
+  )
+}
 /** Assets are written next to the unpacked directory (release/ by default). */
 const outDir = resolve(unpacked, '..')
 
@@ -107,6 +115,25 @@ try {
   /* no notes for this build */
 }
 
+/** 重要更新：`theme-policy.json` 的 `critical` 是随版本提交的发布标记（CI 也能读到）；
+ *  `KL_CRITICAL_UPDATE=1` 仍可临时覆盖（本地 release.ps1 -Critical）。 */
+let policy = null
+try {
+  policy = JSON.parse(await fs.readFile(join(root, 'theme-policy.json'), 'utf8'))
+} catch {
+  /* no release policy for this build */
+}
+if (policy && policy.version !== version) {
+  // The client applies a policy only on the version it was written for, and
+  // `afterPack` refuses to embed a stale one - so this build would ship without
+  // its settings. Force the author to clean up instead of publishing silently.
+  throw new Error(
+    `theme-policy.json 属于 ${policy.version}，本次发布是 ${version}：` +
+      `请删除它；如果 ${version} 也需要调整用户设置，请把 version 改成 ${version}`
+  )
+}
+const critical = process.env.KL_CRITICAL_UPDATE === '1' || policy?.critical === true
+
 await fs.writeFile(
   join(outDir, 'update-manifest.json'),
   JSON.stringify(
@@ -120,6 +147,7 @@ await fs.writeFile(
       installerSize,
       installerSha256,
       notes,
+      critical,
       htmlUrl: `https://github.com/KevinYuHere/KevinLauncher/releases/tag/v${version}`
     },
     null,

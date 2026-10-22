@@ -144,7 +144,7 @@ export default function GalleryView({ entry, onBack, onEdit }: GalleryViewProps)
   const dir = entry.screenshotDirectory
 
   return (
-    <div className="page">
+    <div className="page gallery-page">
       <div className="page-header">
         <div>
           <h1 className="page-title">图库 · {entry.name}</h1>

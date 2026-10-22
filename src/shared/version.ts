@@ -67,3 +67,44 @@ export function compareVersions(a: string, b: string): number {
 export function isNewerVersion(candidate: string, current: string): boolean {
   return compareVersions(candidate, current) > 0
 }
+
+/**
+ * Whether a staged update folder (`update-staging/<version>`) must be kept.
+ *
+ * The running version is kept for reference; a **newer** one is an update that
+ * was not finished yet and must resume from its `.part` files on the next
+ * launch. Everything older is stale.
+ */
+export function keepStagedVersion(name: string, current: string): boolean {
+  return name === current || isNewerVersion(name, current)
+}
+
+/** A release as seen by the update channel selection. */
+export interface ReleaseCandidate {
+  version: string
+  /** GitHub drafts are never offered. */
+  draft?: boolean
+  /** Pre-release: hidden from the stable channel. */
+  prerelease?: boolean
+}
+
+/**
+ * Newest release by **version** (GitHub lists by publication date).
+ *
+ * - `stableOnly: true` → pre-releases are skipped, so the stable channel only
+ *   ever sees a real release;
+ * - `stableOnly: false` → every release competes; a stable version outranks its
+ *   own pre-releases, so the beta channel takes whatever is actually newest.
+ */
+export function pickNewestVersion<T extends ReleaseCandidate>(
+  releases: T[],
+  stableOnly: boolean
+): T | null {
+  let best: T | null = null
+  for (const release of releases) {
+    if (release.draft) continue
+    if (stableOnly && release.prerelease) continue
+    if (!best || compareVersions(release.version, best.version) > 0) best = release
+  }
+  return best
+}

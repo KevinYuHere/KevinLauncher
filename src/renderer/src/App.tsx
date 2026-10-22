@@ -29,6 +29,11 @@ import ModuleManagerView from './components/ModuleManagerView'
 import LinkedLaunchView from './components/LinkedLaunchView'
 import LaunchTransition from './components/LaunchTransition'
 import Toaster, { showToast } from './components/toast'
+import ThemeClickEffect from './components/ThemeClickEffect'
+import { sweepPageText } from './themeTextSweep'
+import { installInputSweep } from './inputSweep'
+import { burstThemeTriangles } from './themeParticles'
+import { installNoNativeTooltips } from './noNativeTooltips'
 import { installPressJelly } from './drag/pressJelly'
 import GalleryView from './components/GalleryView'
 import PlayTimeView from './components/PlayTimeView'
@@ -42,6 +47,8 @@ import { backgroundUrl, brandUrl, defaultIconUrl, fileUrl } from './media'
 import { directoriesOverlap } from '@shared/paths'
 import { updateChromeContrast } from './contrast'
 import { applyGlass, applyTheme } from './theme'
+import { applySpecialTheme } from './specialTheme'
+import { SpecialThemeProvider } from './theme/ThemeScope'
 import { extractVideoAccent } from './videoAccent'
 import { installWallpaperRegionUpdater, updateWallpaperRegions } from './wallpaperRegion'
 
@@ -94,7 +101,11 @@ export default function App(): ReactElement {
     afterLaunch: 'none',
     autoStart: 'off',
     sidebarMaterial: true,
-    updateChannel: 'stable'
+    updateChannel: 'stable',
+    downloadLimitMbps: 0,
+    themeAreas: {},
+    themeLocks: {},
+    themePolicyVersion: null
   })
   const [fonts, setFonts] = useState<string[]>([])
   const [version, setVersion] = useState('')
@@ -150,6 +161,34 @@ export default function App(): ReactElement {
     setGamesHidden(next)
     await window.api.setGamesRowHidden(next)
   }, [gamesHidden])
+
+  /** Games-bar toggle: a triangle trail follows the button to its new position. */
+  const handleGamesToggle = useCallback((): void => {
+    if (document.documentElement.getAttribute('data-special-games-bar') === 'starsnow') {
+        const start = performance.now()
+        let last = 0
+        const tick = (now: number): void => {
+          if (now - last > 34) {
+            const button = document.querySelector<HTMLElement>('.games-toggle')
+            if (button) {
+              const r = button.getBoundingClientRect()
+              burstThemeTriangles(r.left + r.width / 2, r.top + r.height / 2, {
+                count: 2,
+                size: 10,
+                distance: 58,
+                duration: 650
+              })
+            }
+            last = now
+          }
+          if (now - start < 460) requestAnimationFrame(tick)
+        }
+        requestAnimationFrame(tick)
+      }
+      void toggleGames()
+    },
+    [toggleGames]
+  )
 
   const gamesWrapRef = useRef<HTMLDivElement>(null)
   // After a chip drag settles: if the row was only peeking and the pointer is no
@@ -213,6 +252,25 @@ export default function App(): ReactElement {
     void window.api.appUpdateState().then(setAppUpdateState)
     return window.api.onAppUpdateState(setAppUpdateState)
   }, [])
+
+  // Once the download has taken over, the dialog steps aside; the rail ring shows
+  // progress. This also handles a critical update auto-starting without a click.
+  // A critical failure closes the normal dialog and shows the blocking retry card.
+  useEffect(() => {
+    if (!appUpdate) return
+    const phase = appUpdateState.phase
+    const sameVersion = appUpdateState.version === appUpdate.version
+    if (
+      sameVersion &&
+      (phase === 'downloading' ||
+        phase === 'paused' ||
+        phase === 'installing' ||
+        phase === 'done' ||
+        (phase === 'error' && appUpdateState.critical))
+    ) {
+      setAppUpdate(null)
+    }
+  }, [appUpdate, appUpdateState])
 
   const handleUpdateStart = useCallback((): void => {
     // The dialog steps aside; the rail ring shows the progress from now on.
@@ -401,7 +459,11 @@ export default function App(): ReactElement {
   const presentLaunchFx = useCallback(
     (effect: AppEntry['launchEffect'], el?: HTMLElement | null): void => {
       if (effect === 'none') return
-      const r = el?.getBoundingClientRect()
+      // Only the gravity effect is anchored to the launch button's atom; every
+      // other effect starts at the clicked element.
+      const atom = document.querySelector<HTMLElement>('.home .start-atom')
+      const anchor = effect === 'gravity' ? atom ?? el : el
+      const r = anchor?.getBoundingClientRect()
       setLaunchFx({
         effect,
         key: Date.now(),
@@ -920,6 +982,11 @@ export default function App(): ReactElement {
     applyGlass(current?.glass)
   }, [current?.glass])
 
+  // Special-edition areas: one `data-special-<area>` attribute per themed surface.
+  useEffect(() => {
+    applySpecialTheme(launcherSettings.themeAreas)
+  }, [launcherSettings.themeAreas])
+
   // Plan-A popup backgrounds: publish the wallpaper image + its centre-cropped
   // geometry so every `.wallpaper-region` popup can paint the exact region under
   // it, then keep those offsets in sync.
@@ -997,6 +1064,10 @@ export default function App(): ReactElement {
 
   // Global press-jelly for plain controls (buttons / selects / fonts / …).
   useEffect(() => installPressJelly(), [])
+  // The launcher shows no hover tooltips (native or custom).
+  useEffect(() => installNoNativeTooltips(), [])
+  // 霆骇列律 text-field sweep (native inputs cannot own pseudo-elements).
+  useEffect(() => installInputSweep(), [])
 
   // Remember where the last click was (offset from the window centre) so dialogs
   // can expand-in from it.
@@ -1035,8 +1106,7 @@ export default function App(): ReactElement {
   useEffect(() => {
     const el = animRef.current
     if (!el) return
-    const order: ViewId[] = [
-      'home',
+    const order: ViewId[] = [      'home',
       'playtime',
       'gacha',
       'gallery',
@@ -1053,8 +1123,24 @@ export default function App(): ReactElement {
     el.classList.add('app-anim-run')
   }, [view, currentId])
 
+  // 霆骇列律: after the page slide settles, sweep every text line on the new
+  // page. Measuring after the 0.4s translate avoids drawing the overlays at the
+  // old (mid-animation) coordinates.
+  useEffect(() => {
+    if (document.documentElement.dataset.specialTransition !== 'starsnow') return undefined
+    // Remove the previous page's overlays immediately: waiting for the new sweep
+    // (440ms) would leave full-width rectangles floating over the new layout.
+    document.querySelectorAll('.theme-text-sweep').forEach((el) => el.remove())
+    // A focused field may unmount without firing blur; its underline must not
+    // survive over the next page.
+    document.querySelectorAll('.theme-input-sweep').forEach((el) => el.remove())
+    const timer = window.setTimeout(() => sweepPageText(), 440)
+    return () => window.clearTimeout(timer)
+  }, [view, currentId])
+
   return (
-    <div className="app">
+    <SpecialThemeProvider assignments={launcherSettings.themeAreas}>
+      <div className="app">
       <div className="app-anim" ref={animRef}>
       {bgDisplay && bgDisplay.kind === 'image' && (
         <img
@@ -1129,7 +1215,7 @@ export default function App(): ReactElement {
           <button
             className="games-toggle"
             title={gamesHidden ? '固定展开游戏栏' : '收起游戏栏'}
-            onClick={() => void toggleGames()}
+            onClick={handleGamesToggle}
           >
             <Icon name={gamesHidden ? 'chevronRight' : 'chevronLeft'} size={18} />
           </button>
@@ -1208,6 +1294,7 @@ export default function App(): ReactElement {
       )}
 
       <Toaster />
+      <ThemeClickEffect />
 
       <ConfirmHost />
 
@@ -1220,6 +1307,34 @@ export default function App(): ReactElement {
         </div>
       )}
 
+      {appUpdateState.phase === 'error' && appUpdateState.critical && (
+        <div className="critical-blocker" role="alertdialog" aria-modal="true">
+          <div className="critical-card glass">
+            <span className="critical-icon" aria-hidden="true">
+              !
+            </span>
+            <h2>重要更新未能完成</h2>
+            <p>{appUpdateState.error || appUpdateState.message || '请检查网络后重试。'}</p>
+            <p className="critical-note">更新会在下次启动时继续重试，期间仍可正常启动游戏。</p>
+            <div className="critical-actions">
+              <button className="btn primary" onClick={handleUpdateStart}>
+                重试
+              </button>
+              <button
+                className="btn"
+                onClick={() =>
+                  void window.api.exportLogs().then((path) => {
+                    if (path) showToast(`已导出日志到 ${path}`)
+                  })
+                }
+              >
+                导出日志
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {appUpdate && appUpdate.version !== dismissedUpdate && (
         <AppUpdateDialog
           info={appUpdate}
@@ -1227,6 +1342,7 @@ export default function App(): ReactElement {
           onDismiss={() => setDismissedUpdate(appUpdate.version)}
         />
       )}
-    </div>
+      </div>
+    </SpecialThemeProvider>
   )
 }

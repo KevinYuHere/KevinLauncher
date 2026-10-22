@@ -1,10 +1,22 @@
 import { app } from 'electron'
 import { promises as fs } from 'fs'
 import { dirname, join } from 'path'
-import type { AppEntry, LinkedLaunch } from '@shared/types'
+import type {
+  AppEntry,
+  LinkedLaunch,
+  SpecialAreaId,
+  SpecialThemeId,
+  ThemePolicy
+} from '@shared/types'
 import { parseJsonLenient, writeFileAtomic } from './atomicFile'
+import {
+  applyAppThemePolicy,
+  isSpecialAreaId,
+  isSpecialThemeId
+} from '@shared/specialTheme'
 import { BACKUP_DIR_NAME } from './dataBackup'
 import { openJsonStore } from './jsonStore'
+import { configureRateLimit } from './rateLimit'
 import { log } from './logger'
 import { CURRENT_VERSION, migrateConfig } from './appMigrations'
 
@@ -26,6 +38,10 @@ export interface LauncherConfig {
     autoStart?: 'off' | 'window' | 'tray'
     sidebarMaterial?: boolean
     updateChannel?: 'stable' | 'beta'
+    downloadLimitMbps?: number
+    themeAreas?: Partial<Record<SpecialAreaId, SpecialThemeId>>
+    themeLocks?: Partial<Record<SpecialAreaId, SpecialThemeId>>
+    themePolicyVersion?: string | null
   }
 }
 
@@ -60,6 +76,7 @@ export class AppStore {
     data.apps = Array.isArray(data.apps) ? data.apps : []
     data.linkedLaunches = Array.isArray(data.linkedLaunches) ? data.linkedLaunches : []
     data.version = data.version ?? 1
+    configureRateLimit(data.launcher?.downloadLimitMbps ?? 0)
     cache = data
     saveBlocked = !writable
     // A quarantined config holds the apps the 1.2.2 write race moved aside while
@@ -130,6 +147,10 @@ export class AppStore {
     autoStart: 'off' | 'window' | 'tray'
     sidebarMaterial: boolean
     updateChannel: 'stable' | 'beta'
+    downloadLimitMbps: number
+    themeAreas: Partial<Record<SpecialAreaId, SpecialThemeId>>
+    themeLocks: Partial<Record<SpecialAreaId, SpecialThemeId>>
+    themePolicyVersion: string | null
   }> {
     const config = await this.load()
     return {
@@ -139,7 +160,12 @@ export class AppStore {
       afterLaunch: config.launcher?.afterLaunch ?? 'none',
       autoStart: config.launcher?.autoStart ?? 'off',
       sidebarMaterial: config.launcher?.sidebarMaterial ?? true,
-      updateChannel: config.launcher?.updateChannel ?? 'stable'
+      // Validate on read: a hand-edited config must not reach the channel logic.
+      updateChannel: config.launcher?.updateChannel === 'beta' ? 'beta' : 'stable',
+      downloadLimitMbps: config.launcher?.downloadLimitMbps ?? 0,
+      themeAreas: config.launcher?.themeAreas ?? {},
+      themeLocks: config.launcher?.themeLocks ?? {},
+      themePolicyVersion: config.launcher?.themePolicyVersion ?? null
     }
   }
 
@@ -151,14 +177,70 @@ export class AppStore {
     autoStart?: 'off' | 'window' | 'tray'
     sidebarMaterial?: boolean
     updateChannel?: 'stable' | 'beta'
+    downloadLimitMbps?: number
+    themeAreas?: Partial<Record<SpecialAreaId, SpecialThemeId>>
   }): Promise<void> {
     const config = await this.load()
-    config.launcher = { ...config.launcher, ...patch }
+    const next = { ...config.launcher, ...patch }
+    if (next.updateChannel !== 'stable' && next.updateChannel !== 'beta') {
+      next.updateChannel = 'stable'
+    }
+    if (patch.themeAreas) {
+      // A release policy only sets values once; it never locks them. Editing the
+      // theme also clears any stale locks left by older builds/policies.
+      // Drop unknown area ids (e.g. the removed scrollbar/tooltip areas).
+      const clean: Partial<Record<SpecialAreaId, SpecialThemeId>> = {}
+      for (const [area, themeId] of Object.entries(patch.themeAreas)) {
+        if (isSpecialAreaId(area) && isSpecialThemeId(themeId)) clean[area] = themeId
+      }
+      next.themeAreas = clean
+      next.themeLocks = {}
+    }
+    config.launcher = next
+    await this.save()
+    if (patch.downloadLimitMbps !== undefined) configureRateLimit(patch.downloadLimitMbps)
+  }
+
+  /**
+   * Persist the result of applying a release theme policy (assignments, locks and
+   * the applied policy version). Kept separate from `setLauncher` so policy state
+   * is never writable through the renderer IPC.
+   */
+  static async setThemePolicyState(state: {
+    themeAreas: Partial<Record<SpecialAreaId, SpecialThemeId>>
+    themeLocks: Partial<Record<SpecialAreaId, SpecialThemeId>>
+    themePolicyVersion: string
+  }): Promise<void> {
+    const config = await this.load()
+    config.launcher = {
+      ...config.launcher,
+      themeAreas: state.themeAreas,
+      themeLocks: state.themeLocks,
+      themePolicyVersion: state.themePolicyVersion
+    }
     await this.save()
   }
 
-  static async setGamesRowHidden(hidden: boolean): Promise<void> {
+  /**
+   * Apply the per-app part of a release policy (glass material / launch effect)
+   * to every app. Runs once, right after the theme assignments; later starts are
+   * skipped by the policy version gate, so the user keeps whatever they pick
+   * afterwards.
+   */
+  static async applyReleasePolicyToApps(policy: ThemePolicy): Promise<boolean> {
+    if (!policy.material && !policy.launchEffect) return false
     const config = await this.load()
+    let changed = false
+    config.apps = config.apps.map((entry) => {
+      const result = applyAppThemePolicy(entry, policy)
+      if (result.changed) changed = true
+      return result.app
+    })
+    if (changed) await this.save()
+    return changed
+  }
+
+  static async setGamesRowHidden(hidden: boolean): Promise<void> {    const config = await this.load()
     config.ui = { ...config.ui, gamesRowHidden: hidden }
     await this.save()
   }

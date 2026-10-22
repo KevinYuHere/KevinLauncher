@@ -1,7 +1,7 @@
 import { parentPort } from 'worker_threads'
 import { join } from 'path'
-import { getSophonBuild, downloadSophonBuild } from '../update/sophon'
-import { getPatchBuild, applySophonPatch } from '../update/sophonPatch'
+import { getSophonBuild, downloadSophonBuild, BuildNotFound } from '../update/sophon'
+import { getPatchBuild, applySophonPatch, preparePatchCache, PatchBuildNotFound } from '../update/sophonPatch'
 
 interface StartMessage {
   type: 'start'
@@ -48,48 +48,75 @@ parentPort?.on('message', async (message: unknown) => {
     const cacheOnly = msg.mode === 'preDownload'
     let patched = false
 
-    // Patch mode (diff from the installed version) is used for pre-download too:
-    // originals come from the game dir and only changed files are staged. Like
-    // Starward, only try when `diff_tags` lists the installed version.
+    // Patch mode (diff from the installed version) is used for pre-download too.
+    // Like Starward: only when `diff_tags` lists the installed version, and a
+    // patch that then fails aborts the task (no full-download fallback).
     const canPatch = msg.diffTags ? msg.diffTags.includes(msg.localVersion ?? '') : true
+    let patchBuild: Awaited<ReturnType<typeof getPatchBuild>> | null = null
     if (msg.localVersion && msg.hpatchzPath && canPatch) {
       try {
-        const patchBuild = await getPatchBuild(msg.branch)
-        if (patchBuild.categories.some((c) => c.versions[msg.localVersion as string])) {
-          post({ type: 'phase', message: '正在应用增量补丁…' })
-          await applySophonPatch(
-            patchBuild,
-            build,
-            msg.localVersion,
-            installDir,
-            installDir,
-            msg.hpatchzPath,
-            emitProgress,
-            controller.signal,
-            msg.audioLanguages ?? [],
-            msg.ignoreFields ?? [],
-            join(installDir, 'ldiff'),
-            cacheOnly,
-            msg.blacklist ?? [],
-            msg.mode === 'update'
-          )
-          patched = true
-        }
-      } catch {
-        // Patch failed — fall back to file-level incremental download.
-        post({ type: 'phase', message: '补丁不可用，改为文件级增量下载…' })
+        patchBuild = await getPatchBuild(msg.branch)
+      } catch (error) {
+        // Only a missing patch build falls back to chunk mode.
+        if (error instanceof PatchBuildNotFound) patchBuild = null
+        else throw error
+      }
+      if (patchBuild && !patchBuild.categories.some((c) => c.versions[msg.localVersion as string])) {
+        patchBuild = null
       }
     }
-
+    if (patchBuild && msg.localVersion && msg.hpatchzPath) {
+      // Starward downloads and verifies every unique patch file first, then
+      // applies them (a pre-download runs only the download step).
+      post({
+        type: 'phase',
+        message: cacheOnly ? '正在下载预下载补丁…' : '正在下载更新补丁…'
+      })
+      await preparePatchCache(
+        patchBuild,
+        msg.localVersion,
+        installDir,
+        msg.audioLanguages ?? [],
+        msg.ignoreFields ?? [],
+        emitProgress,
+        controller.signal
+      )
+      if (!cacheOnly) {
+        post({ type: 'phase', message: '正在应用增量补丁…' })
+        await applySophonPatch(
+          patchBuild,
+          build,
+          msg.localVersion,
+          installDir,
+          installDir,
+          msg.hpatchzPath,
+          emitProgress,
+          controller.signal,
+          msg.audioLanguages ?? [],
+          msg.ignoreFields ?? [],
+          join(installDir, 'ldiff'),
+          false,
+          msg.blacklist ?? [],
+          true
+        )
+      }
+      patched = true
+    }
     if (!patched) {
       // The installed version's manifests let unchanged chunks be copied from
       // the local game files instead of being downloaded again.
+      post({
+        type: 'phase',
+        message: cacheOnly ? '正在获取预下载文件清单…' : '正在获取更新文件清单…'
+      })
       let localBuild: Awaited<ReturnType<typeof getSophonBuild>> | undefined
       if (msg.localVersion) {
         try {
           localBuild = await getSophonBuild(msg.branch, msg.localVersion)
-        } catch {
-          localBuild = undefined
+        } catch (error) {
+          // Only a missing local build means no reuse; network errors abort.
+          if (error instanceof BuildNotFound) localBuild = undefined
+          else throw error
         }
       }
       await downloadSophonBuild(

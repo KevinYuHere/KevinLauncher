@@ -1,4 +1,4 @@
-import { addTask, makeSpring, springSettled, stepSpring, type Spring } from './spring'
+import { addTask, frostMotion, makeSpring, springSettled, stepSpring, type Spring } from './spring'
 
 /**
  * Global "press jelly" for plain controls (buttons, selects, colour trigger,
@@ -34,7 +34,9 @@ function ensure(): void {
   running = true
   addTask((dt) => {
     for (const [el, spring] of active) {
-      stepSpring(spring, dt, 320, 13)
+      // Frost-snap (霆骇列律): a crisper, smaller pop than the elastic default.
+      if (frostMotion()) stepSpring(spring, dt, 900, 25)
+      else stepSpring(spring, dt, 320, 13)
       el.style.transform = `scale(${spring.v.toFixed(4)})`
       if (springSettled(spring, 0.002, 0.03)) {
         el.style.transform = ''
@@ -67,7 +69,7 @@ export function installPressJelly(): () => void {
     const el = target?.closest?.(SELECTOR) as HTMLElement | null
     if (!el) return
     pressed = el
-    bump(el, 1.12)
+    bump(el, frostMotion() ? 1.06 : 1.12)
   }
   const onUp = (): void => {
     const el = pressed

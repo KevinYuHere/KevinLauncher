@@ -375,60 +375,48 @@ export async function getGameConfig(
 export async function getGameChannelSDK(
   game: 'genshin' | 'starrail' | 'zzz'
 ): Promise<string | null> {
-  try {
-    const url = new URL(`${API_BASE}/getGameChannelSDKs`)
-    url.searchParams.set('launcher_id', LAUNCHER_ID)
-    url.searchParams.set('game_ids[]', GAME_IDS[game])
-    url.searchParams.set('language', 'en-us')
-    const res = await fetch(url.toString(), { headers: { 'User-Agent': 'Mozilla/5.0' } })
-    const json = (await res.json()) as {
-      retcode: number
-      data?: { game_channel_sdks?: { version?: string }[] }
-    }
-    return json.data?.game_channel_sdks?.[0]?.version ?? null
-  } catch {
-    return null
+  const url = new URL(`${API_BASE}/getGameChannelSDKs`)
+  url.searchParams.set('launcher_id', LAUNCHER_ID)
+  url.searchParams.set('game_ids[]', GAME_IDS[game])
+  url.searchParams.set('language', 'en-us')
+  const res = await fetch(url.toString(), { headers: { 'User-Agent': 'Mozilla/5.0' } })
+  const json = (await res.json()) as {
+    retcode: number
+    data?: { game_channel_sdks?: { version?: string }[] }
   }
+  return json.data?.game_channel_sdks?.[0]?.version ?? null
 }
 
 export async function getGameDeprecatedFiles(
   game: 'genshin' | 'starrail' | 'zzz'
 ): Promise<string[]> {
-  try {
-    const url = new URL(`${API_BASE}/getGameDeprecatedFileConfigs`)
-    url.searchParams.set('launcher_id', LAUNCHER_ID)
-    url.searchParams.set('game_ids[]', GAME_IDS[game])
-    url.searchParams.set('language', 'en-us')
-    const res = await fetch(url.toString(), { headers: { 'User-Agent': 'Mozilla/5.0' } })
-    const json = (await res.json()) as {
-      retcode: number
-      data?: { deprecated_file_configs?: { deprecated_files?: { name?: string }[] }[] }
-    }
-    return (json.data?.deprecated_file_configs?.[0]?.deprecated_files ?? [])
-      .map((file) => file.name)
-      .filter((name): name is string => !!name)
-  } catch {
-    return []
+  const url = new URL(`${API_BASE}/getGameDeprecatedFileConfigs`)
+  url.searchParams.set('launcher_id', LAUNCHER_ID)
+  url.searchParams.set('game_ids[]', GAME_IDS[game])
+  url.searchParams.set('language', 'en-us')
+  const res = await fetch(url.toString(), { headers: { 'User-Agent': 'Mozilla/5.0' } })
+  const json = (await res.json()) as {
+    retcode: number
+    data?: { deprecated_file_configs?: { deprecated_files?: { name?: string }[] }[] }
   }
+  return (json.data?.deprecated_file_configs?.[0]?.deprecated_files ?? [])
+    .map((file) => file.name)
+    .filter((name): name is string => !!name)
 }
 
 export async function getWPFPackageVersion(
   game: 'genshin' | 'starrail' | 'zzz'
 ): Promise<string | null> {
-  try {
-    const url = new URL(`${API_BASE}/getWPFPackages`)
-    url.searchParams.set('launcher_id', LAUNCHER_ID)
-    url.searchParams.set('game_ids[]', GAME_IDS[game])
-    url.searchParams.set('language', 'en-us')
-    const res = await fetch(url.toString(), { headers: { 'User-Agent': 'Mozilla/5.0' } })
-    const json = (await res.json()) as {
-      retcode: number
-      data?: { wpf_packages?: { wpf_package?: { version?: string } }[] }
-    }
-    return json.data?.wpf_packages?.[0]?.wpf_package?.version ?? null
-  } catch {
-    return null
+  const url = new URL(`${API_BASE}/getWPFPackages`)
+  url.searchParams.set('launcher_id', LAUNCHER_ID)
+  url.searchParams.set('game_ids[]', GAME_IDS[game])
+  url.searchParams.set('language', 'en-us')
+  const res = await fetch(url.toString(), { headers: { 'User-Agent': 'Mozilla/5.0' } })
+  const json = (await res.json()) as {
+    retcode: number
+    data?: { wpf_packages?: { wpf_package?: { version?: string } }[] }
   }
+  return json.data?.wpf_packages?.[0]?.wpf_package?.version ?? null
 }
 /** Numeric dotted-version comparison. */
 export function compareVersion(a: string, b: string): number {

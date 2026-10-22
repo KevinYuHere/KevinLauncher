@@ -40,7 +40,7 @@ const download = (asset, extra = {}) =>
 
 const manifest = JSON.parse(await (await download(manifestAsset)).text())
 console.log(
-  `manifest  version=${manifest.version} installSize=${manifest.installSize} ` +
+  `manifest  version=${manifest.version} appSize=${manifest.appSize} critical=${manifest.critical === true} ` +
     `sha256=${String(manifest.payloadSha256).slice(0, 16)}…`
 )
 console.log(`payload   ${zip.name} ${(zip.size / 1048576).toFixed(1)} MB`)

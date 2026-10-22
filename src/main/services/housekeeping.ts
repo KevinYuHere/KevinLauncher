@@ -2,6 +2,7 @@ import { app } from 'electron'
 import { promises as fs } from 'fs'
 import { join } from 'path'
 import type { UsageReport } from '@shared/types'
+import { keepStagedVersion } from '@shared/version'
 import { directorySize } from './updateDownload'
 import { currentAppVersion } from './appVersion'
 import { log } from './logger'
@@ -10,8 +11,10 @@ import { log } from './logger'
  * Disk housekeeping.
  *
  * Everything the launcher writes to the data directory is bounded:
- * - staged update downloads are removed once they are no longer the version that
- *   is running (a failed or paused download used to stay forever),
+ * - staged update downloads are removed once they are no longer needed: the
+ *   folder of the running version, and the folder of a **newer** version (a
+ *   download that is still pending — that is what makes a critical update resume
+ *   after the user closed the launcher), are kept,
  * - the gallery thumbnail cache and the log files can be cleared on demand from
  *   the settings ("清理与占用").
  */
@@ -23,13 +26,18 @@ const logFiles = (): string[] => [
   join(app.getPath('userData'), 'launcher.log.1')
 ]
 
-/** Deletes staged downloads that do not belong to the running version. */
+/**
+ * Deletes staged downloads that can no longer be resumed: anything that is
+ * neither the running version nor a newer (therefore still pending) one.
+ */
 export async function cleanUpdateStaging(): Promise<number> {
-  const keep = currentAppVersion()
+  const current = currentAppVersion()
   let removed = 0
   try {
     for (const entry of await fs.readdir(stagingDir(), { withFileTypes: true })) {
-      if (entry.name === keep) continue
+      // A newer version may be a download in flight (or one interrupted by
+      // closing the launcher): keep its `.part` files so it resumes.
+      if (keepStagedVersion(entry.name, current)) continue
       await fs
         .rm(join(stagingDir(), entry.name), { recursive: true, force: true })
         .catch(() => undefined)

@@ -18,6 +18,7 @@ import {
 } from './services/behavior'
 import { applyAutoStart, startedHidden } from './services/autostart'
 import { applyDataDir } from './services/dataDir'
+import { applyThemePolicyOnStartup } from './services/themePolicy'
 import { relaunchInstallerElevated, syncInstalledVersion } from './services/install'
 import { cleanUpdateStaging } from './services/housekeeping'
 import { currentAppVersion } from './services/appVersion'
@@ -241,6 +242,11 @@ app.whenReady().then(async () => {
   void isElevated().then((elevated) => log(`app: administrator=${elevated}`))
 
   registerIpc()
+
+  // Apply a release theme policy before the window opens, so the first render
+  // already shows the developer-selected assignments (and never flashes the
+  // user's previous choice). It stays a no-op once this policy version ran.
+  await applyThemePolicyOnStartup()
 
   const mode = runMode
   windowIcon = (await launcherIconPaths()).png

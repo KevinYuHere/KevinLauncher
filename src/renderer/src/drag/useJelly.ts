@@ -1,5 +1,5 @@
 import { useEffect, useRef, type RefObject } from 'react'
-import { addTask, makeSpring, springSettled, stepSpring } from './spring'
+import { addTask, frostMotion, makeSpring, springSettled, stepSpring } from './spring'
 
 /**
  * Highly reusable "jelly" motion for any element: animates a springy position +
@@ -48,8 +48,14 @@ export function useJelly(ref: RefObject<HTMLElement | null>, options: JellyOptio
       st.deform.target = Math.min(o.maxStretch ?? 0.2, speed * (o.stretchK ?? 0.008))
       const denom = Math.abs(st.pos.vel) + Math.abs(st.posy.vel) + 1e-4
       if (speed > 12) st.u = (Math.abs(st.pos.vel) - Math.abs(st.posy.vel)) / denom
-      stepSpring(st.pos, dt)
-      stepSpring(st.posy, dt)
+      // 霆骇列律 replaces the elastic slide with a stiffer frost snap.
+      if (frostMotion()) {
+        stepSpring(st.pos, dt, 900, 28)
+        stepSpring(st.posy, dt, 900, 28)
+      } else {
+        stepSpring(st.pos, dt)
+        stepSpring(st.posy, dt)
+      }
       // Same tuning as the drag hook so every jelly effect feels identical.
       stepSpring(st.pop, dt, 240, 7)
       stepSpring(st.deform, dt, 620, 20)

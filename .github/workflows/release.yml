@@ -46,6 +46,33 @@ jobs:
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
           echo "Building v$version"
 
+      # The update check compares releases with a SemVer comparator: a version
+      # such as `2.0.0-霆骇` or `2025雪` would be ordered as 0.0.0 and never
+      # offered again, so refuse it before building anything.
+      - name: Verify the version is SemVer
+        shell: bash
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "version $version is not SemVer (expected 1.2.3 or 1.2.3-beta.1)" >&2
+            exit 1
+          fi
+
+      # A release policy belongs to exactly one version: it is embedded in that
+      # version's payload and applied on its first start. Refuse to build a
+      # release while a stale policy from an older version is still around.
+      - name: Verify theme-policy matches the release
+        shell: bash
+        run: |
+          if [ -f theme-policy.json ]; then
+            policy_version=$(node -p "require('./theme-policy.json').version")
+            if [ "$policy_version" != "${{ steps.version.outputs.version }}" ]; then
+              echo "theme-policy.json belongs to $policy_version, but this release is ${{ steps.version.outputs.version }}." >&2
+              echo "Delete it, or set its version to ${{ steps.version.outputs.version }} if this release also changes user settings." >&2
+              exit 1
+            fi
+          fi
+
       # The tag (when triggered by one) must match package.json, otherwise the
       # release would advertise a version the payload does not contain.
       - name: Verify the tag matches package.json

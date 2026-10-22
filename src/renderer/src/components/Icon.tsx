@@ -106,13 +106,13 @@ const PATHS: Record<IconName, ReactElement> = {
   ),
   pause: (
     <>
-      <rect x="6.6" y="5" width="3.4" height="14" rx="1" />
-      <rect x="14" y="5" width="3.4" height="14" rx="1" />
+      <rect x="6.6" y="5" width="3.4" height="14" rx="1" fill="currentColor" stroke="none" />
+      <rect x="14" y="5" width="3.4" height="14" rx="1" fill="currentColor" stroke="none" />
     </>
   ),
   play: (
     <>
-      <path d="M8 5.5 18.5 12 8 18.5z" />
+      <path d="M8 5.5 18.5 12 8 18.5z" fill="currentColor" stroke="none" />
     </>
   ),
   chevronDown: (

@@ -46,6 +46,7 @@ const api: KevinApi = {
     afterLaunch?: AfterLaunchAction
     autoStart?: AutoStartMode
     sidebarMaterial?: boolean
+    themeAreas?: Partial<Record<string, string>>
   }) => ipcRenderer.invoke('launcher:setBehavior', patch),
   hideToTray: () => ipcRenderer.invoke('window:hideToTray'),
   exportData: () => ipcRenderer.invoke('data:export'),

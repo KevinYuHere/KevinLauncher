@@ -2,7 +2,7 @@ import { app, shell } from 'electron'
 import { join } from 'path'
 import { promises as fs } from 'fs'
 import type { AppUpdateInfo, AppUpdateState, AppUpdateStatus } from '@shared/types'
-import { isNewerVersion } from '@shared/version'
+import { isNewerVersion, pickNewestVersion } from '@shared/version'
 import { downloadPayload, extractPayload } from './updateDownload'
 import { backupUserData } from './dataBackup'
 import { sha256File } from './hash'
@@ -30,6 +30,8 @@ const RELEASES_LIST_API = `https://api.github.com/repos/${GITHUB_REPO}/releases`
 const LATEST_MANIFEST_URL = `https://github.com/${GITHUB_REPO}/releases/latest/download/update-manifest.json`
 const LATEST_DOWNLOAD_BASE = `https://github.com/${GITHUB_REPO}/releases/latest/download`
 const USER_AGENT = 'KevinLauncher'
+/** Versions we accept from a release tag (they become directory names). */
+const SAFE_VERSION = /^\d+(?:\.\d+)*(?:-[0-9A-Za-z.-]+)?$/
 
 /** Time between automatic checks (startup check is separate). */
 const CHECK_INTERVAL = 24 * 60 * 60 * 1000
@@ -41,12 +43,22 @@ const FAILURE_RETRY = 5 * 60 * 1000
 const RATE_LIMIT_BACKOFF = 30 * 60 * 1000
 /** Small delay so the window is painted before the first request. */
 const STARTUP_DELAY = 4_000
+/** A critical update starts by itself as soon as it is detected. */
+const CRITICAL_AUTOSTART_DELAY = 0
+/** Critical updates retry automatically; after this many failures the UI waits. */
+const CRITICAL_MAX_RETRIES = 3
+const CRITICAL_RETRY_DELAY = 8_000
 
 /** Human readable reason for a failed check (403 = GitHub rate limit). */
 function describeCheckError(error: unknown): string {
   const message = (error as Error).message ?? String(error)
   if (/403/.test(message)) return 'GitHub 接口请求过于频繁（限流），请稍后再试'
   return message
+}
+
+/** Cached / marker data is user-writable: never trust its version string. */
+function safeInfo(info: AppUpdateInfo | null | undefined): AppUpdateInfo | null {
+  return info && typeof info.version === 'string' && SAFE_VERSION.test(info.version) ? info : null
 }
 
 interface GitHubRelease {
@@ -116,6 +128,8 @@ interface ManifestFields {
   /** Release notes embedded by the release script (used by the free path). */
   notes?: string
   htmlUrl?: string
+  /** 重要更新：不可跳过 / 暂停，检测到即自动开始。 */
+  critical?: boolean
 }
 
 /** Builds the update info from a manifest fetched through the free path. */
@@ -138,7 +152,8 @@ function infoFromManifest(manifest: ManifestFields): AppUpdateInfo | null {
     installerName: manifest.installerSize ? installerName : null,
     installerSize: manifest.installerSize ?? 0,
     installerSha256: manifest.installerSha256 ?? null,
-    publishedAt: ''
+    publishedAt: '',
+    critical: manifest.critical === true
   }
 }
 
@@ -204,7 +219,13 @@ async function apiAssetUrls(kind: 'payload' | 'installer'): Promise<string[]> {
 /** Build AppUpdateInfo from a GitHub release object. */
 async function infoFromRelease(release: GitHubRelease): Promise<AppUpdateInfo | null> {
   const version = String(release.tag_name ?? '').trim().replace(/^v/i, '')
-  if (!version) return null
+  // The version becomes a directory name (`app-<version>`, `update-staging/<v>`),
+  // so anything that is not a plain SemVer string is refused instead of being
+  // joined into a path.
+  if (!version || !SAFE_VERSION.test(version)) {
+    if (version) log(`appUpdate: ignoring release with unusable version "${version}"`)
+    return null
+  }
   const assets = release.assets ?? []
   const payload = assets.find((item) => /KevinLauncher-.*\.zip$/i.test(item.name ?? ''))
   const installer = assets.find((item) => /KevinLauncher-Installer.*\.exe$/i.test(item.name ?? ''))
@@ -215,6 +236,7 @@ async function infoFromRelease(release: GitHubRelease): Promise<AppUpdateInfo | 
   let installerName: string | null = null
   let installerSize = installer?.size ?? 0
   let installerSha256: string | null = null
+  let critical = false
   if (manifest) {
     try {
       const meta = JSON.parse(await fetchText(assetUrls(manifest))) as {
@@ -224,6 +246,7 @@ async function infoFromRelease(release: GitHubRelease): Promise<AppUpdateInfo | 
         installerName?: string
         installerSize?: number
         installerSha256?: string
+        critical?: boolean
       }
       installSize = meta.appSize ?? 0
       payloadSha256 = meta.payloadSha256 ?? null
@@ -231,6 +254,7 @@ async function infoFromRelease(release: GitHubRelease): Promise<AppUpdateInfo | 
       installerName = meta.installerName ?? null
       if (meta.installerSize) installerSize = meta.installerSize
       installerSha256 = meta.installerSha256 ?? null
+      critical = meta.critical === true
     } catch (error) {
       log(`appUpdate: manifest unreadable (${(error as Error).message})`)
     }
@@ -249,32 +273,65 @@ async function infoFromRelease(release: GitHubRelease): Promise<AppUpdateInfo | 
     installerName: installerName ?? installer?.name ?? null,
     installerSize,
     installerSha256,
-    publishedAt: release.published_at ?? ''
+    publishedAt: release.published_at ?? '',
+    critical
   }
 }
 
 /**
- * Newest published release. `stable` ignores pre-releases (the
- * `releases/latest` endpoint); `beta` scans the release list (newest first) and
- * includes pre-releases.
+ * Newest release **by version** (GitHub itself lists by publication date, so a
+ * patch published last must not hide a newer minor).
+ *
+ * - `stableOnly: true`  → pre-releases are skipped (the stable channel),
+ * - `stableOnly: false` → stable and pre-release compete; the higher version
+ *   wins (the beta channel always takes the absolute newest build).
+ */
+async function latestFromList(stableOnly: boolean): Promise<AppUpdateInfo | null> {
+  const response = await fetch(RELEASES_LIST_API, {
+    headers: { accept: 'application/vnd.github+json', 'user-agent': USER_AGENT }
+  })
+  if (response.status === 404) return null
+  if (!response.ok) throw new Error(`GitHub 返回 HTTP ${response.status}`)
+  const list = (await response.json()) as GitHubRelease[]
+  let pool = list
+    .map((release) => ({
+      release,
+      version: String(release.tag_name ?? '').trim().replace(/^v/i, ''),
+      draft: release.draft === true,
+      prerelease: release.prerelease === true
+    }))
+    .filter((candidate) => candidate.version)
+  // Highest version first; an unusable release (bad tag / missing assets) must
+  // not block the next-best one.
+  for (;;) {
+    const best = pickNewestVersion(pool, stableOnly)
+    if (!best) return null
+    const info = await infoFromRelease(best.release)
+    if (info) return info
+    pool = pool.filter((candidate) => candidate !== best)
+  }
+}
+
+/**
+ * Newest release for a channel:
+ * - `stable` → the highest **non-pre-release** version, so a critical stable
+ *   release also reaches beta users that are below it;
+ * - `beta`   → the highest version overall (stable or pre-release).
  */
 async function fetchLatestRelease(channel: 'stable' | 'beta'): Promise<AppUpdateInfo | null> {
-  if (channel === 'beta') {
-    const response = await fetch(RELEASES_LIST_API, {
-      headers: { accept: 'application/vnd.github+json', 'user-agent': USER_AGENT }
-    })
-    if (response.status === 404) return null
-    if (!response.ok) throw new Error(`GitHub 返回 HTTP ${response.status}`)
-    const list = (await response.json()) as GitHubRelease[]
-    for (const release of list) {
-      if (release.draft) continue
-      const info = await infoFromRelease(release)
-      if (info) return info
-    }
-    return null
+  if (channel === 'beta') return latestFromList(false)
+
+  // The list API gives the real "newest stable by version"; `releases/latest`
+  // only means "newest published", which an out-of-order patch can distort.
+  try {
+    const info = await latestFromList(true)
+    if (info) return info
+  } catch (error) {
+    log(`appUpdate: release list unavailable (${(error as Error).message})`)
   }
 
-  // 1) Free path first (no rate limit, no auth).
+  // 1) Free path (no rate limit, no auth) — also works where api.github.com is
+  //    unreachable but github.com is not.
   try {
     const info = await fetchReleaseViaLatestUrl()
     if (info) return info
@@ -338,6 +395,11 @@ export class AppUpdateChecker {
   private state: AppUpdateState = { ...IDLE_STATE }
   private controller: AbortController | null = null
   private running = false
+  /** Critical-update version that already auto-started (start it only once). */
+  private autoStarted: string | null = null
+  /** Automatic retry timer / counter for a failing critical update. */
+  private criticalRetryTimer: NodeJS.Timeout | null = null
+  private criticalRetries = 0
   /** Update channel the current result was computed for. */
   private channel: 'stable' | 'beta' = 'stable'
   /** Timestamp of the last successful automatic check (active channel). */
@@ -393,7 +455,12 @@ export class AppUpdateChecker {
         join(app.getPath('userData'), 'simulate-app-update.json'),
         'utf-8'
       )
-      const spec = JSON.parse(raw) as { version?: string; name?: string; notes?: string }
+      const spec = JSON.parse(raw) as {
+        version?: string
+        name?: string
+        notes?: string
+        critical?: boolean
+      }
       const version = spec.version ?? '9.9.9'
       return {
         version,
@@ -409,7 +476,8 @@ export class AppUpdateChecker {
         installerName: null,
         installerSize: 0,
         installerSha256: null,
-        publishedAt: new Date().toISOString()
+        publishedAt: new Date().toISOString(),
+        critical: spec.critical === true
       }
     } catch {
       return null
@@ -476,10 +544,84 @@ export class AppUpdateChecker {
     return () => this.stateListeners.delete(callback)
   }
 
+  /**
+   * Publish a newly found release. A **critical** update also starts itself: the
+   * user must not have to notice and click it. `autoStarted` keeps a repeated
+   * check (e.g. after a failed manual refresh) from restarting it.
+   */
+  private announce(info: AppUpdateInfo): void {
+    if (info.critical && this.autoStarted !== info.version) {
+      this.autoStarted = info.version
+      this.criticalRetries = 0
+      // Persist before starting: if the app is closed mid-download (or crashes),
+      // the next launch must resume instead of forgetting the critical update.
+      void this.saveCriticalMarker(info)
+      log(`appUpdate: v${info.version} is a critical update — starting automatically`)
+      setTimeout(() => {
+        // A later check may already have replaced it; never start a stale one.
+        if (!this.running && this.info?.version === info.version) this.begin()
+      }, CRITICAL_AUTOSTART_DELAY)
+    }
+    for (const listener of this.listeners) listener(info)
+  }
+
+  private criticalMarkerFile(): string {
+    return join(app.getPath('userData'), 'critical-update.json')
+  }
+
+  /**
+   * A critical update must start by itself even when the status came from the
+   * cache (a channel switch, a rate-limited refresh): the user may never have
+   * seen a dialog to click.
+   */
+  private resumeCriticalAutoStart(): void {
+    if (this.info?.critical && this.autoStarted !== this.info.version) this.announce(this.info)
+  }
+
+  /** Persist a real critical update (fake local specs are not resumed forever). */
+  private async saveCriticalMarker(info: AppUpdateInfo): Promise<void> {
+    if (!info.critical || (info.payloadUrls.length === 0 && info.installerUrls.length === 0)) return
+    try {
+      await writeFileAtomic(this.criticalMarkerFile(), JSON.stringify(info, null, 2))
+      log(`appUpdate: critical marker saved for ${info.version}`)
+    } catch (error) {
+      log(`appUpdate: cannot save critical marker: ${(error as Error).message}`)
+    }
+  }
+
+  private async clearCriticalMarker(): Promise<void> {
+    await fs.rm(this.criticalMarkerFile(), { force: true }).catch(() => undefined)
+  }
+
+  /** Resume a critical update saved by the previous session (before any check). */
+  private async loadCriticalMarker(): Promise<void> {
+    try {
+      const info = safeInfo(
+        JSON.parse(await fs.readFile(this.criticalMarkerFile(), 'utf8')) as AppUpdateInfo
+      )
+      if (!info?.critical || !isNewerVersion(info.version, this.current())) {
+        await this.clearCriticalMarker()
+        return
+      }
+      if (!this.info || isNewerVersion(info.version, this.info.version)) {
+        this.info = info
+        log(`appUpdate: resuming critical update ${info.version} from marker`)
+      }
+    } catch {
+      /* no marker / unreadable: a normal check follows */
+    }
+  }
+
   /** Starts the startup check and the 24-hour interval. */
   start(): void {
     void (async (): Promise<void> => {
       await this.loadCache()
+      // A critical marker is independent of the check cache (channel changes,
+      // cache invalidation, app closed mid-download) — resume it first.
+      await this.loadCriticalMarker()
+      // A critical update cached by the previous session must still start by
+      // itself (the 24h check below may legitimately be answered from cache).
+      if (this.info?.critical) this.announce(this.info)
       setTimeout(() => void this.check('auto'), STARTUP_DELAY)
       setInterval(() => void this.check('auto'), CHECK_INTERVAL)
     })()
@@ -512,7 +654,7 @@ export class AppUpdateChecker {
               manual: state.manual ?? 0,
               failedAt: state.failedAt ?? 0,
               rateLimitedUntil: state.rateLimitedUntil ?? 0,
-              info: state.info ?? null
+              info: safeInfo(state.info)
             }
           }
         }
@@ -523,7 +665,7 @@ export class AppUpdateChecker {
           manual: raw.manualCheckedAt ?? 0,
           failedAt: 0,
           rateLimitedUntil: 0,
-          info: raw.info ?? null
+          info: safeInfo(raw.info)
         }
       }
       this.applyChannel(channel)
@@ -566,17 +708,26 @@ export class AppUpdateChecker {
       this.lastManualCheck = now
       if (this.announced !== fake.version) {
         this.announced = fake.version
-        for (const listener of this.listeners) listener(fake)
+        this.announce(fake)
       }
       return this.status()
     }
     this.switchChannel((await AppStore.launcherSettings()).updateChannel)
     const stamp = kind === 'auto' ? this.lastAutoCheck : this.lastManualCheck
     // Fresh for this kind (≤ 24 h) → answer from the cached result.
-    if (stamp && now - stamp < CHECK_CACHE_TTL) return this.status()
-    if (this.rateLimitedUntil > now) return this.status()
+    if (stamp && now - stamp < CHECK_CACHE_TTL) {
+      this.resumeCriticalAutoStart()
+      return this.status()
+    }
+    if (this.rateLimitedUntil > now) {
+      this.resumeCriticalAutoStart()
+      return this.status()
+    }
     // A failed attempt is retried after a while, not on every click.
-    if (this.failedAt && now - this.failedAt < FAILURE_RETRY) return this.status()
+    if (this.failedAt && now - this.failedAt < FAILURE_RETRY) {
+      this.resumeCriticalAutoStart()
+      return this.status()
+    }
 
     try {
       const latest = await fetchLatestRelease(this.channel)
@@ -593,7 +744,7 @@ export class AppUpdateChecker {
       const found = this.info
       if (found && this.announced !== found.version) {
         this.announced = found.version
-        for (const listener of this.listeners) listener(found)
+        this.announce(found)
       }
       await this.saveCache()
     } catch (error) {
@@ -612,9 +763,21 @@ export class AppUpdateChecker {
   }
 
   /** Begins the upgrade, or resumes a paused download. */
-  begin(): void {
+  begin(retry = false): void {
     const info = this.info
     if (!info || this.running) return
+    if (this.criticalRetryTimer) {
+      clearTimeout(this.criticalRetryTimer)
+      this.criticalRetryTimer = null
+    }
+    // A manual retry after the automatic attempts are exhausted starts a fresh
+    // retry budget; an automatic retry must not reset its own counter.
+    if (!retry && this.state.phase === 'error') this.criticalRetries = 0
+    this.patch({
+      version: info.version,
+      critical: info.critical === true,
+      retry: this.criticalRetries
+    })
     // A new Electron runtime cannot be swapped in place: always use the full
     // installer. If the release manifest did not carry its asset, fall back to
     // the standard GitHub asset name so the launcher can still download it
@@ -657,6 +820,8 @@ export class AppUpdateChecker {
    * pausable, so while `installing` this does nothing.
    */
   toggle(): void {
+    // 重要更新不可暂停：the only way forward is to let it finish (or retry).
+    if (this.info?.critical) return
     const phase = this.state.phase
     if (phase === 'downloading') {
       this.controller?.abort()
@@ -729,8 +894,14 @@ export class AppUpdateChecker {
       }
 
       // 3) switch: flip the version pointer and restart into the new version.
-      this.patch({ phase: 'done', installPercent: 100, message: '更新完成，正在重启…' })
+      this.patch({
+        phase: 'done',
+        installPercent: 100,
+        message: '更新完成，正在重启…',
+        critical: info.critical === true
+      })
       await this.switchTo(info.version)
+      await this.clearCriticalMarker()
       await fs.rm(staging, { recursive: true, force: true }).catch(() => {})
       await flushBeforeShutdown()
       app.relaunch()
@@ -743,7 +914,29 @@ export class AppUpdateChecker {
       }
       const message = (error as Error).message
       log(`appUpdate: failed: ${message}`)
-      this.patch({ phase: 'error', message: '更新失败', error: message })
+      if (info.critical && this.criticalRetries < CRITICAL_MAX_RETRIES) {
+        this.criticalRetries += 1
+        const attempt = this.criticalRetries
+        this.patch({
+          phase: 'error',
+          message: `重要更新失败，正在自动重试（${attempt}/${CRITICAL_MAX_RETRIES}）…`,
+          error: message,
+          critical: true,
+          retry: attempt
+        })
+        if (this.criticalRetryTimer) clearTimeout(this.criticalRetryTimer)
+        this.criticalRetryTimer = setTimeout(() => {
+          this.criticalRetryTimer = null
+          if (!this.running && this.info?.version === info.version) this.begin(true)
+        }, CRITICAL_RETRY_DELAY)
+        return
+      }
+      this.patch({
+        phase: 'error',
+        message: info.critical ? '重要更新失败，请重试' : '更新失败',
+        error: message,
+        critical: info.critical === true
+      })
     }
   }
 

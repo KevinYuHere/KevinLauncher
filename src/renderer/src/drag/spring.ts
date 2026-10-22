@@ -22,6 +22,14 @@ export function stepSpring(s: Spring, dt: number, stiffness = 620, damping = 26)
 export const springSettled = (s: Spring, eps = 0.002, velEps = 0.02): boolean =>
   Math.abs(s.v - s.target) < eps && Math.abs(s.vel) < velEps
 
+/**
+ * The active theme may replace the jelly motion (`motionJelly` is published on
+ * <html> by applySpecialTheme). "frost-snap" is stiffer and less bouncy — a
+ * crisp shield click instead of the elastic default.
+ */
+export const frostMotion = (): boolean =>
+  document.documentElement.dataset.motionJelly === 'frost-snap'
+
 /** A task returns `true` to keep running, `false` to stop. */
 export type Task = (dt: number) => boolean
 

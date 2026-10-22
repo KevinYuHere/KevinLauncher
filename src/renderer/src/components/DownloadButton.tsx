@@ -1,8 +1,11 @@
-import { useRef, useState, type ReactElement, type ReactNode, type RefObject } from 'react'
+import { useEffect, useRef, useState, type ReactElement, type ReactNode, type RefObject } from 'react'
 import Ring from './Ring'
+import AtomShield from './AtomShield'
+import LaunchShield from './LaunchShield'
 import GlassPopup from './GlassPopup'
 import Icon from './Icon'
 import { useLongPress } from '../drag/useLongPress'
+import { useAreaTheme } from '../theme/ThemeScope'
 
 /** Button colour tone: plain (white) / update (theme) / stop (red). */
 export type DownloadTone = 'plain' | 'update' | 'stop'
@@ -58,22 +61,41 @@ export default function DownloadButton({
 }: DownloadButtonProps): ReactElement {
   const circleRef = useRef<HTMLButtonElement>(null)
   const [hover, setHover] = useState(false)
+  const [shieldBurst, setShieldBurst] = useState(false)
+  const shieldTimer = useRef(0)
   const active = progress != null
   const hasCircle = active || !!idleIcon
   const longPress = useLongPress((rect) => onLongPress?.(rect))
+  // The left star-core follows the launch-button assignment; the cap progress
+  // circle stays the stock ring (only its colour differs per tone).
+  const launchThemed = useAreaTheme('launchButton') !== 'default'
+  const pulseShield = (): void => {
+    if (!launchThemed) return
+    setShieldBurst(true)
+    window.clearTimeout(shieldTimer.current)
+    shieldTimer.current = window.setTimeout(() => setShieldBurst(false), 900)
+  }
+  useEffect(() => () => window.clearTimeout(shieldTimer.current), [])
 
   return (
     <span className="start-wrap">
+      {launchThemed && <LaunchShield burst={shieldBurst} />}
       <button
         className={`start-btn${tone !== 'plain' ? ` ${tone}` : ''}${hasCircle ? ' has-circle' : ''}${selected ? ' selected' : ''}`}
         onPointerDown={onLongPress ? longPress.onPointerDown : undefined}
         onClick={() => {
           if (longPress.consumeClick()) return
+          pulseShield()
           onButtonClick()
         }}
       >
-        {label}
+        <span className="start-label">{label}</span>
       </button>
+      {launchThemed && (
+        <span className={`start-atom${hasCircle ? ' has-progress' : ''}`} aria-hidden="true">
+          <AtomShield state="idle" progress={0} size={88} />
+        </span>
+      )}
 
       {hasCircle && (
         <div
@@ -84,12 +106,17 @@ export default function DownloadButton({
           <button
             ref={circleRef}
             className={`pre-circle${ringTone === 'update' ? ' update-circle' : ''}`}
-            onClick={onCircleClick ?? onButtonClick}
+            onClick={() => {
+              pulseShield()
+              ;(onCircleClick ?? onButtonClick)()
+            }}
             title={active ? '点击暂停 / 继续' : '下载'}
           >
             {active ? (
               <>
-                <Ring value={progress} />
+                <span className="ring-layer">
+                  <Ring value={progress ?? 0} />
+                </span>
                 <span className="pre-state">
                   <Icon name={paused ? 'play' : 'pause'} size={16} />
                 </span>

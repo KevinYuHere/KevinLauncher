@@ -97,7 +97,6 @@ parentPort?.on('message', async (message: unknown) => {
       signal,
       onProgress: (extracted) => emit({ type: 'progress', downloaded: extracted, total })
     })
-    await fs.rm(diffsDir, { recursive: true, force: true }).catch(() => undefined)
 
     // 3) Assemble the new files in a staging directory, then commit atomically.
     const manifest = await loadManifest(extractDir, patch)
@@ -121,6 +120,9 @@ parentPort?.on('message', async (message: unknown) => {
     await processDeleteList(extractDir, msg.gameDir, stageDir)
     await installConfig(extractDir, msg.gameDir)
 
+    // Only drop the downloaded patch archive once the update fully succeeded, so
+    // a failed apply can be retried without re-downloading.
+    await fs.rm(diffsDir, { recursive: true, force: true }).catch(() => undefined)
     emit({ type: 'done' })
   } catch (error) {
     emit({
