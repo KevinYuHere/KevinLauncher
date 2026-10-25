@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactElement, type ReactNode, type Re
 import Ring from './Ring'
 import AtomShield from './AtomShield'
 import LaunchShield from './LaunchShield'
+import StarCross from './StarCross'
 import GlassPopup from './GlassPopup'
 import Icon from './Icon'
 import { useLongPress } from '../drag/useLongPress'
@@ -66,11 +67,13 @@ export default function DownloadButton({
   const active = progress != null
   const hasCircle = active || !!idleIcon
   const longPress = useLongPress((rect) => onLongPress?.(rect))
-  // The left star-core follows the launch-button assignment; the cap progress
-  // circle stays the stock ring (only its colour differs per tone).
-  const launchThemed = useAreaTheme('launchButton') !== 'default'
+  // The left mark follows the launch-button assignment; the cap progress circle
+  // stays the stock ring (only its colour differs per tone). 霆骇列律 uses the
+  // atom core + shield, 星轨手记 the tilted star.
+  const launchTheme = useAreaTheme('launchButton')
+  const launchThemed = launchTheme !== 'default'
   const pulseShield = (): void => {
-    if (!launchThemed) return
+    if (launchTheme !== 'starsnow') return
     setShieldBurst(true)
     window.clearTimeout(shieldTimer.current)
     shieldTimer.current = window.setTimeout(() => setShieldBurst(false), 900)
@@ -79,7 +82,7 @@ export default function DownloadButton({
 
   return (
     <span className="start-wrap">
-      {launchThemed && <LaunchShield burst={shieldBurst} />}
+      {launchTheme === 'starsnow' && <LaunchShield burst={shieldBurst} />}
       <button
         className={`start-btn${tone !== 'plain' ? ` ${tone}` : ''}${hasCircle ? ' has-circle' : ''}${selected ? ' selected' : ''}`}
         onPointerDown={onLongPress ? longPress.onPointerDown : undefined}
@@ -93,7 +96,11 @@ export default function DownloadButton({
       </button>
       {launchThemed && (
         <span className={`start-atom${hasCircle ? ' has-progress' : ''}`} aria-hidden="true">
-          <AtomShield state="idle" progress={0} size={88} />
+          {launchTheme === 'mitia' ? (
+            <StarCross size={88} />
+          ) : (
+            <AtomShield state="idle" progress={0} size={88} />
+          )}
         </span>
       )}
 

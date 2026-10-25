@@ -12,7 +12,7 @@ export type AddonId = 'genshin' | 'starrail' | 'zzz' | 'arknights'
  * - `liquid` 液态玻璃（边缘折射）
  * - `shine` 高光（液态玻璃 + 高光反射）
  */
-export type GlassMaterial = 'blur' | 'mica' | 'liquid' | 'shine' | 'starfrost'
+export type GlassMaterial = 'blur' | 'mica' | 'liquid' | 'shine' | 'starfrost' | 'astral'
 
 /**
  * Appearance of the glass across an app. Two independent perceptual axes:
@@ -77,6 +77,21 @@ export const MATERIAL_DEFAULTS: Record<GlassMaterial, GlassAppearance> = {
     brightness: 0,
     opacity: 85,
     material: 'starfrost',
+    blur: 40,
+    saturation: 125,
+    grain: 45,
+    refraction: 100,
+    panelRefraction: 120,
+    edgeWidth: 28,
+    highlight: 45,
+    highlightAngle: 60,
+    dispersion: 8
+  },
+  // 星轨（米提亚特别版）：深紫底 + 分子式纹理 + 金色描边（默认值取自原神当前调校）。
+  astral: {
+    brightness: 0,
+    opacity: 85,
+    material: 'astral',
     blur: 40,
     saturation: 125,
     grain: 45,
@@ -171,7 +186,14 @@ export const DEFAULT_HOME_MODULE: HomeModuleState = {
 }
 
 /** Full-screen transition played when a game is launched. */
-export type LaunchEffect = 'none' | 'shockwave' | 'melt' | 'glitch' | 'gravity' | 'shatter'
+export type LaunchEffect =
+  | 'none'
+  | 'shockwave'
+  | 'melt'
+  | 'glitch'
+  | 'gravity'
+  | 'shatter'
+  | 'nova'
 
 /** Registry of launch effects (label + description). */
 export const LAUNCH_EFFECTS: { id: LaunchEffect; label: string; desc: string }[] = [
@@ -180,7 +202,12 @@ export const LAUNCH_EFFECTS: { id: LaunchEffect; label: string; desc: string }[]
   { id: 'melt', label: '液态熔蚀', desc: '液态融化 + 方块故障' },
   { id: 'glitch', label: '赛博故障', desc: '撕裂 / 方块 / RGB 故障' },
   { id: 'gravity', label: '引力奇点', desc: '启动按钮的霆核膨胀，吞掉整页碎片' },
-  { id: 'shatter', label: '星屑碎裂', desc: '整页壁纸炸成三角碎片向外飞散' }
+  { id: 'shatter', label: '星屑碎裂', desc: '整页壁纸炸成三角碎片向外飞散' },
+  {
+    id: 'nova',
+    label: '星轨坍缩',
+    desc: '十字星果冻状扩张到两倍，把整页与分子式吸入'
+  }
 ]
 
 export const DEFAULT_LAUNCH_EFFECT: LaunchEffect = 'none'

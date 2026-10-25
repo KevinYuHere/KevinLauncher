@@ -80,6 +80,35 @@ export const SPECIAL_THEMES: SpecialThemeDefinition[] = [
       page: 'star-wipe',
       toast: 'stardust-rise'
     }
+  },
+  {
+    id: 'mitia',
+    label: '星轨手记',
+    description: '星芒、坐标轴与手记立方 · 米提亚',
+    tokens: {
+      '--mt-void': '#0e1430',
+      '--mt-night': '#1b2350',
+      '--mt-violet': '#6c4bd8',
+      '--mt-lilac': '#a78bfa',
+      '--mt-cyan': '#8fe3ff',
+      '--mt-gold': '#e8c87a',
+      '--mt-paper': '#f2eeff',
+      '--mt-ease': 'cubic-bezier(0.22, 1, 0.36, 1)',
+      '--mt-glow': '0 0 18px rgba(108, 75, 216, 0.3)',
+      /* 40 px coordinate paper, drawn with two hairlines. */
+      '--mt-grid':
+        'linear-gradient(rgba(167, 139, 250, 0.07) 1px, transparent 1px), linear-gradient(90deg, rgba(167, 139, 250, 0.07) 1px, transparent 1px)',
+      '--mt-grid-size': '40px 40px'
+    },
+    motion: {
+      jelly: 'star-press',
+      dialogIn: 'cube-unfold',
+      dialogOut: 'cube-fold',
+      popupIn: 'axis-slide',
+      popupOut: 'axis-retract',
+      page: 'plot-curve',
+      toast: 'axis-rise'
+    }
   }
 ]
 

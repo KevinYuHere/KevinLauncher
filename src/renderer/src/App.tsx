@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactElement
+} from 'react'
 import type {
   AddonDescriptor,
   AppEntry,
@@ -32,7 +40,7 @@ import Toaster, { showToast } from './components/toast'
 import ThemeClickEffect from './components/ThemeClickEffect'
 import { sweepPageText } from './themeTextSweep'
 import { installInputSweep } from './inputSweep'
-import { burstThemeTriangles } from './themeParticles'
+import { burstMitiaMolecules, burstThemeTriangles } from './themeParticles'
 import { installNoNativeTooltips } from './noNativeTooltips'
 import { installPressJelly } from './drag/pressJelly'
 import GalleryView from './components/GalleryView'
@@ -46,10 +54,11 @@ import type { ViewId } from './viewTypes'
 import { backgroundUrl, brandUrl, defaultIconUrl, fileUrl } from './media'
 import { directoriesOverlap } from '@shared/paths'
 import { updateChromeContrast } from './contrast'
-import { applyGlass, applyTheme } from './theme'
+import { applyGlass, applyTheme, installTextureScatter, scatterTextureOffsets } from './theme'
 import { applySpecialTheme } from './specialTheme'
 import { SpecialThemeProvider } from './theme/ThemeScope'
 import { extractVideoAccent } from './videoAccent'
+import { prepareWallpaper } from './wallpaperDisplay'
 import { installWallpaperRegionUpdater, updateWallpaperRegions } from './wallpaperRegion'
 
 /** Local calendar date as `YYYY-MM-DD` (used to run daily update checks). */
@@ -162,33 +171,36 @@ export default function App(): ReactElement {
     await window.api.setGamesRowHidden(next)
   }, [gamesHidden])
 
-  /** Games-bar toggle: a triangle trail follows the button to its new position. */
-  const handleGamesToggle = useCallback((): void => {
-    if (document.documentElement.getAttribute('data-special-games-bar') === 'starsnow') {
-        const start = performance.now()
-        let last = 0
-        const tick = (now: number): void => {
-          if (now - last > 34) {
-            const button = document.querySelector<HTMLElement>('.games-toggle')
-            if (button) {
-              const r = button.getBoundingClientRect()
-              burstThemeTriangles(r.left + r.width / 2, r.top + r.height / 2, {
-                count: 2,
-                size: 10,
-                distance: 58,
-                duration: 650
-              })
-            }
-            last = now
+  /** Games-bar toggle: a themed trail follows the button to its new position. */
+  const spawnGamesTrail = useCallback((): void => {
+    const mode = document.documentElement.getAttribute('data-special-games-bar')
+    if (mode !== 'starsnow' && mode !== 'mitia') return
+    const start = performance.now()
+    let last = 0
+    const tick = (now: number): void => {
+      if (now - last > 50) {
+        const button = document.querySelector<HTMLElement>('.games-toggle')
+        if (button) {
+          const r = button.getBoundingClientRect()
+          const x = r.left + r.width / 2
+          const y = r.top + r.height / 2
+          if (mode === 'mitia') {
+            burstMitiaMolecules(x, y, { count: 1, distance: 72 })
+          } else {
+            burstThemeTriangles(x, y, { count: 1, size: 10, distance: 58, duration: 650 })
           }
-          if (now - start < 460) requestAnimationFrame(tick)
         }
-        requestAnimationFrame(tick)
+        last = now
       }
-      void toggleGames()
-    },
-    [toggleGames]
-  )
+      if (now - start < 460) requestAnimationFrame(tick)
+    }
+    requestAnimationFrame(tick)
+  }, [])
+
+  const handleGamesToggle = useCallback((): void => {
+    spawnGamesTrail()
+    void toggleGames()
+  }, [spawnGamesTrail, toggleGames])
 
   const gamesWrapRef = useRef<HTMLDivElement>(null)
   // After a chip drag settles: if the row was only peeking and the pointer is no
@@ -462,7 +474,7 @@ export default function App(): ReactElement {
       // Only the gravity effect is anchored to the launch button's atom; every
       // other effect starts at the clicked element.
       const atom = document.querySelector<HTMLElement>('.home .start-atom')
-      const anchor = effect === 'gravity' ? atom ?? el : el
+      const anchor = effect === 'gravity' || effect === 'nova' ? (atom ?? el) : el
       const r = anchor?.getBoundingClientRect()
       setLaunchFx({
         effect,
@@ -890,6 +902,42 @@ export default function App(): ReactElement {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bg, isVideo, current?.autoTheme, current?.id])
 
+  // Viewport in CSS px + device pixel ratio. Background preparation depends on
+  // it: a wallpaper is rasterised once per size, so resizing waits for the drag
+  // to settle instead of re-encoding on every frame.
+  const [winSize, setWinSize] = useState({
+    w: window.innerWidth,
+    h: window.innerHeight,
+    dpr: window.devicePixelRatio || 1
+  })
+  useEffect(() => {
+    let timer = 0
+    const onResize = (): void => {
+      window.clearTimeout(timer)
+      timer = window.setTimeout(() => {
+        setWinSize({
+          w: window.innerWidth,
+          h: window.innerHeight,
+          dpr: window.devicePixelRatio || 1
+        })
+      }, 180)
+    }
+    window.addEventListener('resize', onResize)
+    return () => {
+      window.clearTimeout(timer)
+      window.removeEventListener('resize', onResize)
+    }
+  }, [])
+
+  // Object URL of the display-resolution wallpaper (see `wallpaperDisplay.ts`).
+  const preparedUrl = useRef<string | null>(null)
+  useEffect(
+    () => () => {
+      if (preparedUrl.current) URL.revokeObjectURL(preparedUrl.current)
+    },
+    []
+  )
+
   // Swap the background only once the incoming image has decoded, carrying the
   // new game's blur / dim with it. The previous background (with its own blur)
   // stays on screen until then, so switching games never flashes a sharp frame.
@@ -900,25 +948,43 @@ export default function App(): ReactElement {
     }
     const blur = current?.backgroundBlur ?? 0
     const dim = current ? current.backgroundDim : 0
-    const commit = (): void => setBgDisplay({ src: bg, kind: isVideo ? 'video' : 'image', blur, dim })
+    const commit = (src: string): void => {
+      // The popup layers may still paint the previous URL for a frame or two.
+      const previous = preparedUrl.current
+      preparedUrl.current = src.startsWith('blob:') ? src : null
+      if (previous && previous !== src) window.setTimeout(() => URL.revokeObjectURL(previous), 3000)
+      setBgDisplay({ src, kind: isVideo ? 'video' : 'image', blur, dim })
+    }
     if (isVideo) {
-      commit()
+      commit(bg)
       return
     }
     let cancelled = false
     const image = new Image()
+    image.crossOrigin = 'anonymous'
     image.onload = () => {
-      if (!cancelled) commit()
+      if (cancelled) return
+      // Downscale once to the device-pixel cover size: the browser then paints
+      // the wallpaper 1:1 instead of aliasing an 8K image into a 2K window.
+      void prepareWallpaper(image, winSize.w + 128, winSize.h + 128, winSize.dpr).then(
+        (prepared) => {
+          if (cancelled) {
+            if (prepared) URL.revokeObjectURL(prepared.url)
+            return
+          }
+          commit(prepared?.url ?? bg)
+        }
+      )
     }
     image.onerror = () => {
-      if (!cancelled) commit()
+      if (!cancelled) commit(bg)
     }
     image.src = bg
     return () => {
       cancelled = true
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bg, isVideo, current?.id])
+  }, [bg, isVideo, current?.id, winSize.w, winSize.h, winSize.dpr])
 
   // Wallpaper rotation triggers: on app switch, once on launcher start (first
   // time an app is shown) and on an interval. `appLaunch` is handled in
@@ -982,6 +1048,13 @@ export default function App(): ReactElement {
     applyGlass(current?.glass)
   }, [current?.glass])
 
+  // Textured materials: fresh random offsets per surface, also for surfaces
+  // that mount later (new page, dialog, dropdown).
+  useEffect(() => installTextureScatter(), [])
+  useEffect(() => {
+    scatterTextureOffsets()
+  }, [view, currentId])
+
   // Special-edition areas: one `data-special-<area>` attribute per themed surface.
   useEffect(() => {
     applySpecialTheme(launcherSettings.themeAreas)
@@ -989,10 +1062,12 @@ export default function App(): ReactElement {
 
   // Plan-A popup backgrounds: publish the wallpaper image + its centre-cropped
   // geometry so every `.wallpaper-region` popup can paint the exact region under
-  // it, then keep those offsets in sync.
+  // it, then keep those offsets in sync. The display-resolution copy (not the
+  // original file) is used so popups match the background pixel for pixel.
   const [wpImage, setWpImage] = useState<{ src: string; w: number; h: number } | null>(null)
+  const displaySrc = bgDisplay?.kind === 'image' ? bgDisplay.src : null
   useEffect(() => {
-    if (!bg || isVideo) {
+    if (!displaySrc) {
       setWpImage(null)
       return undefined
     }
@@ -1000,23 +1075,18 @@ export default function App(): ReactElement {
     const image = new Image()
     image.crossOrigin = 'anonymous'
     image.onload = () => {
-      if (!cancelled) setWpImage({ src: bg, w: image.naturalWidth, h: image.naturalHeight })
+      if (!cancelled) {
+        setWpImage({ src: displaySrc, w: image.naturalWidth, h: image.naturalHeight })
+      }
     }
     image.onerror = () => {
       if (!cancelled) setWpImage(null)
     }
-    image.src = bg
+    image.src = displaySrc
     return () => {
       cancelled = true
     }
-  }, [bg, isVideo])
-
-  const [winSize, setWinSize] = useState({ w: window.innerWidth, h: window.innerHeight })
-  useEffect(() => {
-    const onResize = (): void => setWinSize({ w: window.innerWidth, h: window.innerHeight })
-    window.addEventListener('resize', onResize)
-    return () => window.removeEventListener('resize', onResize)
-  }, [])
+  }, [displaySrc])
 
   useEffect(() => {
     const root = document.documentElement
@@ -1100,6 +1170,23 @@ export default function App(): ReactElement {
       window.removeEventListener('resize', run)
     }
   }, [bgDisplay, view, currentId, launcherSettings.sidebarMaterial, current?.backgroundDim])
+
+  // The themed page curve is a fixed layer (the stage clips overflow, which
+  // used to cut its peak): keep it aligned with the page header's bottom edge.
+  const [curveTop, setCurveTop] = useState<number | null>(null)
+  useLayoutEffect(() => {
+    const measure = (): void => {
+      const header = document.querySelector('.page-header')
+      setCurveTop(header ? Math.round(header.getBoundingClientRect().bottom) : null)
+    }
+    measure()
+    const timer = window.setTimeout(measure, 160)
+    window.addEventListener('resize', measure)
+    return () => {
+      window.clearTimeout(timer)
+      window.removeEventListener('resize', measure)
+    }
+  }, [view, currentId])
 
   // Retrigger the transition on view / app change. The background lives inside
   // this animated element so backdrop-filter keeps blurring during the animation.
@@ -1188,10 +1275,16 @@ export default function App(): ReactElement {
           ref={gamesWrapRef}
           className={`games-wrap${gamesHidden && !peeking ? ' collapsed' : ''}`}
           onMouseEnter={() => {
-            if (gamesHidden) setPeeking(true)
+            if (gamesHidden) {
+              setPeeking(true)
+              spawnGamesTrail()
+            }
           }}
           onMouseLeave={() => {
-            if (gamesHidden) setPeeking(false)
+            if (gamesHidden) {
+              setPeeking(false)
+              spawnGamesTrail()
+            }
           }}
         >
           <div className={`games-collapser${!gamesHidden || peeking ? '' : ' collapsed'}`}>
@@ -1223,6 +1316,15 @@ export default function App(): ReactElement {
         <div className="topbar-drag" />
         <WindowControls />
       </div>
+
+      {curveTop !== null && (
+        <div
+          key={`curve-${view}-${currentId}`}
+          className="page-curve"
+          style={{ top: curveTop - 130 }}
+          aria-hidden="true"
+        />
+      )}
 
       <main className="stage">
           {!appsLoaded ? null : !current ? (

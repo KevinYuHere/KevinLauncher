@@ -138,10 +138,11 @@ const SHEEN =
  * The tile is deliberately large (360px) so the repeat is hard to spot on a
  * wide card; `grain` controls its opacity, keeping the material setting useful.
  */
-function frostDataUri(grain: number): string {
+function frostDataUri(grain: number, angle: number): string {
   const a = (Math.max(0, Math.min(100, grain)) / 100) * 0.55
   const svg =
     `<svg xmlns="http://www.w3.org/2000/svg" width="360" height="360">` +
+    `<g transform="rotate(${angle} 180 180)">` +
     `<g fill="none" stroke="#e6f6ff" stroke-opacity="${a.toFixed(3)}" stroke-width=".6">` +
     `<path d="M28 46 64 108H-4z"/>` +
     `<path d="M216 24 246 72H186z"/>` +
@@ -174,8 +175,168 @@ function frostDataUri(grain: number): string {
     `<circle cx="128" cy="184" r=".7"/><circle cx="300" cy="272" r=".8"/>` +
     `<circle cx="72" cy="248" r=".55"/><circle cx="244" cy="104" r=".6"/>` +
     `<circle cx="338" cy="174" r=".5"/><circle cx="92" cy="332" r=".5"/>` +
-    `</g></svg>`
+    `</g></g></svg>`
   return `url("data:image/svg+xml,${encodeURIComponent(svg)}")`
+}
+
+/**
+ * 星轨 texture: sparse, large ball-and-stick molecules of **several distinct
+ * shapes** (bent triatomic, a four-node chain, a ring with a tail, a diatomic
+ * pair with a satellite, a branched V), scattered at different rotations and
+ * scales — some clipped by the tile edge — so it never reads as one repeated
+ * stamp. Node size follows the artwork's proportions; `grain` drives opacity.
+ */
+function moleculeDataUri(grain: number, angle: number): string {
+  const a = (Math.max(0, Math.min(100, grain)) / 100) * 0.85
+  const node = (x: number, y: number, r: number, gold = true): string =>
+    `<circle cx="${x}" cy="${y}" r="${r}" fill="#1b1240" fill-opacity="${(a * 0.95).toFixed(3)}" ` +
+    `stroke="${gold ? '#e8c87a' : '#b9a8f6'}" stroke-opacity="${(a * 0.95).toFixed(3)}" stroke-width="2.4"/>`
+  const bond = (x1: number, y1: number, x2: number, y2: number, double = false): string => {
+    const base =
+      `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#9d8bf5" ` +
+      `stroke-opacity="${(a * 0.5).toFixed(3)}" stroke-width="3"/>`
+    if (!double) return base
+    const dx = x2 - x1
+    const dy = y2 - y1
+    const len = Math.hypot(dx, dy) || 1
+    const ox = (-dy / len) * 4
+    const oy = (dx / len) * 4
+    return (
+      base +
+      `<line x1="${x1 + ox}" y1="${y1 + oy}" x2="${x2 + ox}" y2="${y2 + oy}" stroke="#9d8bf5" ` +
+      `stroke-opacity="${(a * 0.42).toFixed(3)}" stroke-width="2"/>`
+    )
+  }
+  const cluster = (
+    x: number,
+    y: number,
+    angle: number,
+    scale: number,
+    body: string
+  ): string => `<g transform="translate(${x} ${y}) rotate(${angle}) scale(${scale})">${body}</g>`
+
+  // A — bent triatomic (the most common shape in the art).
+  const bent =
+    bond(0, 0, 118, -50) + bond(118, -50, 198, 40) +
+    node(0, 0, 20) + node(118, -50, 24) + node(198, 40, 16)
+  // B — four-node chain with one double bond.
+  const chain =
+    bond(0, 0, 92, 30, true) + bond(92, 30, 182, -10) + bond(182, -10, 262, 22) +
+    node(0, 0, 18) + node(92, 30, 22) + node(182, -10, 16) + node(262, 22, 13, false)
+  // C — four-membered ring with a tail.
+  const ringTail =
+    bond(0, 0, 100, -80) + bond(100, -80, 210, 0) + bond(210, 0, 110, 80) + bond(110, 80, 0, 0) +
+    bond(210, 0, 300, -50) +
+    node(0, 0, 18, false) + node(100, -80, 23) + node(210, 0, 19) + node(110, 80, 16, false) +
+    node(300, -50, 13, false)
+  // D — diatomic pair with a small satellite node.
+  const satellite =
+    bond(0, 0, 110, 60) + bond(0, 0, 30, -62) +
+    node(0, 0, 24) + node(110, 60, 14, false) + node(30, -62, 9, false)
+  // E — branched "V".
+  const branched =
+    bond(0, 0, 92, 70) + bond(92, 70, 180, 0) + bond(92, 70, 92, 152) +
+    node(0, 0, 18) + node(92, 70, 20) + node(180, 0, 15) + node(92, 152, 11, false)
+
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="900" height="900">` +
+    // Soft vignette so molecules fade out at the tile seam instead of being cut.
+    `<defs><radialGradient id="mt-fade" cx="0.5" cy="0.5" r="0.7">` +
+    `<stop offset="0.55" stop-color="#fff"/><stop offset="1" stop-color="#000"/>` +
+    `</radialGradient>` +
+    `<mask id="mt-mask"><rect width="900" height="900" fill="url(#mt-fade)"/></mask></defs>` +
+    `<g mask="url(#mt-mask)" transform="rotate(${angle} 450 450)">` +
+    cluster(190, 200, 22, 1.05, bent) +
+    cluster(620, 180, -30, 0.95, chain) +
+    cluster(260, 520, 35, 1.1, ringTail) +
+    cluster(690, 600, 10, 1.15, satellite) +
+    cluster(450, 720, -55, 0.9, branched) +
+    // a couple of free glints
+    `<g fill="#e8c87a" fill-opacity="${(a * 0.9).toFixed(3)}">` +
+    `<circle cx="320" cy="270" r="2.6"/><circle cx="720" cy="330" r="2.2"/>` +
+    `<circle cx="90" cy="380" r="2"/><circle cx="500" cy="600" r="2.4"/>` +
+    `<circle cx="860" cy="180" r="1.8"/><circle cx="240" cy="700" r="2.2"/>` +
+    `</g></g></svg>`
+  return `url("data:image/svg+xml,${encodeURIComponent(svg)}")`
+}
+
+const TEXTURE_SELECTOR = [
+  '.glass',
+  '.panel',
+  '.settings',
+  '.modal',
+  '.home-info',
+  '.rail-glass',
+  '.select-menu',
+  '.glass-pop',
+  '.toast',
+  '.launch-drawer',
+  '.rail-pop',
+  '.dl-pop-glass',
+  '.confirm-modal',
+  '.card',
+  '.home-card',
+  '.stat-card',
+  '.gallery-thumb',
+  '.settings-row',
+  '.drawer-opt'
+].join(',')
+
+let scattered = new WeakSet<HTMLElement>()
+
+/**
+ * Give every textured surface its own random tile origin — each card, panel and
+ * popup gets a different one. Elements are only scattered once per material
+ * application, so a click or a re-render never makes the texture jump.
+ */
+export function scatterTextureOffsets(roots?: ParentNode): void {
+  const nodes = roots
+    ? Array.from(roots.querySelectorAll<HTMLElement>(TEXTURE_SELECTOR))
+    : Array.from(document.querySelectorAll<HTMLElement>(TEXTURE_SELECTOR))
+  for (const el of nodes) {
+    if (scattered.has(el)) continue
+    scattered.add(el)
+    el.style.backgroundPosition = `${Math.round(Math.random() * 900)}px ${Math.round(
+      Math.random() * 900
+    )}px`
+  }
+}
+
+/** A new material / rotation invalidates every previous offset. */
+export function resetTextureScatter(): void {
+  scattered = new WeakSet()
+}
+
+/**
+ * Scatter only surfaces that appear later (page switch, dialog, dropdown).
+ * The observer ignores pure re-renders and never re-randomises an existing
+ * surface, which used to make the material flash on every click.
+ */
+let textureObserver: MutationObserver | null = null
+export function installTextureScatter(): void {
+  if (textureObserver) return
+  let timer = 0
+  textureObserver = new MutationObserver((mutations) => {
+    const material = document.documentElement.dataset.material
+    if (material !== 'starfrost' && material !== 'astral') return
+    let found = false
+    for (const mutation of mutations) {
+      for (const node of mutation.addedNodes) {
+        if (
+          node instanceof HTMLElement &&
+          (node.matches(TEXTURE_SELECTOR) || node.querySelector(TEXTURE_SELECTOR))
+        ) {
+          found = true
+          break
+        }
+      }
+      if (found) break
+    }
+    if (!found) return
+    window.clearTimeout(timer)
+    timer = window.setTimeout(() => scatterTextureOffsets(), 90)
+  })
+  textureObserver.observe(document.body, { childList: true, subtree: true })
 }
 
 /**
@@ -229,15 +390,22 @@ export function applyGlass(appearance: GlassAppearance | null | undefined): void
   root.dataset.material = material
   root.style.colorScheme = lightUi ? 'light' : 'dark'
 
+  // Every textured material gets a fresh random rotation and, below, a random
+  // per-surface offset, so two surfaces on one page never look like a copy.
+  const angle = Math.round(Math.random() * 360)
   // Surface texture: cloud/mica grain, star-frost shards, or the shine light band.
   if (material === 'mica' && grain > 0) {
     root.style.setProperty('--glass-sheen', grainDataUri(grain))
     root.style.setProperty('--glass-repeat', 'repeat')
     root.style.setProperty('--glass-size', '140px 140px')
   } else if (material === 'starfrost') {
-    root.style.setProperty('--glass-sheen', frostDataUri(grain))
+    root.style.setProperty('--glass-sheen', frostDataUri(grain, angle))
     root.style.setProperty('--glass-repeat', 'repeat')
     root.style.setProperty('--glass-size', '360px 360px')
+  } else if (material === 'astral') {
+    root.style.setProperty('--glass-sheen', moleculeDataUri(grain, angle))
+    root.style.setProperty('--glass-repeat', 'repeat')
+    root.style.setProperty('--glass-size', '900px 900px')
   } else if (material === 'shine') {
     root.style.setProperty('--glass-sheen', SHEEN)
     root.style.setProperty('--glass-repeat', 'no-repeat')
@@ -246,6 +414,10 @@ export function applyGlass(appearance: GlassAppearance | null | undefined): void
     root.style.setProperty('--glass-sheen', 'none')
     root.style.setProperty('--glass-repeat', 'no-repeat')
     root.style.setProperty('--glass-size', 'auto')
+  }
+  if (material === 'starfrost' || material === 'astral') {
+    resetTextureScatter()
+    scatterTextureOffsets()
   }
 
   // Liquid/shine need a per-surface SVG refraction filter (size + corner radius

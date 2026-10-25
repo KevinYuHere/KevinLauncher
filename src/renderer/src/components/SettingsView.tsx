@@ -72,7 +72,8 @@ const GLASS_MATERIAL_LABEL: Record<GlassMaterial, string> = {
   mica: '云母',
   liquid: '液态',
   shine: '高光',
-  starfrost: '星霜'
+  starfrost: '星霜',
+  astral: '星轨'
 }
 
 const GLASS_MATERIAL_DESC: Record<GlassMaterial, string> = {
@@ -80,7 +81,8 @@ const GLASS_MATERIAL_DESC: Record<GlassMaterial, string> = {
   mica: '云母：更致密的磨砂质感',
   liquid: '液态玻璃：外轮廓膨胀折射',
   shine: '高光：液态玻璃 + 随环境着色的边缘高光',
-  starfrost: '星霜：碎晶三角 + 星屑微光 + 紫青虹彩'
+  starfrost: '星霜：碎晶三角 + 星屑微光 + 紫青虹彩',
+  astral: '星轨：分子式纹理 + 金色描边 + 深紫底'
 }
 
 // Settings page with two tabs that slide on the card itself (so the frosted
@@ -600,7 +602,7 @@ export default function SettingsView({
                     <Segmented
                       value={glass.material}
                       onChange={(value) => updateGlass({ material: value as GlassMaterial })}
-                      options={(['blur', 'mica', 'liquid', 'shine', 'starfrost'] as GlassMaterial[]).map(
+                      options={(['blur', 'mica', 'liquid', 'shine', 'starfrost', 'astral'] as GlassMaterial[]).map(
                         (material) => ({ value: material, label: GLASS_MATERIAL_LABEL[material] })
                       )}
                     />
@@ -661,14 +663,18 @@ export default function SettingsView({
                   onChange={(saturation) => updateGlass({ saturation })}
                 />
               )}
-              {(glass.material === 'mica' || glass.material === 'starfrost') && (
+              {(glass.material === 'mica' ||
+                glass.material === 'starfrost' ||
+                glass.material === 'astral') && (
                 <RangeRow
                   name="颗粒"
                   value={glass.grain}
                   hint={
                     glass.material === 'starfrost'
                       ? '碎晶三角与星屑微光的强度'
-                      : '云母表面的颗粒质感'
+                      : glass.material === 'astral'
+                        ? '分子式纹理与金线的强度'
+                        : '云母表面的颗粒质感'
                   }
                   min={0}
                   max={100}

@@ -3,6 +3,7 @@ import type { LaunchEffect } from '@shared/types'
 import { captureWallpaperBackground } from '../wallpaperTexture'
 import WallpaperShatter from './WallpaperShatter'
 import WallpaperBurst from './WallpaperBurst'
+import MitiaNova from './MitiaNova'
 
 interface LaunchTransitionProps {
   /** Effect + a nonce that changes on each launch (null = idle). */
@@ -16,12 +17,14 @@ interface LaunchTransitionProps {
 }
 
 // Shader modes: 0 shockwave, 1 melt, 2 glitch, 3 gravity.
+// (gravity / shatter / nova are drawn by their own overlays, never by the shader.)
 const MODE: Record<Exclude<LaunchEffect, 'none'>, number> = {
   shockwave: 0,
   melt: 1,
   glitch: 2,
   gravity: 3,
-  shatter: 4
+  shatter: 4,
+  nova: 5
 }
 
 const VS = `
@@ -141,8 +144,34 @@ const FS = `
       col += mix(uTheme, vec3(1.0), 0.68) * rim * 1.6;
       col += vec3(1.0) * exp(-dist * dist / max(0.00001, coreR * coreR * 0.20)) * 1.35;
       col += vec3(1.0) * pow(smoothstep(0.42, 1.0, p), 3.0) * 0.95;
+    } else if (uMode == 5) {
+      // 星轨坍缩: a black hole at the launch star — the wallpaper spirals in,
+      // lensed and redshifted, with a bright photon ring and a dark horizon.
+      float pull = smoothstep(0.0, 0.92, p);
+      vec2 d = (uv - uOrigin) * vec2(uRes.x / uRes.y, 1.0);
+      float r = max(length(d), 1e-4);
+      float ang = atan(d.y, d.x);
+      float spin = (3.4 * pull) / (0.14 + r * 2.4);
+      float ca2 = cos(spin);
+      float sa2 = sin(spin);
+      vec2 rot = vec2(ca2 * d.x - sa2 * d.y, sa2 * d.x + ca2 * d.y);
+      float shrink = mix(1.0, 0.015, pull * (1.0 - smoothstep(0.02, 0.95, r)));
+      vec2 suv = uOrigin + rot / vec2(uRes.x / uRes.y, 1.0) * shrink;
+      vec2 dir2 = normalize(d + vec2(1e-5));
+      float disp = 0.008 + 0.055 * pull;
+      vec3 c;
+      c.r = tex(suv + dir2 * disp).r;
+      c.g = tex(suv).g;
+      c.b = tex(suv - dir2 * disp).b;
+      float horizon = 1.0 - smoothstep(0.0, 0.16 + 0.20 * pull, r);
+      c *= 1.0 - horizon;
+      float ring = exp(-pow((r - (0.05 + 0.20 * pull)) / 0.012, 2.0));
+      c += mix(uTheme, vec3(1.0, 0.93, 0.76), 0.6) * ring * (0.5 + 0.9 * pull);
+      c += vec3(0.62, 0.90, 1.0) * exp(-pow((r - 0.035 - 0.32 * pull) / 0.02, 2.0)) * 0.25 * pull;
+      col = mix(col, c, smoothstep(0.0, 0.10, p));
+      col *= 1.0 - 0.72 * smoothstep(0.86, 1.0, p);
     }
-    col = mix(col, vec3(1.0), smoothstep(0.84,1.0,p));
+    if (uMode != 5) col = mix(col, vec3(1.0), smoothstep(0.84,1.0,p));
     gl_FragColor = vec4(col, 1.0);
   }`
 
@@ -167,6 +196,7 @@ export default function LaunchTransition({ trigger, onDone }: LaunchTransitionPr
   // These are ordinary launch effects, independent of the visual theme.
   const atomShatter = trigger?.effect === 'gravity'
   const outwardShatter = trigger?.effect === 'shatter'
+  const nova = trigger?.effect === 'nova'
   const active = !!trigger && !atomShatter && !outwardShatter && trigger.effect !== 'none'
   // Latest onDone without re-triggering the effect (an inline callback would
   // otherwise restart the animation on every App render).
@@ -208,7 +238,9 @@ export default function LaunchTransition({ trigger, onDone }: LaunchTransitionPr
 
   useEffect(() => {
     if (!trigger) return
-    if (trigger.effect === 'gravity' || trigger.effect === 'shatter') return
+    if (trigger.effect === 'gravity' || trigger.effect === 'shatter') {
+      return
+    }
     if (trigger.effect === 'none') return
     const gl = glRef.current
     const canvas = canvasRef.current
@@ -268,6 +300,12 @@ export default function LaunchTransition({ trigger, onDone }: LaunchTransitionPr
           originX={trigger.originX ?? 0.5}
           originY={1 - (trigger.originY ?? 0.4)}
           onDone={onDone}
+        />
+      )}
+      {nova && trigger && (
+        <MitiaNova
+          originX={trigger.originX ?? 0.5}
+          originY={1 - (trigger.originY ?? 0.4)}
         />
       )}
       {outwardShatter && trigger && (

@@ -446,8 +446,10 @@ textarea {
   background: var(--glass-hover);
   color: var(--chrome-fg);
 }
+/* Collapsed row: keep the expand chevron just right of the rail (it used to be
+   pulled 13 px left, i.e. partly on top of the sidebar). */
 .games-wrap.collapsed .games-toggle {
-  margin-left: -13px;
+  margin-left: 0;
 }
 .topbar-drag {
   flex: 1;
@@ -4995,6 +4997,42 @@ textarea:focus-visible {
     0 0 24px rgba(139, 124, 246, 0.12);
 }
 
+/* ---------------------------------------------------- astral material */
+/* 星轨 (米提亚): deep purple interior, gold hairline and the molecule texture
+   generated in theme.ts. */
+:root[data-material='astral'] {
+  /* The brightness / opacity sliders keep working: the tint comes from
+     `--glass`, which applyGlass derives from them. */
+  --glass-backdrop: blur(var(--glass-blur)) saturate(calc(var(--glass-saturate) * 1.08));
+  --glass-rim:
+    inset 0 0 0 1px rgba(232, 200, 122, 0.42),
+    inset 0 1px 0 rgba(232, 200, 122, 0.55),
+    inset 0 -1px 0 rgba(108, 75, 216, 0.35);
+}
+:root[data-material='astral'] .glass,
+:root[data-material='astral'] .panel,
+:root[data-material='astral'] .settings,
+:root[data-material='astral'] .modal,
+:root[data-material='astral'] .glass-pop,
+:root[data-material='astral'] .toast,
+:root[data-material='astral'] .home-info,
+:root[data-material='astral'] .select-menu,
+:root[data-material='astral'] .confirm-modal,
+:root[data-material='astral'] .dl-pop-glass,
+:root[data-material='astral'] .rail-pop,
+:root[data-material='astral'] .tabs {
+  /* The tint stays `var(--glass)` so brightness / opacity keep working. */
+  border-color: rgba(232, 200, 122, 0.42);
+  box-shadow:
+    var(--glass-rim),
+    0 0 22px rgba(108, 75, 216, 0.2);
+}
+/* These already paint their own material layer; just keep the gold hairline. */
+:root[data-material='astral'] .rail-glass,
+:root[data-material='astral'] .rail-pop {
+  border-color: rgba(232, 200, 122, 0.35);
+}
+
 /* ------------------------------------------------------- star-core atom */
 .atom-shield {
   position: relative;
@@ -5819,14 +5857,20 @@ textarea:focus-visible {
 }
 
 /* ----------------------------------------------------- page transitions */
+/* Only the page content animates. The rail, top bar and wallpaper used to
+   inherit the container's fade, so every page switch made the sidebar and the
+   background scrim blink out and back in. They now stay perfectly still. */
 [data-special-transition='starsnow'] .app-anim-run {
+  animation: none;
+}
+[data-special-transition='starsnow'] .app-anim-run .stage {
   animation: sn-page-in 0.4s var(--sn-ease);
 }
 [data-special-transition='starsnow'] .app-anim-run .bg-layer,
 [data-special-transition='starsnow'] .app-anim-run .bg-scrim,
 [data-special-transition='starsnow'] .app-anim-run .rail,
 [data-special-transition='starsnow'] .app-anim-run .topbar {
-  animation: sn-page-counter 0.4s var(--sn-ease);
+  animation: none;
 }
 [data-special-transition='starsnow'] .app-anim-run::after {
   content: '';
@@ -5854,19 +5898,13 @@ textarea:focus-visible {
     linear-gradient(90deg, transparent 76%, rgba(230, 246, 255, 0.12) 78%, transparent 80%);
   animation: sn-thunder-wipe 0.42s ease-out both;
 }
+/* Sliding only: an opacity animation on an ancestor of the glass surfaces makes
+   Chromium paint `backdrop-filter` late, so the page looked "unstyled" until
+   the fade finished. Transform keeps the frost / blur material live from frame
+   one. */
 @keyframes sn-page-in {
   from {
-    opacity: 0;
     transform: translateX(calc(var(--anim-x, 26px) * 1.2));
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-@keyframes sn-page-counter {
-  from {
-    transform: translateX(calc(var(--anim-x, 26px) * -1.2));
   }
   to {
     transform: none;
@@ -6130,6 +6168,655 @@ textarea:focus-visible {
    themed (shield + atom arc + black/white percentage). */
 [data-special-download-ring='starsnow'] .rail-ring-percent {
   color: var(--fg);
+}
+
+/* ===================================================== 星轨手记 (mitia) */
+/* 星轨 is a cubist theme: every rounded rectangle control becomes a true
+   rectangle (the progress circle, switch knob and avatars stay round). */
+:is(
+    [data-special-theme~='mitia']
+  )
+  :is(
+    .start-btn,
+    .btn,
+    .game-chip,
+    .linked-cap,
+    .rail-thumb,
+    .home-info,
+    .panel,
+    .settings,
+    .modal,
+    .toast,
+    .seg,
+    .segmented,
+    .seg-thumb,
+    .tabs,
+    .tab,
+    .tab-thumb,
+    .input,
+    .select-trigger,
+    .select-menu,
+    .select-option,
+    .glass-pop,
+    .dl-pop-glass,
+    .rail-pop,
+    .launch-drawer,
+    .confirm-modal,
+    .color-trigger,
+    .games-collapser,
+    .games-toggle,
+    .switch-track,
+    .switch-knob,
+    .wp-region-layer,
+    .dl-pop,
+    .gallery-thumb,
+    .thumb-skeleton,
+    .viewer,
+    .viewer-bar,
+    .viewer-img,
+    .stat-card,
+    .playtime-pill,
+    .card,
+    .home-card,
+    .gacha-toast,
+    .game-add,
+    .launcher-icon,
+    .launcher-brand,
+    .crop-img,
+    .crop-box,
+    .drawer-opt,
+    .font-item,
+    .icon-picker-sm
+  ) {
+  border-radius: 0 !important;
+}
+[data-special-theme~='mitia'] .slider::-webkit-slider-thumb {
+  border-radius: 0 !important;
+}
+
+/* Mitia's four marks: the tilted cross star (selection / launch), the axes +
+   sine curve (progress / data), the molecule (connections) and the wireframe
+   cube held by two hands (the sidebar's selected item). */
+
+/* ------------------------------------------------ marks (shared shapes) */
+.star-cross {
+  display: block;
+  overflow: visible;
+  transform: rotate(-15deg);
+}
+.star-cross-bloom {
+  animation: mt-ink-breathe 9s ease-in-out infinite;
+}
+.star-cross-shape {
+  filter: drop-shadow(0 0 9px rgba(108, 75, 216, 0.55))
+    drop-shadow(0 0 3px rgba(232, 200, 122, 0.35));
+}
+/* Restrained gold light running along the star's outline (smooth band, no
+   dashes; motion comes from the SVG gradient). */
+.mitia-flow {
+  fill: none;
+  stroke: #e8c87a;
+  stroke-width: 1.1;
+  stroke-linejoin: round;
+  filter: drop-shadow(0 0 4px rgba(232, 200, 122, 0.55));
+}
+.star-cross-sheen {
+  mix-blend-mode: screen;
+}
+.star-cross-edge {
+  stroke-width: 0.9;
+  stroke-opacity: 0.65;
+}
+@keyframes mt-ink-breathe {
+  0%,
+  100% {
+    opacity: 0.72;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* A real 3D cube that never stops turning. */
+.cube3d {
+  display: block;
+  width: var(--cube-edge, 30px);
+  height: var(--cube-edge, 30px);
+  perspective: 340px;
+  pointer-events: none;
+  filter: drop-shadow(0 0 6px rgba(143, 227, 255, 0.28));
+}
+.cube3d-spin {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 100%;
+  transform-style: preserve-3d;
+  animation: cube3d-turn 12s linear infinite;
+}
+.cube3d-face {
+  position: absolute;
+  inset: 0;
+  border: 1px solid rgba(232, 200, 122, 0.62);
+  background: linear-gradient(135deg, rgba(167, 139, 250, 0.18), rgba(24, 16, 52, 0.42));
+  box-shadow: inset 0 0 10px rgba(143, 227, 255, 0.12);
+}
+.cube3d-front {
+  transform: translateZ(calc(var(--cube-edge) / 2));
+}
+.cube3d-back {
+  transform: rotateY(180deg) translateZ(calc(var(--cube-edge) / 2));
+}
+.cube3d-right {
+  transform: rotateY(90deg) translateZ(calc(var(--cube-edge) / 2));
+}
+.cube3d-left {
+  transform: rotateY(-90deg) translateZ(calc(var(--cube-edge) / 2));
+}
+.cube3d-top {
+  transform: rotateX(90deg) translateZ(calc(var(--cube-edge) / 2));
+}
+.cube3d-bottom {
+  transform: rotateX(-90deg) translateZ(calc(var(--cube-edge) / 2));
+}
+/* White triangle glyph on the front face (the name card's cube). */
+@keyframes cube3d-turn {
+  0% {
+    transform: rotateX(-16deg) rotateY(0deg) rotateZ(0deg);
+  }
+  35% {
+    transform: rotateX(22deg) rotateY(130deg) rotateZ(12deg);
+  }
+  70% {
+    transform: rotateX(-20deg) rotateY(250deg) rotateZ(-10deg);
+  }
+  100% {
+    transform: rotateX(-16deg) rotateY(360deg) rotateZ(0deg);
+  }
+}
+.rail-cube {
+  z-index: 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .cube3d-spin {
+    animation: none;
+    transform: rotateX(-18deg) rotateY(-32deg);
+  }
+}
+
+/* ---------------------------------------------------------------- rail */
+[data-special-sidebar='mitia'] .rail {
+  background:
+    linear-gradient(180deg, rgba(14, 20, 48, 0.94), rgba(14, 20, 48, 0.52) 58%, rgba(14, 20, 48, 0.9)),
+    repeating-linear-gradient(
+      180deg,
+      rgba(167, 139, 250, 0.08) 0 1px,
+      transparent 1px 40px
+    ),
+    repeating-linear-gradient(90deg, rgba(167, 139, 250, 0.05) 0 1px, transparent 1px 40px);
+  box-shadow: inset -1px 0 rgba(232, 200, 122, 0.24);
+}
+[data-special-sidebar='mitia'] .rail-glass {
+  background-color: var(--glass);
+  background-image: var(--glass-sheen, none),
+    linear-gradient(180deg, rgba(108, 75, 216, 0.22), rgba(143, 227, 255, 0.05));
+  background-size: 900px 900px, auto;
+  border-right-color: rgba(232, 200, 122, 0.28);
+}
+/* Decorative gold y-axis on the rail's right edge: an upward arrow, a
+   hairline and hand-placed ticks / glints (not a strict ruler). It sits on the
+   very edge so it meets the page-title x-axis at the corner. */
+[data-special-sidebar='mitia'] .rail::after {
+  content: '';
+  position: absolute;
+  top: 14px;
+  bottom: 14px;
+  right: 0;
+  width: 10px;
+  z-index: 4;
+  pointer-events: none;
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8'%3E%3Cpath d='M4 0.6 7.4 7.4 0.6 7.4Z' fill='%23e8c87a' fill-opacity='0.9'/%3E%3C/svg%3E"),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='220'%3E%3Cg stroke='%23e8c87a' stroke-linecap='round'%3E%3Cline x1='6' y1='0' x2='6' y2='220' stroke-opacity='0.32' stroke-width='1.6'/%3E%3Cline x1='0' y1='28' x2='6' y2='28' stroke-opacity='0.7' stroke-width='1.4'/%3E%3Cline x1='2' y1='62' x2='6' y2='62' stroke-opacity='0.45' stroke-width='1.4'/%3E%3Cline x1='0' y1='96' x2='6' y2='96' stroke-opacity='0.85' stroke-width='1.8'/%3E%3Cline x1='3' y1='132' x2='6' y2='132' stroke-opacity='0.4' stroke-width='1.4'/%3E%3Cline x1='1' y1='168' x2='6' y2='168' stroke-opacity='0.65' stroke-width='1.4'/%3E%3Cline x1='4' y1='198' x2='6' y2='198' stroke-opacity='0.35' stroke-width='1.4'/%3E%3C/g%3E%3Ccircle cx='6' cy='45' r='1.4' fill='%23e8c87a' fill-opacity='0.8'/%3E%3Ccircle cx='6' cy='150' r='1.2' fill='%238fe3ff' fill-opacity='0.7'/%3E%3Ccircle cx='6' cy='182' r='1.3' fill='%23e8c87a' fill-opacity='0.6'/%3E%3C/svg%3E");
+  background-position: right 0 top 0, right 0 top 10px;
+  background-size: 8px 8px, 10px 220px;
+  background-repeat: no-repeat, repeat-y;
+}
+[data-special-nav-selected='mitia'] .rail-item.active::after {
+  content: '';
+  position: absolute;
+  inset: 4px;
+  border-radius: 6px;
+  pointer-events: none;
+  background: radial-gradient(circle, rgba(108, 75, 216, 0.28), transparent 72%);
+}
+/* The cube sits *behind* the glyph: the icon is inscribed in the wireframe. */
+[data-special-nav-selected='mitia'] .rail-item > svg {
+  position: relative;
+  z-index: 2;
+}
+
+/* -------------------------------------------------------- launch button */
+[data-special-launch-button='mitia'] .start-btn:not(.update):not(.stop) {
+  background: linear-gradient(135deg, #232a5c 0%, #3a2f78 56%, #4a3a92 100%);
+  color: var(--mt-paper, #f2eeff);
+  box-shadow:
+    0 12px 30px rgba(6, 8, 20, 0.5),
+    0 0 0 1px rgba(232, 200, 122, 0.3),
+    0 0 22px rgba(108, 75, 216, 0.32);
+}
+/* Apple-Music-like flowing light: soft gold / lilac / ice blobs drifting and
+   morphing behind the label — not a straight sweep. */
+[data-special-launch-button='mitia'] .start-btn:not(.update):not(.stop)::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.92;
+  background:
+    radial-gradient(38% 58% at 18% 28%, rgba(232, 200, 122, 0.55), transparent 62%),
+    radial-gradient(44% 62% at 78% 18%, rgba(255, 243, 207, 0.42), transparent 64%),
+    radial-gradient(46% 64% at 62% 86%, rgba(167, 139, 250, 0.5), transparent 66%),
+    radial-gradient(34% 48% at 28% 74%, rgba(143, 227, 255, 0.28), transparent 68%);
+  background-size: 220% 220%;
+  background-repeat: no-repeat;
+  filter: blur(10px) saturate(1.25);
+  animation: mt-btn-aurora 11s ease-in-out infinite alternate;
+}
+@keyframes mt-btn-aurora {
+  0% {
+    background-position: 0% 40%, 100% 0%, 50% 100%, 30% 80%;
+    filter: blur(10px) saturate(1.25) hue-rotate(0deg);
+  }
+  45% {
+    background-position: 70% 10%, 20% 70%, 90% 30%, 60% 20%;
+    filter: blur(12px) saturate(1.4) hue-rotate(12deg);
+  }
+  100% {
+    background-position: 100% 80%, 0% 30%, 20% 60%, 80% 10%;
+    filter: blur(10px) saturate(1.3) hue-rotate(-10deg);
+  }
+}
+[data-special-launch-button='mitia'] .start-btn:not(.update):not(.stop) .start-label {
+  color: inherit;
+}
+[data-special-launch-button='mitia'] .start-btn:not(.update):not(.stop):hover {
+  background: linear-gradient(135deg, #2a3270 0%, #443689 56%, #5544a6 100%);
+  box-shadow:
+    0 12px 30px rgba(6, 8, 20, 0.5),
+    0 0 0 1px rgba(232, 200, 122, 0.45),
+    0 0 28px rgba(108, 75, 216, 0.45);
+}
+/* The ink star sits ON TOP of the pill: its arms cross the button's left edge. */
+[data-special-launch-button='mitia'] .start-atom {
+  left: -28px;
+  z-index: 3;
+}
+[data-special-launch-button='mitia'] .start-atom .star-cross {
+  transform: rotate(-15deg) scale(0.9);
+}
+/* Hover / long press: pure 翕张 — repeated swelling, never smaller than the
+   normal size and without any rotation. */
+[data-special-launch-button='mitia'] .start-wrap:hover .star-cross,
+[data-special-launch-button='mitia'] .start-wrap:has(.start-btn:active) .star-cross {
+  animation: mt-star-open 3.8s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+/* One slow breath per cycle: swell to 1.16× and settle back — no extra dip. */
+@keyframes mt-star-open {
+  0% {
+    transform: rotate(-15deg) scale(0.9);
+  }
+  50% {
+    transform: rotate(-15deg) scale(1.16);
+  }
+  100% {
+    transform: rotate(-15deg) scale(0.9);
+  }
+}
+
+/* ---------------------------------------- click / trail particles */
+.mitia-burst-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  pointer-events: none;
+  overflow: hidden;
+}
+.mitia-hold-star {
+  position: absolute;
+  width: 76px;
+  height: 76px;
+  margin: -38px 0 0 -38px;
+  filter: drop-shadow(0 0 10px rgba(108, 75, 216, 0.55))
+    drop-shadow(0 0 4px rgba(232, 200, 122, 0.4));
+  /* Open from a point, then breathe slowly while it is held. */
+  animation:
+    mitia-hold-open 0.34s cubic-bezier(0.34, 1.56, 0.64, 1) both,
+    mitia-hold-pulse 3.2s cubic-bezier(0.45, 0, 0.55, 1) 0.34s infinite;
+}
+.mitia-hold-star svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.mitia-hold-star.out {
+  animation: mitia-hold-out 0.24s ease-in forwards;
+}
+@keyframes mitia-hold-open {
+  0% {
+    opacity: 0;
+    transform: translate(0, 0) rotate(-15deg) scale(0.04);
+  }
+  70% {
+    opacity: 1;
+    transform: translate(0, 0) rotate(-15deg) scale(1.08);
+  }
+  100% {
+    opacity: 1;
+    transform: translate(0, 0) rotate(-15deg) scale(1);
+  }
+}
+/* Slow "swallow / spit" breathing: one swell per cycle, no extra dip. */
+@keyframes mitia-hold-pulse {
+  0% {
+    transform: translate(0, 0) rotate(-15deg) scale(1);
+  }
+  50% {
+    transform: translate(0, -2px) rotate(-15deg) scale(1.12);
+  }
+  100% {
+    transform: translate(0, 0) rotate(-15deg) scale(1);
+  }
+}
+@keyframes mitia-hold-out {
+  0% {
+    opacity: 1;
+    transform: translate(0, 0) rotate(-15deg) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(0, 0) rotate(-15deg) scale(0.02);
+  }
+}
+.mitia-burst-molecule {
+  position: absolute;
+  width: 64px;
+  height: 32px;
+  margin: -16px 0 0 -32px;
+  animation: mitia-molecule-fly 1s cubic-bezier(0.16, 0.9, 0.3, 1) both;
+}
+/* Gold trail: a single SVG polyline (no canvas alpha stacking). */
+.mitia-gold-trail-svg {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 89;
+  pointer-events: none;
+  overflow: visible;
+  transition: opacity 0.24s ease-out;
+}
+.mitia-gold-canvas {
+  position: fixed;
+  inset: 0;
+  z-index: 89;
+  pointer-events: none;
+}
+/* Gold trail dot left behind while the hold star follows the pointer. */
+.mitia-gold-trail {
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  margin: -3.5px 0 0 -3.5px;
+  border-radius: 50%;
+  background: radial-gradient(circle, #fff3cf, rgba(232, 200, 122, 0.55) 55%, transparent 72%);
+  box-shadow: 0 0 8px rgba(232, 200, 122, 0.55);
+  animation: mitia-gold-trail 0.62s ease-out both;
+}
+@keyframes mitia-gold-trail {
+  0% {
+    opacity: 0.9;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.3);
+  }
+}
+.mitia-burst-molecule svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+@keyframes mitia-molecule-fly {
+  0% {
+    opacity: 0;
+    transform: scale(0.55) rotate(0deg);
+  }
+  18% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(var(--dx, 0px), var(--dy, 0px)) scale(1.05) rotate(var(--rot, 0deg));
+  }
+}
+
+/* ------------------------------------------------ 星轨坍缩 launch effect */
+/* The warp itself is the black-hole shader (LaunchTransition mode 5); this is
+   only the star that sits on top of it. */
+.mitia-nova {
+  position: fixed;
+  inset: 0;
+  z-index: 92;
+  overflow: hidden;
+  pointer-events: none;
+}
+.mitia-nova-star {
+  position: absolute;
+  left: var(--nova-x, 50%);
+  top: var(--nova-y, 50%);
+  width: 88px;
+  height: 88px;
+  margin: -44px 0 0 -44px;
+  filter: drop-shadow(0 0 24px rgba(108, 75, 216, 0.65));
+  animation: mitia-nova-star 0.95s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.mitia-nova-star svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+@keyframes mitia-nova-star {
+  0% {
+    transform: rotate(-15deg) scale(1);
+  }
+  35% {
+    transform: rotate(-15deg) scale(1.5);
+  }
+  60% {
+    transform: rotate(-15deg) scale(1.85);
+  }
+  80% {
+    transform: rotate(-15deg) scale(2.05);
+  }
+  100% {
+    opacity: 0;
+    transform: rotate(-15deg) scale(2.3);
+  }
+}
+/* A progress circle owns the cap: fade the star so the ring stays readable. */
+[data-special-launch-button='mitia'] .start-atom.has-progress .star-cross {
+  opacity: 0.22;
+}
+
+/* ------------------------------------------------------------- surfaces */
+[data-special-cards='mitia'] .home-info,
+[data-special-dialogs='mitia'] .modal,
+[data-special-forms='mitia'] .settings,
+[data-special-forms='mitia'] .panel,
+[data-special-dropdowns='mitia'] .select-menu,
+[data-special-dialogs='mitia'] .confirm-modal {
+  border-color: rgba(232, 200, 122, 0.26);
+  border-radius: 3px;
+  /* Molecule texture at its native 900 px scale; the tint stays `var(--glass)`
+     so the brightness / opacity sliders still apply. */
+  background-color: var(--glass);
+  background-image: var(--glass-sheen, none);
+  background-size: 900px 900px;
+  box-shadow:
+    inset 0 1px 0 rgba(232, 200, 122, 0.3),
+    inset 0 0 0 1px rgba(108, 75, 216, 0.16),
+    0 18px 40px rgba(6, 8, 20, 0.45);
+}
+/* The drawer floats over the page: a flat tint, no second material layer (that
+   would restart the texture and look discontinuous). */
+[data-special-drawer='mitia'] .launch-drawer,
+[data-special-drawer='mitia'] .drawer-scroll,
+[data-special-drawer='mitia'] .drawer-opt {
+  background-image: none !important;
+}
+[data-special-drawer='mitia'] .launch-drawer {
+  background-color: var(--glass) !important;
+  border-color: rgba(232, 200, 122, 0.32);
+  box-shadow: 0 18px 44px rgba(6, 8, 20, 0.55);
+}
+/* No material inside material: anything nested inside a material panel (the
+   module-management drawer, expanded settings groups, inner cards) drops the
+   texture and the backdrop blur, so the parent's pattern stays continuous. */
+:root[data-material='astral'] .settings :is(.glass, .panel, .collapse-inner, .settings-section, .module-panel, .row, .field, .range-row, .media-row, .settings, .launch-editor, .launch-editor--drawer),
+:root[data-material='astral'] .panel :is(.glass, .panel, .collapse-inner, .settings-section, .module-panel, .row, .field, .range-row, .media-row, .settings, .launch-editor),
+:root[data-material='astral'] .modal :is(.glass, .panel, .collapse-inner, .settings-section, .module-panel),
+:root[data-material='astral'] .glass-pop :is(.glass, .panel) {
+  background-image: none !important;
+  background-color: transparent !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  box-shadow: none !important;
+}
+[data-special-toast='mitia'] .toast {
+  border-color: rgba(232, 200, 122, 0.3);
+  background-color: var(--glass);
+  background-image: var(--glass-sheen, none);
+  background-size: 900px 900px;
+}
+
+/* -------------------------------------------------------------- accents */
+[data-special-text-accent='mitia'] ::selection {
+  background: rgba(108, 75, 216, 0.5);
+  color: #f2eeff;
+}
+[data-special-focus-ring='mitia'] :focus-visible {
+  outline-color: rgba(232, 200, 122, 0.8);
+}
+[data-special-tabs='mitia'] .tab.active,
+[data-special-segmented='mitia'] .seg.active {
+  box-shadow: inset 0 0 0 1px rgba(232, 200, 122, 0.34);
+}
+[data-special-switch='mitia'] .switch.on,
+[data-special-slider='mitia'] .slider-fill {
+  box-shadow: 0 0 12px rgba(232, 200, 122, 0.35);
+}
+[data-special-empty-state='mitia'] .empty-icon {
+  color: var(--mt-gold, #e8c87a);
+}
+[data-special-skeleton='mitia'] .skeleton {
+  background-image: linear-gradient(
+    90deg,
+    rgba(167, 139, 250, 0.08),
+    rgba(232, 200, 122, 0.14),
+    rgba(167, 139, 250, 0.08)
+  );
+}
+
+/* The grey page-title divider becomes a gold x-axis: hairline, ticks every
+   26 px and a right-pointing arrow. */
+[data-special-theme~='mitia'] .page-header {
+  position: relative;
+  border-bottom-color: transparent;
+}
+/* Analytic curve: y(x) = a*t*e^(-t) - L*(1 - e^(-t)), t = x/tau (a=900,
+   L=500, tau=60). Starts at 0, peaks ~80 px above the axis, then falls
+   monotonically towards a horizontal asymptote near the page bottom. */
+/* Analytic curve: y(x) = a*t*e^(-t) - L*(1 - e^(-t)), t = x/tau
+   (a=1126, L=563, tau=128): starts at 0, peaks ~120 px above the axis,
+   crosses the axis ~2.5x farther out, then falls towards the asymptote. */
+/* The curve lives on its own fixed layer: the stage clips its content, which
+   used to cut the peak off above the header. */
+.page-curve {
+  position: fixed;
+  left: 64px;
+  right: 0;
+  z-index: 3;
+  height: 710px;
+  pointer-events: none;
+  display: none;
+  background: url("data:image/svg+xml,%3Csvg xmlns%3D'http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg' width%3D'600' height%3D'710' viewBox%3D'0 0 600 710' preserveAspectRatio%3D'none'%3E%3Cdefs%3E%3ClinearGradient id%3D'f' x1%3D'0' y1%3D'0' x2%3D'1' y2%3D'0'%3E%3Cstop offset%3D'0' stop-color%3D'%238f7cf0' stop-opacity%3D'0.30'%2F%3E%3Cstop offset%3D'0.45' stop-color%3D'%236c4bd8' stop-opacity%3D'0.09'%2F%3E%3Cstop offset%3D'0.85' stop-color%3D'%236c4bd8' stop-opacity%3D'0.04'%2F%3E%3Cstop offset%3D'1' stop-color%3D'%236c4bd8' stop-opacity%3D'0'%2F%3E%3C%2FlinearGradient%3E%3ClinearGradient id%3D's' x1%3D'0' y1%3D'0' x2%3D'1' y2%3D'0'%3E%3Cstop offset%3D'0' stop-color%3D'%238fe3ff'%2F%3E%3Cstop offset%3D'0.45' stop-color%3D'%23a78bfa'%2F%3E%3Cstop offset%3D'0.8' stop-color%3D'%23e8c87a'%2F%3E%3Cstop offset%3D'0.93' stop-color%3D'%23e8c87a' stop-opacity%3D'0.55'%2F%3E%3Cstop offset%3D'1' stop-color%3D'%23e8c87a' stop-opacity%3D'0'%2F%3E%3C%2FlinearGradient%3E%3C%2Fdefs%3E%3Cpath d%3D'M0 130 L1 125.65 L2 121.41 L3 117.26 L4 113.22 L5 109.27 L6 105.42 L7 101.66 L8 98 L9 94.43 L10 90.95 L11 87.57 L12 84.27 L13 81.06 L14 77.93 L15 74.9 L16 71.94 L17 69.07 L18 66.29 L19 63.58 L20 60.95 L21 58.41 L22 55.94 L23 53.54 L24 51.23 L25 48.99 L26 46.82 L27 44.72 L28 42.7 L29 40.75 L30 38.86 L31 37.05 L32 35.3 L33 33.62 L34 32.01 L35 30.46 L36 28.98 L37 27.56 L38 26.2 L39 24.9 L40 23.66 L41 22.49 L42 21.37 L43 20.31 L44 19.3 L45 18.36 L46 17.47 L47 16.63 L48 15.85 L49 15.12 L50 14.44 L51 13.82 L52 13.24 L53 12.72 L54 12.24 L55 11.82 L56 11.44 L57 11.11 L58 10.82 L59 10.58 L60 10.39 L61 10.24 L62 10.13 L63 10.07 L64 10.05 L65 10.07 L66 10.13 L67 10.23 L68 10.37 L69 10.55 L70 10.77 L71 11.03 L72 11.33 L73 11.66 L74 12.03 L75 12.43 L76 12.87 L77 13.34 L78 13.85 L79 14.39 L80 14.96 L81 15.56 L82 16.2 L83 16.87 L84 17.56 L85 18.29 L86 19.05 L87 19.84 L88 20.65 L89 21.49 L90 22.37 L91 23.26 L92 24.19 L93 25.14 L94 26.12 L95 27.12 L96 28.14 L97 29.2 L98 30.27 L99 31.37 L100 32.49 L101 33.63 L102 34.8 L103 35.99 L104 37.2 L105 38.43 L106 39.68 L107 40.95 L108 42.24 L109 43.55 L110 44.88 L111 46.23 L112 47.59 L113 48.98 L114 50.38 L115 51.8 L116 53.23 L117 54.69 L118 56.15 L119 57.64 L120 59.14 L121 60.65 L122 62.18 L123 63.73 L124 65.28 L125 66.86 L126 68.44 L127 70.04 L128 71.65 L129 73.28 L130 74.91 L131 76.56 L132 78.22 L133 79.89 L134 81.58 L135 83.27 L136 84.98 L137 86.69 L138 88.42 L139 90.15 L140 91.9 L141 93.65 L142 95.41 L143 97.19 L144 98.97 L145 100.76 L146 102.55 L147 104.36 L148 106.17 L149 107.99 L150 109.82 L151 111.65 L152 113.49 L153 115.34 L154 117.2 L155 119.06 L156 120.92 L157 122.79 L158 124.67 L159 126.55 L160 128.44 L161 130.33 L162 132.23 L163 134.13 L164 136.04 L165 137.95 L166 139.87 L167 141.78 L168 143.71 L169 145.63 L170 147.56 L171 149.49 L172 151.43 L173 153.36 L174 155.3 L175 157.25 L176 159.19 L177 161.14 L178 163.09 L179 165.04 L180 166.99 L181 168.95 L182 170.9 L183 172.86 L184 174.82 L185 176.78 L186 178.74 L187 180.7 L188 182.66 L189 184.62 L190 186.59 L191 188.55 L192 190.51 L193 192.47 L194 194.44 L195 196.4 L196 198.36 L197 200.32 L198 202.28 L199 204.24 L200 206.2 L201 208.16 L202 210.12 L203 212.08 L204 214.03 L205 215.99 L206 217.94 L207 219.89 L208 221.84 L209 223.79 L210 225.73 L211 227.68 L212 229.62 L213 231.56 L214 233.5 L215 235.43 L216 237.37 L217 239.3 L218 241.23 L219 243.15 L220 245.08 L221 247 L222 248.92 L223 250.83 L224 252.74 L225 254.65 L226 256.56 L227 258.46 L228 260.36 L229 262.26 L230 264.15 L231 266.04 L232 267.93 L233 269.81 L234 271.69 L235 273.57 L236 275.44 L237 277.31 L238 279.17 L239 281.03 L240 282.89 L241 284.74 L242 286.59 L243 288.44 L244 290.28 L245 292.11 L246 293.95 L247 295.78 L248 297.6 L249 299.42 L250 301.23 L251 303.04 L252 304.85 L253 306.65 L254 308.45 L255 310.24 L256 312.03 L257 313.81 L258 315.59 L259 317.37 L260 319.14 L261 320.9 L262 322.66 L263 324.42 L264 326.17 L265 327.91 L266 329.65 L267 331.39 L268 333.12 L269 334.84 L270 336.56 L271 338.28 L272 339.99 L273 341.69 L274 343.39 L275 345.08 L276 346.77 L277 348.46 L278 350.14 L279 351.81 L280 353.48 L281 355.14 L282 356.8 L283 358.45 L284 360.1 L285 361.74 L286 363.38 L287 365.01 L288 366.63 L289 368.25 L290 369.87 L291 371.47 L292 373.08 L293 374.68 L294 376.27 L295 377.86 L296 379.44 L297 381.01 L298 382.58 L299 384.15 L300 385.71 L301 387.26 L302 388.81 L303 390.35 L304 391.89 L305 393.42 L306 394.95 L307 396.47 L308 397.98 L309 399.49 L310 400.99 L311 402.49 L312 403.98 L313 405.47 L314 406.95 L315 408.43 L316 409.9 L317 411.36 L318 412.82 L319 414.27 L320 415.72 L321 417.16 L322 418.59 L323 420.02 L324 421.45 L325 422.87 L326 424.28 L327 425.69 L328 427.09 L329 428.49 L330 429.88 L331 431.26 L332 432.64 L333 434.01 L334 435.38 L335 436.75 L336 438.1 L337 439.45 L338 440.8 L339 442.14 L340 443.47 L341 444.8 L342 446.13 L343 447.44 L344 448.76 L345 450.06 L346 451.36 L347 452.66 L348 453.95 L349 455.24 L350 456.51 L351 457.79 L352 459.06 L353 460.32 L354 461.58 L355 462.83 L356 464.07 L357 465.31 L358 466.55 L359 467.78 L360 469 L361 470.22 L362 471.44 L363 472.64 L364 473.85 L365 475.04 L366 476.24 L367 477.42 L368 478.6 L369 479.78 L370 480.95 L371 482.12 L372 483.28 L373 484.43 L374 485.58 L375 486.73 L376 487.86 L377 489 L378 490.13 L379 491.25 L380 492.37 L381 493.48 L382 494.59 L383 495.69 L384 496.79 L385 497.88 L386 498.97 L387 500.05 L388 501.13 L389 502.2 L390 503.27 L391 504.33 L392 505.39 L393 506.44 L394 507.48 L395 508.53 L396 509.56 L397 510.59 L398 511.62 L399 512.64 L400 513.66 L401 514.67 L402 515.68 L403 516.68 L404 517.68 L405 518.67 L406 519.66 L407 520.64 L408 521.62 L409 522.59 L410 523.56 L411 524.53 L412 525.49 L413 526.44 L414 527.39 L415 528.34 L416 529.28 L417 530.21 L418 531.14 L419 532.07 L420 532.99 L421 533.91 L422 534.82 L423 535.73 L424 536.63 L425 537.53 L426 538.43 L427 539.32 L428 540.2 L429 541.08 L430 541.96 L431 542.83 L432 543.7 L433 544.56 L434 545.42 L435 546.27 L436 547.12 L437 547.97 L438 548.81 L439 549.65 L440 550.48 L441 551.31 L442 552.13 L443 552.95 L444 553.77 L445 554.58 L446 555.39 L447 556.19 L448 556.99 L449 557.79 L450 558.58 L451 559.36 L452 560.15 L453 560.92 L454 561.7 L455 562.47 L456 563.23 L457 564 L458 564.76 L459 565.51 L460 566.26 L461 567.01 L462 567.75 L463 568.49 L464 569.22 L465 569.95 L466 570.68 L467 571.4 L468 572.12 L469 572.84 L470 573.55 L471 574.26 L472 574.96 L473 575.66 L474 576.36 L475 577.05 L476 577.74 L477 578.42 L478 579.1 L479 579.78 L480 580.46 L481 581.13 L482 581.79 L483 582.46 L484 583.12 L485 583.77 L486 584.43 L487 585.07 L488 585.72 L489 586.36 L490 587 L491 587.64 L492 588.27 L493 588.9 L494 589.52 L495 590.14 L496 590.76 L497 591.37 L498 591.98 L499 592.59 L500 593.2 L501 593.8 L502 594.4 L503 594.99 L504 595.58 L505 596.17 L506 596.75 L507 597.34 L508 597.91 L509 598.49 L510 599.06 L511 599.63 L512 600.19 L513 600.76 L514 601.32 L515 601.87 L516 602.43 L517 602.98 L518 603.52 L519 604.07 L520 604.61 L521 605.14 L522 605.68 L523 606.21 L524 606.74 L525 607.27 L526 607.79 L527 608.31 L528 608.82 L529 609.34 L530 609.85 L531 610.36 L532 610.86 L533 611.37 L534 611.87 L535 612.36 L536 612.86 L537 613.35 L538 613.84 L539 614.32 L540 614.8 L541 615.28 L542 615.76 L543 616.24 L544 616.71 L545 617.18 L546 617.64 L547 618.11 L548 618.57 L549 619.03 L550 619.48 L551 619.94 L552 620.39 L553 620.84 L554 621.28 L555 621.72 L556 622.16 L557 622.6 L558 623.04 L559 623.47 L560 623.9 L561 624.33 L562 624.75 L563 625.18 L564 625.6 L565 626.02 L566 626.43 L567 626.84 L568 627.25 L569 627.66 L570 628.07 L571 628.47 L572 628.87 L573 629.27 L574 629.67 L575 630.06 L576 630.46 L577 630.85 L578 631.23 L579 631.62 L580 632 L581 632.38 L582 632.76 L583 633.14 L584 633.51 L585 633.88 L586 634.25 L587 634.62 L588 634.99 L589 635.35 L590 635.71 L591 636.07 L592 636.43 L593 636.78 L594 637.13 L595 637.48 L596 637.83 L597 638.18 L598 638.52 L599 638.86 L600 639.21 L600 130 L0 130 Z' fill%3D'url(%23f)'%2F%3E%3Cpath d%3D'M0 130 L1 125.65 L2 121.41 L3 117.26 L4 113.22 L5 109.27 L6 105.42 L7 101.66 L8 98 L9 94.43 L10 90.95 L11 87.57 L12 84.27 L13 81.06 L14 77.93 L15 74.9 L16 71.94 L17 69.07 L18 66.29 L19 63.58 L20 60.95 L21 58.41 L22 55.94 L23 53.54 L24 51.23 L25 48.99 L26 46.82 L27 44.72 L28 42.7 L29 40.75 L30 38.86 L31 37.05 L32 35.3 L33 33.62 L34 32.01 L35 30.46 L36 28.98 L37 27.56 L38 26.2 L39 24.9 L40 23.66 L41 22.49 L42 21.37 L43 20.31 L44 19.3 L45 18.36 L46 17.47 L47 16.63 L48 15.85 L49 15.12 L50 14.44 L51 13.82 L52 13.24 L53 12.72 L54 12.24 L55 11.82 L56 11.44 L57 11.11 L58 10.82 L59 10.58 L60 10.39 L61 10.24 L62 10.13 L63 10.07 L64 10.05 L65 10.07 L66 10.13 L67 10.23 L68 10.37 L69 10.55 L70 10.77 L71 11.03 L72 11.33 L73 11.66 L74 12.03 L75 12.43 L76 12.87 L77 13.34 L78 13.85 L79 14.39 L80 14.96 L81 15.56 L82 16.2 L83 16.87 L84 17.56 L85 18.29 L86 19.05 L87 19.84 L88 20.65 L89 21.49 L90 22.37 L91 23.26 L92 24.19 L93 25.14 L94 26.12 L95 27.12 L96 28.14 L97 29.2 L98 30.27 L99 31.37 L100 32.49 L101 33.63 L102 34.8 L103 35.99 L104 37.2 L105 38.43 L106 39.68 L107 40.95 L108 42.24 L109 43.55 L110 44.88 L111 46.23 L112 47.59 L113 48.98 L114 50.38 L115 51.8 L116 53.23 L117 54.69 L118 56.15 L119 57.64 L120 59.14 L121 60.65 L122 62.18 L123 63.73 L124 65.28 L125 66.86 L126 68.44 L127 70.04 L128 71.65 L129 73.28 L130 74.91 L131 76.56 L132 78.22 L133 79.89 L134 81.58 L135 83.27 L136 84.98 L137 86.69 L138 88.42 L139 90.15 L140 91.9 L141 93.65 L142 95.41 L143 97.19 L144 98.97 L145 100.76 L146 102.55 L147 104.36 L148 106.17 L149 107.99 L150 109.82 L151 111.65 L152 113.49 L153 115.34 L154 117.2 L155 119.06 L156 120.92 L157 122.79 L158 124.67 L159 126.55 L160 128.44 L161 130.33 L162 132.23 L163 134.13 L164 136.04 L165 137.95 L166 139.87 L167 141.78 L168 143.71 L169 145.63 L170 147.56 L171 149.49 L172 151.43 L173 153.36 L174 155.3 L175 157.25 L176 159.19 L177 161.14 L178 163.09 L179 165.04 L180 166.99 L181 168.95 L182 170.9 L183 172.86 L184 174.82 L185 176.78 L186 178.74 L187 180.7 L188 182.66 L189 184.62 L190 186.59 L191 188.55 L192 190.51 L193 192.47 L194 194.44 L195 196.4 L196 198.36 L197 200.32 L198 202.28 L199 204.24 L200 206.2 L201 208.16 L202 210.12 L203 212.08 L204 214.03 L205 215.99 L206 217.94 L207 219.89 L208 221.84 L209 223.79 L210 225.73 L211 227.68 L212 229.62 L213 231.56 L214 233.5 L215 235.43 L216 237.37 L217 239.3 L218 241.23 L219 243.15 L220 245.08 L221 247 L222 248.92 L223 250.83 L224 252.74 L225 254.65 L226 256.56 L227 258.46 L228 260.36 L229 262.26 L230 264.15 L231 266.04 L232 267.93 L233 269.81 L234 271.69 L235 273.57 L236 275.44 L237 277.31 L238 279.17 L239 281.03 L240 282.89 L241 284.74 L242 286.59 L243 288.44 L244 290.28 L245 292.11 L246 293.95 L247 295.78 L248 297.6 L249 299.42 L250 301.23 L251 303.04 L252 304.85 L253 306.65 L254 308.45 L255 310.24 L256 312.03 L257 313.81 L258 315.59 L259 317.37 L260 319.14 L261 320.9 L262 322.66 L263 324.42 L264 326.17 L265 327.91 L266 329.65 L267 331.39 L268 333.12 L269 334.84 L270 336.56 L271 338.28 L272 339.99 L273 341.69 L274 343.39 L275 345.08 L276 346.77 L277 348.46 L278 350.14 L279 351.81 L280 353.48 L281 355.14 L282 356.8 L283 358.45 L284 360.1 L285 361.74 L286 363.38 L287 365.01 L288 366.63 L289 368.25 L290 369.87 L291 371.47 L292 373.08 L293 374.68 L294 376.27 L295 377.86 L296 379.44 L297 381.01 L298 382.58 L299 384.15 L300 385.71 L301 387.26 L302 388.81 L303 390.35 L304 391.89 L305 393.42 L306 394.95 L307 396.47 L308 397.98 L309 399.49 L310 400.99 L311 402.49 L312 403.98 L313 405.47 L314 406.95 L315 408.43 L316 409.9 L317 411.36 L318 412.82 L319 414.27 L320 415.72 L321 417.16 L322 418.59 L323 420.02 L324 421.45 L325 422.87 L326 424.28 L327 425.69 L328 427.09 L329 428.49 L330 429.88 L331 431.26 L332 432.64 L333 434.01 L334 435.38 L335 436.75 L336 438.1 L337 439.45 L338 440.8 L339 442.14 L340 443.47 L341 444.8 L342 446.13 L343 447.44 L344 448.76 L345 450.06 L346 451.36 L347 452.66 L348 453.95 L349 455.24 L350 456.51 L351 457.79 L352 459.06 L353 460.32 L354 461.58 L355 462.83 L356 464.07 L357 465.31 L358 466.55 L359 467.78 L360 469 L361 470.22 L362 471.44 L363 472.64 L364 473.85 L365 475.04 L366 476.24 L367 477.42 L368 478.6 L369 479.78 L370 480.95 L371 482.12 L372 483.28 L373 484.43 L374 485.58 L375 486.73 L376 487.86 L377 489 L378 490.13 L379 491.25 L380 492.37 L381 493.48 L382 494.59 L383 495.69 L384 496.79 L385 497.88 L386 498.97 L387 500.05 L388 501.13 L389 502.2 L390 503.27 L391 504.33 L392 505.39 L393 506.44 L394 507.48 L395 508.53 L396 509.56 L397 510.59 L398 511.62 L399 512.64 L400 513.66 L401 514.67 L402 515.68 L403 516.68 L404 517.68 L405 518.67 L406 519.66 L407 520.64 L408 521.62 L409 522.59 L410 523.56 L411 524.53 L412 525.49 L413 526.44 L414 527.39 L415 528.34 L416 529.28 L417 530.21 L418 531.14 L419 532.07 L420 532.99 L421 533.91 L422 534.82 L423 535.73 L424 536.63 L425 537.53 L426 538.43 L427 539.32 L428 540.2 L429 541.08 L430 541.96 L431 542.83 L432 543.7 L433 544.56 L434 545.42 L435 546.27 L436 547.12 L437 547.97 L438 548.81 L439 549.65 L440 550.48 L441 551.31 L442 552.13 L443 552.95 L444 553.77 L445 554.58 L446 555.39 L447 556.19 L448 556.99 L449 557.79 L450 558.58 L451 559.36 L452 560.15 L453 560.92 L454 561.7 L455 562.47 L456 563.23 L457 564 L458 564.76 L459 565.51 L460 566.26 L461 567.01 L462 567.75 L463 568.49 L464 569.22 L465 569.95 L466 570.68 L467 571.4 L468 572.12 L469 572.84 L470 573.55 L471 574.26 L472 574.96 L473 575.66 L474 576.36 L475 577.05 L476 577.74 L477 578.42 L478 579.1 L479 579.78 L480 580.46 L481 581.13 L482 581.79 L483 582.46 L484 583.12 L485 583.77 L486 584.43 L487 585.07 L488 585.72 L489 586.36 L490 587 L491 587.64 L492 588.27 L493 588.9 L494 589.52 L495 590.14 L496 590.76 L497 591.37 L498 591.98 L499 592.59 L500 593.2 L501 593.8 L502 594.4 L503 594.99 L504 595.58 L505 596.17 L506 596.75 L507 597.34 L508 597.91 L509 598.49 L510 599.06 L511 599.63 L512 600.19 L513 600.76 L514 601.32 L515 601.87 L516 602.43 L517 602.98 L518 603.52 L519 604.07 L520 604.61 L521 605.14 L522 605.68 L523 606.21 L524 606.74 L525 607.27 L526 607.79 L527 608.31 L528 608.82 L529 609.34 L530 609.85 L531 610.36 L532 610.86 L533 611.37 L534 611.87 L535 612.36 L536 612.86 L537 613.35 L538 613.84 L539 614.32 L540 614.8 L541 615.28 L542 615.76 L543 616.24 L544 616.71 L545 617.18 L546 617.64 L547 618.11 L548 618.57 L549 619.03 L550 619.48 L551 619.94 L552 620.39 L553 620.84 L554 621.28 L555 621.72 L556 622.16 L557 622.6 L558 623.04 L559 623.47 L560 623.9 L561 624.33 L562 624.75 L563 625.18 L564 625.6 L565 626.02 L566 626.43 L567 626.84 L568 627.25 L569 627.66 L570 628.07 L571 628.47 L572 628.87 L573 629.27 L574 629.67 L575 630.06 L576 630.46 L577 630.85 L578 631.23 L579 631.62 L580 632 L581 632.38 L582 632.76 L583 633.14 L584 633.51 L585 633.88 L586 634.25 L587 634.62 L588 634.99 L589 635.35 L590 635.71 L591 636.07 L592 636.43 L593 636.78 L594 637.13 L595 637.48 L596 637.83 L597 638.18 L598 638.52 L599 638.86 L600 639.21' fill%3D'none' stroke%3D'url(%23s)' stroke-width%3D'2' stroke-linecap%3D'round'%2F%3E%3C%2Fsvg%3E")
+    left bottom / 100% 710px no-repeat;
+  animation: mt-curve-draw 1.25s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+[data-special-theme~='mitia'] .page-curve {
+  display: block;
+}
+/* Decorative gold x-axis: hairline + uneven ticks / glints (not a ruler),
+   extended left to the rail so it meets the vertical axis at the corner. */
+[data-special-theme~='mitia'] .page-header::after {
+  content: '';
+  position: absolute;
+  left: -30px;
+  right: 0;
+  bottom: 0;
+  height: 9px;
+  pointer-events: none;
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='9' height='9'%3E%3Cpath d='M0.6 0.6 8.4 4.5 0.6 8.4Z' fill='%23e8c87a' fill-opacity='0.9'/%3E%3C/svg%3E"),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='260' height='9'%3E%3Cg stroke='%23e8c87a' stroke-linecap='round'%3E%3Cline x1='0' y1='4.5' x2='260' y2='4.5' stroke-opacity='0.32' stroke-width='1.6'/%3E%3Cline x1='34' y1='4.5' x2='34' y2='8' stroke-opacity='0.65' stroke-width='1.4'/%3E%3Cline x1='72' y1='4.5' x2='72' y2='6.5' stroke-opacity='0.45' stroke-width='1.4'/%3E%3Cline x1='108' y1='4.5' x2='108' y2='9' stroke-opacity='0.8' stroke-width='1.8'/%3E%3Cline x1='150' y1='4.5' x2='150' y2='6' stroke-opacity='0.5' stroke-width='1.4'/%3E%3Cline x1='196' y1='4.5' x2='196' y2='8' stroke-opacity='0.6' stroke-width='1.4'/%3E%3Cline x1='232' y1='4.5' x2='232' y2='6.5' stroke-opacity='0.4' stroke-width='1.4'/%3E%3C/g%3E%3Ccircle cx='90' cy='7' r='1.1' fill='%23e8c87a' fill-opacity='0.7'/%3E%3Ccircle cx='172' cy='7' r='1' fill='%238fe3ff' fill-opacity='0.6'/%3E%3C/svg%3E");
+  background-position: right 0 top 0, left top 0;
+  background-size: 9px 9px, 260px 9px;
+  background-repeat: no-repeat, repeat-x;
+}
+/* Page switch = the axis draws left→right and the sine is plotted with it. */
+[data-special-transition='mitia'] .app-anim-run .page-header::after {
+  animation: mt-axis-draw 0.95s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+@keyframes mt-axis-draw {
+  from {
+    clip-path: inset(0 100% 0 0);
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+@keyframes mt-curve-draw {
+  from {
+    clip-path: inset(0 100% 0 0);
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+/* ------------------------------------------------------------ transition */
+[data-special-transition='mitia'] .app-anim-run {
+  animation: none;
+}
+[data-special-transition='mitia'] .app-anim-run .stage {
+  animation: mt-page-in 0.36s var(--mt-ease, cubic-bezier(0.22, 1, 0.36, 1));
+}
+[data-special-transition='mitia'] .app-anim-run .bg-layer,
+[data-special-transition='mitia'] .app-anim-run .bg-scrim,
+[data-special-transition='mitia'] .app-anim-run .rail,
+[data-special-transition='mitia'] .app-anim-run .topbar {
+  animation: none;
+}
+@keyframes mt-page-in {
+  from {
+    transform: translateX(calc(var(--anim-x, 26px) * 0.7));
+  }
+  to {
+    transform: none;
+  }
 }
 
 /* ------------------------------------------------ critical update blocker */

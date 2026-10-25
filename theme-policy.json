@@ -1,9 +1,9 @@
 {
-  "version": "2.0.0-beta.1",
-  "themeId": "starsnow",
+  "version": "2.0.0-beta.2",
+  "themeId": "mitia",
   "areas": "all",
   "mode": "force",
-  "material": "starfrost",
-  "launchEffect": "shatter",
+  "material": "astral",
+  "launchEffect": "nova",
   "critical": true
 }

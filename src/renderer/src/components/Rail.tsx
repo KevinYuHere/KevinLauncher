@@ -8,6 +8,7 @@ import {
 } from 'react'
 import Icon, { type IconName } from './Icon'
 import AtomShield from './AtomShield'
+import CubeMark from './CubeMark'
 import RailShield from './RailShield'
 import { useJelly } from '../drag/useJelly'
 import { useAreaTheme } from '../theme/ThemeScope'
@@ -56,9 +57,25 @@ export default function Rail({
   const [pressed, setPressed] = useState(false)
   const viewRef = useRef(view)
   viewRef.current = view
-  // With the star-core selection, the moving highlight is replaced by the
-  // AtomShield inside the active item (CSS hides `.rail-thumb` / `.rail-bar`).
-  const starSelected = useAreaTheme('navSelected') === 'starsnow'
+  // The selected item's theme mark replaces the moving highlight: 霆骇列律 draws
+  // an atom core with a compact shield, 星轨手记 a wireframe cube held by hands.
+  const navTheme = useAreaTheme('navSelected')
+  const starSelected = navTheme === 'starsnow'
+  const cubeSelected = navTheme === 'mitia'
+  const themedSelection = starSelected || cubeSelected
+  const mark = (active: boolean): ReactElement | null =>
+    active && themedSelection ? (
+      <span className={`rail-atom${cubeSelected ? ' rail-cube' : ''}`} aria-hidden="true">
+        {cubeSelected ? (
+          <CubeMark size={48} />
+        ) : (
+          <>
+            <RailShield />
+            <AtomShield state="selected" size={48} />
+          </>
+        )}
+      </span>
+    ) : null
 
   // Drag-to-select (same feel as the segmented control): pick the item under the
   // pointer while dragging, live.
@@ -132,7 +149,7 @@ export default function Rail({
     >
       {/* Real element (not a pseudo) so the material engine can filter it. */}
       <div className="rail-glass" aria-hidden="true" />
-      {geom && !starSelected && (
+      {geom && !themedSelection && (
         <>
           <span
             ref={thumbRef}
@@ -154,12 +171,7 @@ export default function Rail({
             onClick={() => onNavigate(e.id)}
           >
             <Icon name={e.icon} />
-            {starSelected && view === e.id && (
-              <span className="rail-atom" aria-hidden="true">
-                <RailShield />
-                <AtomShield state="selected" size={48} />
-              </span>
-            )}
+            {mark(view === e.id)}
           </button>
         ))}
 
@@ -174,12 +186,7 @@ export default function Rail({
         onClick={() => onNavigate('linkedLaunch')}
       >
         <Icon name="link" />
-        {starSelected && view === 'linkedLaunch' && (
-          <span className="rail-atom" aria-hidden="true">
-            <RailShield />
-                <AtomShield state="selected" size={48} />
-          </span>
-        )}
+        {mark(view === 'linkedLaunch')}
       </button>
 
       <button
@@ -189,12 +196,7 @@ export default function Rail({
         onClick={() => onNavigate('settings')}
       >
         <Icon name="settings" />
-        {starSelected && view === 'settings' && (
-          <span className="rail-atom" aria-hidden="true">
-            <RailShield />
-                <AtomShield state="selected" size={48} />
-          </span>
-        )}
+        {mark(view === 'settings')}
       </button>
     </nav>
   )
