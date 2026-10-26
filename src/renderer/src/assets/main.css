@@ -2526,15 +2526,20 @@ textarea {
 }
 .switch-knob {
   position: absolute;
-  top: 3px;
+  top: 0;
+  bottom: 0;
   left: 3px;
   width: 16px;
   height: 16px;
+  /* Centred by construction: no manual `top`, so a border or a height change
+     can never push the knob slightly down. */
+  margin-block: auto;
   border-radius: 999px;
   background: var(--on-brand);
-  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.35);
+  /* A downward drop shadow made the knob read as sitting ~1-2 px low. */
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
   /* transform (position + jelly pop) is driven by useJelly. */
-  transition: width 0.18s var(--ease), height 0.18s var(--ease), top 0.18s var(--ease);
+  transition: width 0.18s var(--ease), height 0.18s var(--ease);
 }
 /* iOS-style: the knob stretches while being dragged — wider *and* taller, so it
    bulges both horizontally and vertically (fills the track's height). */
@@ -2542,7 +2547,6 @@ textarea {
 .switch-track[data-dragging='true'] .switch-knob {
   width: 17px;
   height: 16.5px;
-  top: 2.75px;
 }
 .switch-track:active .switch-knob {
   filter: brightness(1.02);
@@ -4083,6 +4087,19 @@ textarea:focus-visible {
   background-color: var(--field-bg);
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
+}
+/* The ON state must win over the flat field fill above. */
+.settings .switch-track[data-on='true'],
+.modal .switch-track[data-on='true'],
+.panel .switch-track[data-on='true'],
+.list .switch-track[data-on='true'],
+.switch-track[data-on='true'] {
+  background-color: var(--brand);
+  background-image: linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 0.16),
+    rgba(255, 255, 255, 0) 55%
+  );
 }
 /* Linked-launch capsules sit on the themed games-bar surface: use a flat fill
    instead of a second glass layer. */
@@ -6207,7 +6224,15 @@ textarea:focus-visible {
     .games-toggle,
     .switch-track,
     .switch-knob,
+    .radio-dot,
+    .radio-knob,
+    .checkbox-box,
+    .linked-cap,
+    .linked-launch-pill,
+    .linked-thumb,
     .wp-region-layer,
+    .wallpaper-switch,
+    .wp-btn,
     .dl-pop,
     .gallery-thumb,
     .thumb-skeleton,
@@ -6455,12 +6480,62 @@ textarea:focus-visible {
 }
 [data-special-launch-button='mitia'] .start-atom .star-cross {
   transform: rotate(-15deg) scale(0.9);
-}
-/* Hover / long press: pure 翕张 — repeated swelling, never smaller than the
-   normal size and without any rotation. */
-[data-special-launch-button='mitia'] .start-wrap:hover .star-cross,
-[data-special-launch-button='mitia'] .start-wrap:has(.start-btn:active) .star-cross {
+  /* The star breathes all the time, not only on hover. */
   animation: mt-star-open 3.8s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+/* Energy spiral: hidden by default, appears and is sucked inwards on hover /
+   long press. */
+.star-spiral {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 240px;
+  height: 240px;
+  margin: -120px 0 0 -120px;
+  opacity: 0;
+  transform: scale(1.18);
+  transform-origin: 50% 50%;
+  pointer-events: none;
+  transition:
+    opacity 0.32s ease,
+    transform 0.45s ease;
+}
+/* The rotor keeps spinning while the bands are hidden, so leaving and
+   re-entering the button never restarts the rotation. */
+.star-spiral-rotor {
+  transform-box: view-box;
+  transform-origin: 50% 50%;
+  animation: mt-spiral-spin 120s linear infinite;
+}
+.star-spiral path {
+  stroke: none;
+}
+.star-spiral {
+  filter: blur(0.35px) drop-shadow(0 0 6px rgba(232, 200, 122, 0.28));
+}
+[data-special-launch-button='mitia'] .start-wrap:hover .star-spiral,
+[data-special-launch-button='mitia'] .start-wrap:has(.start-btn:active) .star-spiral {
+  opacity: 1;
+  animation: mt-spiral-suck 3.8s cubic-bezier(0.45, 0, 0.55, 1) infinite alternate;
+}
+@keyframes mt-spiral-spin {
+  to {
+    rotate: 360deg;
+  }
+}
+/* Seamless in/out breath (alternate) instead of a jump back to the start. */
+@keyframes mt-spiral-suck {
+  from {
+    transform: scale(1.1);
+  }
+  to {
+    transform: scale(0.9);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .star-spiral {
+    animation: none !important;
+  }
 }
 /* One slow breath per cycle: swell to 1.16× and settle back — no extra dip. */
 @keyframes mt-star-open {
@@ -6613,15 +6688,73 @@ textarea:focus-visible {
   overflow: hidden;
   pointer-events: none;
 }
+/* Launch variant of the energy bands: scaled up, spun fast and sucked into
+   the star, then gone. */
+.mitia-nova-spiral {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  z-index: 1;
+  width: 0;
+  height: 0;
+  opacity: 0;
+  animation: nova-spiral-burst 1.35s cubic-bezier(0.4, 0, 0.6, 1) forwards;
+}
+/* Molecule formulas dragged into the star, like the material texture. */
+.mitia-nova-molecule {
+  position: absolute;
+  z-index: 2;
+  pointer-events: none;
+  transform-origin: 50% 50%;
+  filter: drop-shadow(0 0 6px rgba(232, 200, 122, 0.35));
+  animation: nova-molecule-in 1.15s cubic-bezier(0.4, 0, 0.7, 1) both;
+}
+@keyframes nova-molecule-in {
+  0% {
+    opacity: 0;
+    transform: translate(0, 0) rotate(0deg) scale(1);
+  }
+  18% {
+    opacity: 0.95;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(var(--dx), var(--dy)) rotate(var(--rot)) scale(0.12);
+    filter: blur(2px);
+  }
+}
+.mitia-nova-spiral .star-spiral {
+  opacity: 1 !important;
+  animation: mt-spiral-spin 5s linear infinite !important;
+}
+@keyframes nova-spiral-burst {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(9) rotate(0deg);
+  }
+  20% {
+    opacity: 1;
+  }
+  70% {
+    opacity: 0.9;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(1.4) rotate(200deg);
+  }
+}
 .mitia-nova-star {
   position: absolute;
+  z-index: 4;
   left: var(--nova-x, 50%);
   top: var(--nova-y, 50%);
   width: 88px;
   height: 88px;
   margin: -44px 0 0 -44px;
-  filter: drop-shadow(0 0 24px rgba(108, 75, 216, 0.65));
-  animation: mitia-nova-star 0.95s cubic-bezier(0.22, 1, 0.36, 1) both;
+  will-change: transform;
+  backface-visibility: hidden;
+  /* Only a moderate scale: the huge final cover is a cheap colour flood. */
+  animation: mitia-nova-star 1.05s cubic-bezier(0.42, 0, 0.8, 1) both;
 }
 .mitia-nova-star svg {
   display: block;
@@ -6630,20 +6763,34 @@ textarea:focus-visible {
 }
 @keyframes mitia-nova-star {
   0% {
+    opacity: 1;
     transform: rotate(-15deg) scale(1);
   }
-  35% {
-    transform: rotate(-15deg) scale(1.5);
-  }
-  60% {
-    transform: rotate(-15deg) scale(1.85);
-  }
-  80% {
-    transform: rotate(-15deg) scale(2.05);
+  55% {
+    opacity: 1;
+    transform: rotate(-15deg) scale(5);
   }
   100% {
     opacity: 0;
-    transform: rotate(-15deg) scale(2.3);
+    transform: rotate(-15deg) scale(9);
+  }
+}
+/* Solid ink flood that finishes the window cover without rasterising a
+   multi-thousand-pixel SVG (that was the late-phase stutter). */
+.mitia-nova-flood {
+  position: absolute;
+  z-index: 3;
+  border-radius: 50%;
+  background: radial-gradient(circle, #241a52 0%, #150e34 72%);
+  transform: translate(-50%, -50%) scale(0);
+  animation: nova-flood 0.65s cubic-bezier(0.4, 0, 0.6, 1) 0.72s forwards;
+}
+@keyframes nova-flood {
+  from {
+    transform: translate(-50%, -50%) scale(0);
+  }
+  to {
+    transform: translate(-50%, -50%) scale(1);
   }
 }
 /* A progress circle owns the cap: fade the star so the ring stays readable. */

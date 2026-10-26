@@ -3,6 +3,7 @@ import Ring from './Ring'
 import AtomShield from './AtomShield'
 import LaunchShield from './LaunchShield'
 import StarCross from './StarCross'
+import StarSpiral from './StarSpiral'
 import GlassPopup from './GlassPopup'
 import Icon from './Icon'
 import { useLongPress } from '../drag/useLongPress'
@@ -97,7 +98,10 @@ export default function DownloadButton({
       {launchThemed && (
         <span className={`start-atom${hasCircle ? ' has-progress' : ''}`} aria-hidden="true">
           {launchTheme === 'mitia' ? (
-            <StarCross size={88} />
+            <>
+              <StarSpiral />
+              <StarCross size={88} />
+            </>
           ) : (
             <AtomShield state="idle" progress={0} size={88} />
           )}

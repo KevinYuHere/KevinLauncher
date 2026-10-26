@@ -178,7 +178,7 @@ export default function App(): ReactElement {
     const start = performance.now()
     let last = 0
     const tick = (now: number): void => {
-      if (now - last > 50) {
+      if (now - last > 100) {
         const button = document.querySelector<HTMLElement>('.games-toggle')
         if (button) {
           const r = button.getBoundingClientRect()

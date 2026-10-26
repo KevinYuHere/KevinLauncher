@@ -3,7 +3,6 @@ import { LAUNCH_EFFECTS, type LaunchEffect, type LaunchMethod } from '@shared/ty
 import Icon from './Icon'
 import Sortable from './Sortable'
 import Select from './Select'
-import Segmented from './Segmented'
 import Switch from './Switch'
 import InlineEdit from './InlineEdit'
 import PathField from './PathField'
@@ -179,10 +178,10 @@ export default function LaunchMethodsEditor({
         row(
           '启动特效',
           LAUNCH_EFFECTS.find((e) => e.id === effect)?.desc ?? '不播放启动特效',
-          <Segmented
+          <Select
             value={effect}
-            onChange={(value) => onEffectChange(value as LaunchEffect)}
             options={LAUNCH_EFFECTS.map((e) => ({ value: e.id, label: e.label }))}
+            onChange={(value) => onEffectChange(value as LaunchEffect)}
           />
         )}
 
