@@ -67,7 +67,23 @@ export default function DownloadButton({
   const shieldTimer = useRef(0)
   const active = progress != null
   const hasCircle = active || !!idleIcon
-  const longPress = useLongPress((rect) => onLongPress?.(rect))
+  const suppressUntil = useRef(0)
+  const longPress = useLongPress((rect) => {
+    // A long press opens the picker: swallow the release and the click after it.
+    suppressUntil.current = performance.now() + 1000
+    onLongPress?.(rect)
+  })
+  // Launch on pointerup as well as click: Windows can swallow the first click
+  // after the launcher window gains focus, which used to make the first press
+  // do nothing. Deduped, so a normal click never launches twice.
+  const lastLaunchAt = useRef(0)
+  const fireLaunch = (): void => {
+    const now = performance.now()
+    if (now - lastLaunchAt.current < 700) return
+    lastLaunchAt.current = now
+    pulseShield()
+    onButtonClick()
+  }
   // The left mark follows the launch-button assignment; the cap progress circle
   // stays the stock ring (only its colour differs per tone). 霆骇列律 uses the
   // atom core + shield, 星轨手记 the tilted star.
@@ -87,10 +103,18 @@ export default function DownloadButton({
       <button
         className={`start-btn${tone !== 'plain' ? ` ${tone}` : ''}${hasCircle ? ' has-circle' : ''}${selected ? ' selected' : ''}`}
         onPointerDown={onLongPress ? longPress.onPointerDown : undefined}
-        onClick={() => {
+        onPointerUp={(event) => {
+          // Fallback launch: if the browser dropped the click (first press after
+          // the window gained focus), the pointerup still arrives.
+          if (event.button !== 0) return
+          if (performance.now() < suppressUntil.current) return
           if (longPress.consumeClick()) return
-          pulseShield()
-          onButtonClick()
+          fireLaunch()
+        }}
+        onClick={() => {
+          if (performance.now() < suppressUntil.current) return
+          if (longPress.consumeClick()) return
+          fireLaunch()
         }}
       >
         <span className="start-label">{label}</span>
