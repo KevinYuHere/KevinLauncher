@@ -1,9 +1,0 @@
-{
-  "version": "2.0.0",
-  "themeId": "mitia",
-  "areas": "all",
-  "mode": "force",
-  "material": "astral",
-  "launchEffect": "nova",
-  "critical": true
-}
