@@ -1,8 +1,9 @@
 import { parentPort } from 'worker_threads'
 import { promises as fs, createReadStream, createWriteStream } from 'fs'
-import { join } from 'path'
+import { join, dirname } from 'path'
 import { pipeline } from 'stream/promises'
 import { downloadFile } from '../services/downloader'
+import { md5File } from '../services/hash'
 import { extractZip } from '../update/zipAes'
 import {
   applyVfsManifest,
@@ -12,7 +13,7 @@ import {
   stageStaticFiles,
   type PatchManifest
 } from '../update/arknightsPatch'
-import type { AkPatch } from '../update/arknightsUpdate'
+import type { AkPack, AkPatch } from '../update/arknightsUpdate'
 
 interface StartMessage {
   type: 'start'
@@ -20,6 +21,8 @@ interface StartMessage {
   targetVersion: string
   patch: AkPatch
   hpatchzPath: string
+  /** Volumes staged by an earlier pre-download (reused instead of re-fetching). */
+  preStagedDir?: string
 }
 
 let controller: AbortController | null = null
@@ -42,6 +45,26 @@ async function mergeVolumes(parts: string[], dest: string, signal: AbortSignal):
     await pipeline(createReadStream(part), createWriteStream(dest, { flags: 'a' }))
   }
   return dest
+}
+
+/** Reuse a volume staged by a pre-download (size + md5 verified). */
+async function reuseStagedPart(src: string, dest: string, part: AkPack): Promise<boolean> {
+  try {
+    const stat = await fs.stat(src)
+    if (!stat.isFile()) return false
+    if (part.size > 0 && stat.size !== part.size) return false
+    if (part.md5 && (await md5File(src)) !== part.md5) return false
+    await fs.mkdir(dirname(dest), { recursive: true })
+    await fs.rm(dest, { force: true })
+    try {
+      await fs.link(src, dest)
+    } catch {
+      await fs.copyFile(src, dest)
+    }
+    return true
+  } catch {
+    return false
+  }
 }
 
 parentPort?.on('message', async (message: unknown) => {
@@ -73,14 +96,20 @@ parentPort?.on('message', async (message: unknown) => {
       const dest = join(diffsDir, part.name)
       partPaths.push(dest)
       const offset = base
-      await downloadFile({
-        url: part.url,
-        dest,
-        expectedSize: part.size,
-        expectedMd5: part.md5,
-        signal,
-        onProgress: (downloaded) => emit({ type: 'progress', downloaded: offset + downloaded, total })
-      })
+      const staged = msg.preStagedDir ? join(msg.preStagedDir, part.name) : ''
+      const reused = staged ? await reuseStagedPart(staged, dest, part) : false
+      if (reused) {
+        emit({ type: 'progress', downloaded: offset + part.size, total })
+      } else {
+        await downloadFile({
+          url: part.url,
+          dest,
+          expectedSize: part.size,
+          expectedMd5: part.md5,
+          signal,
+          onProgress: (downloaded) => emit({ type: 'progress', downloaded: offset + downloaded, total })
+        })
+      }
       base += part.size
     }
     emit({ type: 'progress', downloaded: total, total })

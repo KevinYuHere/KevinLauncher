@@ -2,6 +2,8 @@ import { promises as fs } from 'fs'
 import { join, basename } from 'path'
 import { createDecipheriv } from 'crypto'
 import type { UpdateInfo } from '@shared/types'
+import { compareVersions } from '@shared/version'
+import { writeFileAtomic } from '../services/atomicFile'
 
 const API_URL = 'https://launcher.hypergryph.com/api/proxy/batch_proxy'
 const APP_CODE = 'GzD1CpaWgmSq1wew'
@@ -40,6 +42,8 @@ export interface AkPatch {
   infoMd5?: string
   /** Total bytes to download. */
   size: number
+  /** Version this patch updates to (pre-download patches carry their own). */
+  version?: string
 }
 
 export interface AkLatest {
@@ -47,6 +51,8 @@ export interface AkLatest {
   version: string
   packs: AkPack[]
   patch: AkPatch | null
+  /** Pre-download package offered ahead of the release (`pre_patch`). */
+  prePatch: AkPatch | null
 }
 
 interface RawPack {
@@ -63,6 +69,8 @@ interface RawPatch {
   cd_key?: string
   v2_patch_info_url?: string
   v2_patch_info_md5?: string
+  version?: string
+  client_version?: string
 }
 
 interface RawResponse {
@@ -76,6 +84,7 @@ interface RawResponse {
       request_version?: string
       pkg?: { packs?: RawPack[] }
       patch?: RawPatch | null
+      pre_patch?: RawPatch | null
     }
   }[]
 }
@@ -128,23 +137,33 @@ export async function getArknightsLatest(localVersion: string): Promise<AkLatest
   if (!rsp) {
     const message = json.message ?? ''
     if (!res.ok || /patchExist|not\s*found/i.test(message)) {
-      return { action: 0, version: localVersion, packs: [], patch: null }
+      return { action: 0, version: localVersion, packs: [], patch: null, prePatch: null }
     }
     throw new Error(message || '鹰角接口返回异常')
   }
   const packs = toPacks(rsp.pkg?.packs)
-  const parts = toPacks(rsp.patch?.patches)
-  const patch: AkPatch | null =
-    rsp.patch && parts.length > 0
-      ? {
-          parts,
-          cdKey: rsp.patch.cd_key,
-          infoUrl: rsp.patch.v2_patch_info_url,
-          infoMd5: rsp.patch.v2_patch_info_md5,
-          size: parts.reduce((sum, part) => sum + part.size, 0)
-        }
-      : null
-  return { action: rsp.action ?? 0, version: rsp.version ?? '', packs, patch }
+  return {
+    action: rsp.action ?? 0,
+    version: rsp.version ?? '',
+    packs,
+    patch: toPatch(rsp.patch),
+    prePatch: toPatch(rsp.pre_patch)
+  }
+}
+
+/** Map a raw `patch` / `pre_patch` block to an `AkPatch` (null when unusable). */
+function toPatch(raw: RawPatch | null | undefined): AkPatch | null {
+  if (!raw) return null
+  const parts = toPacks(raw.patches)
+  if (parts.length === 0) return null
+  return {
+    parts,
+    cdKey: raw.cd_key,
+    infoUrl: raw.v2_patch_info_url,
+    infoMd5: raw.v2_patch_info_md5,
+    size: parts.reduce((sum, part) => sum + part.size, 0),
+    version: raw.version
+  }
 }
 
 /** Map the raw `packs` array to `AkPack`s, deriving a file name from the URL. */
@@ -161,6 +180,54 @@ function toPacks(raw: RawPack[] | undefined): AkPack[] {
       }
       return { url, md5: p.md5, size: Number(p.package_size ?? 0), name }
     })
+}
+
+/**
+ * Predownload staging for Arknights — deliberately separate from the miHoYo
+ * flow: parts land in `<gameDir>/_kl_pre/<version>/` and the formal update
+ * reuses them instead of downloading again.
+ */
+export interface AkPredownloadState {
+  version: string
+  ready: boolean
+  total: number
+  parts: { name: string; size: number; md5?: string }[]
+}
+
+export function akPredownloadDir(gameDir: string, version: string): string {
+  return join(gameDir, '_kl_pre', version)
+}
+
+/** Newest staged predownload (if any). */
+export async function readAkPredownloadState(gameDir: string): Promise<AkPredownloadState | null> {
+  try {
+    const root = join(gameDir, '_kl_pre')
+    const versions = (await fs.readdir(root, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+    if (versions.length === 0) return null
+    versions.sort(compareVersions)
+    const version = versions[versions.length - 1]
+    const raw = await fs.readFile(join(root, version, 'state.json'), 'utf-8')
+    const state = JSON.parse(raw) as AkPredownloadState
+    return state?.version === version ? state : null
+  } catch {
+    return null
+  }
+}
+
+export async function writeAkPredownloadState(
+  gameDir: string,
+  state: AkPredownloadState
+): Promise<void> {
+  const dir = akPredownloadDir(gameDir, state.version)
+  await fs.mkdir(dir, { recursive: true })
+  await writeFileAtomic(join(dir, 'state.json'), JSON.stringify(state, null, 2))
+}
+
+/** Drop every staged predownload (after the formal update applied them). */
+export async function clearAkPredownload(gameDir: string): Promise<void> {
+  await fs.rm(join(gameDir, '_kl_pre'), { recursive: true, force: true }).catch(() => undefined)
 }
 
 export async function getArknightsUpdateInfo(gameDir: string): Promise<UpdateInfo> {
@@ -184,7 +251,21 @@ export async function getArknightsUpdateInfo(gameDir: string): Promise<UpdateInf
       ? latest.patch.size
       : latest.packs.reduce((sum, pack) => sum + pack.size, 0)
     info.hasUpdate = latest.action === 1 && (latest.patch !== null || latest.packs.length > 0)
-    if (!info.hasUpdate) info.message = '已是最新版本'
+    // Pre-download: the API exposes `pre_patch` for the next version before it
+    // goes live. Offer it only when it is newer than the installed version.
+    const pre = latest.prePatch
+    const preNewer = !!local && !!pre?.version && compareVersions(local, pre.version) < 0
+    info.preDownloadVersion = preNewer ? (pre?.version ?? null) : null
+    if (preNewer && pre) {
+      info.preDownloadSizeBytes = pre.size
+      const state = await readAkPredownloadState(gameDir)
+      info.preDownloadFinished = !!state && state.ready && state.version === pre.version
+    }
+    if (!info.hasUpdate) {
+      info.message = info.preDownloadVersion
+        ? `可预下载 ${info.preDownloadVersion}`
+        : '已是最新版本'
+    }
   } catch (error) {
     info.message = (error as Error).message
     info.supported = false

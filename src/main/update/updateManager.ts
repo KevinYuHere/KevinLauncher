@@ -5,6 +5,7 @@ import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { pipeline } from 'stream/promises'
 import type { GachaGame, UpdateMode, UpdateStatus } from '@shared/types'
+import { compareVersions } from '@shared/version'
 import { downloadFile } from '../services/downloader'
 import { writeFileAtomic } from '../services/atomicFile'
 import {
@@ -19,7 +20,15 @@ import {
   getWPFPackageVersion,
   readGameVersion
 } from './hoyoplay'
-import { getArknightsLatest, readLocalVersion, type AkPack } from './arknightsUpdate'
+import {
+  akPredownloadDir,
+  clearAkPredownload,
+  getArknightsLatest,
+  readAkPredownloadState,
+  readLocalVersion,
+  writeAkPredownloadState,
+  type AkPack
+} from './arknightsUpdate'
 import sophonWorkerPath from '../workers/sophonWorker?modulePath'
 import arknightsWorkerPath from '../workers/arknightsWorker?modulePath'
 import { Worker } from 'worker_threads'
@@ -498,7 +507,10 @@ export class UpdateManager {
     controller: AbortController,
     status: UpdateStatus
   ): Promise<void> {
-    if (mode === 'preDownload') throw new Error('明日方舟不支持预下载')
+    if (mode === 'preDownload') {
+      await this.runArknightsPredownload(gameDir, controller, status)
+      return
+    }
     const local = await readLocalVersion(gameDir)
     const latest = await getArknightsLatest(local)
     if (latest.action !== 1) {
@@ -509,9 +521,17 @@ export class UpdateManager {
     // Preferred path: the incremental ("v2") package — ~0.8 GB instead of the
     // full game package (tens of GB).
     if (latest.patch) {
+      // A completed predownload for this exact version is reused, so the formal
+      // update never downloads the same parts twice.
+      const staged = await readAkPredownloadState(gameDir)
+      const preStagedDir =
+        staged?.ready && staged.version === latest.version
+          ? akPredownloadDir(gameDir, staged.version)
+          : undefined
       log(
         `update: arknights delta ${local}→${latest.version} (` +
-          `${Math.round(latest.patch.size / 1048576)} MB, ${latest.patch.parts.length} part(s))`
+          `${Math.round(latest.patch.size / 1048576)} MB, ${latest.patch.parts.length} part(s)` +
+          `${preStagedDir ? ', reusing predownload' : ''})`
       )
       status.phase = 'downloading'
       status.progress = 0
@@ -528,11 +548,13 @@ export class UpdateManager {
           gameDir,
           targetVersion: latest.version,
           patch: latest.patch,
-          hpatchzPath
+          hpatchzPath,
+          preStagedDir
         },
         controller,
         status
       )
+      await clearAkPredownload(gameDir)
       status.message = '更新完成'
       return
     }
@@ -563,6 +585,45 @@ export class UpdateManager {
       /* keep downloaded archives on failure */
     }
     status.message = '更新完成'
+  }
+
+  /**
+   * Arknights pre-download: fetch the `pre_patch` volumes into
+   * `<gameDir>/_kl_pre/<version>` and record their state. The game directory is
+   * not touched; the formal update later reuses these files.
+   */
+  private async runArknightsPredownload(
+    gameDir: string,
+    controller: AbortController,
+    status: UpdateStatus
+  ): Promise<void> {
+    const local = await readLocalVersion(gameDir)
+    const latest = await getArknightsLatest(local)
+    const pre = latest.prePatch
+    if (!pre || !pre.version) throw new Error('当前没有可预下载的版本')
+    if (local && compareVersions(local, pre.version) >= 0) {
+      status.message = '已是最新版本'
+      return
+    }
+    const dir = akPredownloadDir(gameDir, pre.version)
+    await fs.mkdir(dir, { recursive: true })
+    status.phase = 'downloading'
+    status.progress = 0
+    status.message = `正在预下载 ${pre.version}…`
+    this.emit(status)
+    await this.downloadList(
+      pre.parts.map((part) => ({ ...part, dest: join(dir, part.name) })),
+      controller,
+      status
+    )
+    await writeAkPredownloadState(gameDir, {
+      version: pre.version,
+      ready: true,
+      total: pre.size,
+      parts: pre.parts.map((part) => ({ name: part.name, size: part.size, md5: part.md5 }))
+    })
+    status.message = '预下载完成'
+    log(`update: arknights predownload ${pre.version} ready (${pre.parts.length} part(s))`)
   }
 }
 

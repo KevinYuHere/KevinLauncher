@@ -6802,9 +6802,13 @@ textarea:focus-visible {
     transform: translate(-50%, -50%) scale(1);
   }
 }
-/* A progress circle owns the cap: fade the star so the ring stays readable. */
+/* While the cap ring is shown the star keeps full opacity and re-centres on
+   the circle (54 px ring → centre 27 px from the wrap's left edge). */
+[data-special-launch-button='mitia'] .start-atom.has-progress {
+  left: -17px;
+}
 [data-special-launch-button='mitia'] .start-atom.has-progress .star-cross {
-  opacity: 0.22;
+  opacity: 1;
 }
 
 /* ------------------------------------------------------------- surfaces */
