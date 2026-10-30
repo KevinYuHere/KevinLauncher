@@ -572,7 +572,9 @@ textarea {
   left: 0;
   top: 50%;
   transform: translateY(-50%);
-  z-index: 2;
+  /* The cap ring owns the cap: keep it above the themed launch mark (which is
+     centred on it) so progress / pause stay readable. */
+  z-index: 4;
 }
 /* Sits concentrically with the launch pill's left rounded cap (54 px tall). */
 .pre-circle {

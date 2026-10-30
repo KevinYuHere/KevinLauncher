@@ -20,7 +20,7 @@ import { applyAutoStart, startedHidden } from './services/autostart'
 import { applyDataDir } from './services/dataDir'
 import { applyThemePolicyOnStartup } from './services/themePolicy'
 import { relaunchInstallerElevated, syncInstalledVersion } from './services/install'
-import { cleanUpdateStaging } from './services/housekeeping'
+import { cleanArknightsStaging, cleanUpdateStaging } from './services/housekeeping'
 import { currentAppVersion } from './services/appVersion'
 import { flushBeforeShutdown } from './services/shutdown'
 import { BgStore } from './services/background'
@@ -273,6 +273,8 @@ app.whenReady().then(async () => {
   void appUpdate.cleanupOldVersions()
   // Drop staged update downloads that are not for the running version.
   void cleanUpdateStaging()
+  // Arknights apply-staging leftovers (a killed update can leave GBs behind).
+  void cleanArknightsStaging()
   // An in-app upgrade changes the version pointer but not the uninstall entry /
   // install marker — keep those in sync so the setup reports the right version.
   if (app.isPackaged) {

@@ -1,8 +1,10 @@
 import { app } from 'electron'
 import { promises as fs } from 'fs'
-import { join } from 'path'
+import { dirname, join } from 'path'
 import type { UsageReport } from '@shared/types'
 import { keepStagedVersion } from '@shared/version'
+import { defaultLaunchMethod } from '@shared/appEntry'
+import { AppStore } from './appStore'
 import { directorySize } from './updateDownload'
 import { currentAppVersion } from './appVersion'
 import { log } from './logger'
@@ -48,6 +50,24 @@ export async function cleanUpdateStaging(): Promise<number> {
   }
   if (removed > 0) log(`housekeeping: removed ${removed} stale staging folder(s)`)
   return removed
+}
+
+/**
+ * Arknights derived staging (`_kl_delta` / `_kl_stage`) is rebuilt on every
+ * apply, so leftovers from a killed update are safe to delete at startup.
+ * `_kl_pre` is deliberately kept: it is a real staged pre-download.
+ */
+export async function cleanArknightsStaging(): Promise<void> {
+  const store = await AppStore.load()
+  for (const entry of store.apps) {
+    if (entry.addonId !== 'arknights') continue
+    const dir =
+      entry.gameDirectory?.trim() || dirname(defaultLaunchMethod(entry)?.targetPath ?? '')
+    if (!dir) continue
+    for (const name of ['_kl_delta', '_kl_stage']) {
+      await fs.rm(join(dir, name), { recursive: true, force: true }).catch(() => undefined)
+    }
+  }
 }
 
 /** Removes the gallery thumbnail cache (regenerated on demand). */
