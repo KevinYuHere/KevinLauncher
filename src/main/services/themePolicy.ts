@@ -47,10 +47,18 @@ export async function loadThemePolicy(): Promise<ThemePolicy | null> {
       continue
     }
     try {
-      const policy = normalizeThemePolicy(JSON.parse(raw) as unknown)
+      const parsed = JSON.parse(raw) as unknown
+      const policy = normalizeThemePolicy(parsed)
       if (policy) {
         log(`themePolicy: using ${file} (v${policy.version}, ${policy.themeId})`)
         return policy
+      }
+      // A release marker may carry only `critical` (forced update, no setting
+      // changes): it is valid for the payload, nothing to apply here.
+      const marker = parsed as { critical?: boolean }
+      if (marker?.critical === true) {
+        log(`themePolicy: ${file} is a critical-only marker (settings untouched)`)
+        continue
       }
       log(`themePolicy: ignoring invalid policy in ${file}`)
     } catch (error) {
