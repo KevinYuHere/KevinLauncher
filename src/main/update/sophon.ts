@@ -208,9 +208,7 @@ export async function fetchRetry(url: string, init?: RequestInit, attempts = 6):
 }
 export async function fetchManifest(category: SophonCategory): Promise<SophonAsset[]> {
   const url = `${category.manifestUrlPrefix}/${category.manifestId}${category.manifestSuffix}`
-  const res = await fetchRetry(url, { headers: { 'User-Agent': 'Mozilla/5.0' } })
-  if (!res.ok) throw new Error(`download manifest failed HTTP ${res.status}`)
-  const bytes = new Uint8Array(await res.arrayBuffer())
+  const bytes = await fetchBodyResilient(url, {})
   return parseManifest(category.manifestCompression ? decompress(bytes) : bytes)
 }
 
@@ -221,13 +219,36 @@ export async function fetchChunk(
   compression = 1,
   suffix = ''
 ): Promise<Buffer> {
-  const res = await fetchRetry(`${prefix}/${name}${suffix}`, {
-    headers: { 'User-Agent': 'Mozilla/5.0' },
-    signal
-  })
-  if (!res.ok) throw new Error(`download chunk failed HTTP ${res.status}`)
-  const bytes = new Uint8Array(await readBodyThrottled(res))
+  const bytes = await fetchBodyResilient(`${prefix}/${name}${suffix}`, { signal })
   return Buffer.from(compression ? decompress(bytes) : bytes)
+}
+
+/**
+ * Fetch a body with retries around the **read**, not just the connection: a CDN
+ * reset in the middle of a response (`terminated`) used to abort the whole
+ * pre-download, which looked like an extremely slow download.
+ */
+async function fetchBodyResilient(
+  url: string,
+  options: { signal?: AbortSignal; headers?: Record<string, string>; attempts?: number }
+): Promise<Uint8Array> {
+  const attempts = options.attempts ?? 4
+  let last: unknown
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const res = await fetch(url, {
+        headers: { 'User-Agent': 'Mozilla/5.0', ...options.headers },
+        signal: options.signal
+      })
+      if (!res.ok) throw new Error(`download chunk failed HTTP ${res.status}`)
+      return new Uint8Array(await readBodyThrottled(res))
+    } catch (error) {
+      if (options.signal?.aborted) throw error
+      last = error
+      if (i < attempts - 1) await new Promise((resolve) => setTimeout(resolve, 1500 * (i + 1)))
+    }
+  }
+  throw last
 }
 
 async function fileMatches(path: string, size: number, md5: string): Promise<boolean> {

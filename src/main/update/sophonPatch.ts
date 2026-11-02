@@ -4,6 +4,7 @@ import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { decompress } from 'fzstd'
 import { md5File } from '../services/hash'
+import { downloadFile } from '../services/downloader'
 import { readBodyThrottled } from '../services/rateLimit'
 import {
   fetchChunk,
@@ -396,21 +397,29 @@ export async function applySophonPatch(
     if (promise) return promise
     promise = (async () => {
       const path = join(cacheDir!, name)
-      try {
-        if ((await fs.stat(path)).size === chunk.patchFileSize) return
-      } catch {
-        /* missing */
-      }
-      const pr = await fetchRetry(
-        `${category.diffUrlPrefix}/${name}${category.diffSuffix}`,
-        { headers: { 'User-Agent': 'Mozilla/5.0' }, signal }
-      )
-      if (!pr.ok) throw new Error(`下载补丁文件失败 HTTP ${pr.status}`)
-      const data = await readBodyThrottled(pr)
-      await fs.writeFile(path, data)
-      if (chunk.patchFileMd5 && (await md5File(path)) !== chunk.patchFileMd5) {
-        await fs.rm(path, { force: true }).catch(() => undefined)
-        throw new Error(`补丁文件校验失败：${name}`)
+      const url = `${category.diffUrlPrefix}/${name}${category.diffSuffix}`
+      // Stream to disk with Range resume and retry: buffering the whole blob and
+      // restarting from zero on a reset made big pre-downloads crawl.
+      const attempts = 5
+      for (let attempt = 0; attempt < attempts; attempt++) {
+        try {
+          await downloadFile({
+            url,
+            dest: path,
+            expectedSize: chunk.patchFileSize,
+            expectedMd5: chunk.patchFileMd5,
+            signal
+          })
+          return
+        } catch (error) {
+          if (signal?.aborted) throw error
+          // A wrong hash means the partial file is unusable; drop it and retry.
+          if (/校验失败/.test((error as Error).message)) {
+            await fs.rm(path, { force: true }).catch(() => undefined)
+          }
+          if (attempt === attempts - 1) throw error
+          await new Promise((resolve) => setTimeout(resolve, 1500 * (attempt + 1)))
+        }
       }
     })()
     blobs.set(name, promise)
@@ -586,22 +595,52 @@ export async function preparePatchCache(
     } catch {
       present = false
     }
-    if (!present) {
-      const pr = await fetchRetry(
-        `${blob.category.diffUrlPrefix}/${name}${blob.category.diffSuffix}`,
-        { headers: { 'User-Agent': 'Mozilla/5.0' }, signal }
-      )
-      if (!pr.ok) throw new Error(`下载补丁文件失败 HTTP ${pr.status}`)
-      const data = await readBodyThrottled(pr)
-      await fs.writeFile(path, data)
-      if (blob.md5 && (await md5File(path)) !== blob.md5) {
-        await fs.rm(path, { force: true }).catch(() => undefined)
-        throw new Error(`补丁文件校验失败：${name}`)
-      }
-      downloaded += data.length
-    } else {
+    if (present) {
       downloaded += blob.size
+      onProgress(downloaded, total)
+      return
     }
-    onProgress(downloaded, total)
+    // Stream to disk with Range resume and retry. Buffering whole blobs and
+    // restarting from zero after a CDN reset was the reason pre-downloads
+    // crawled or died with `terminated`.
+    const url = `${blob.category.diffUrlPrefix}/${name}${blob.category.diffSuffix}`
+    const attempts = 5
+    let lastReported = 0
+    try {
+      lastReported = (await fs.stat(path)).size
+    } catch {
+      lastReported = 0
+    }
+    downloaded += lastReported
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      try {
+        await downloadFile({
+          url,
+          dest: path,
+          expectedSize: blob.size,
+          expectedMd5: blob.md5,
+          signal,
+          onProgress: (done) => {
+            const delta = done - lastReported
+            if (delta > 0) {
+              lastReported = done
+              downloaded += delta
+              onProgress(downloaded, total)
+            }
+          }
+        })
+        return
+      } catch (error) {
+        if (signal?.aborted) throw error
+        // A bad hash means the partial file is unusable: start this blob over.
+        if (/校验失败/.test((error as Error).message)) {
+          await fs.rm(path, { force: true }).catch(() => undefined)
+          downloaded -= lastReported
+          lastReported = 0
+        }
+        if (attempt === attempts - 1) throw error
+        await new Promise((resolve) => setTimeout(resolve, 1500 * (attempt + 1)))
+      }
+    }
   })
 }
