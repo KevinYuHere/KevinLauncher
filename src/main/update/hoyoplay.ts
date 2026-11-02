@@ -178,13 +178,13 @@ export async function getHoYoUpdateInfo(
     const pdNewer = !!info.currentVersion && !!pd && compareVersion(info.currentVersion, pd) < 0
     info.preDownloadVersion = pdNewer ? pd : null
     if (pdNewer && info.currentVersion && pd) {
-      const langs = audioEnumNames(await detectAudioLanguages(gameDir))
+      const langs = audioEnumNames(await detectAudioLanguages(game, gameDir))
       info.preDownloadFinished =
         (await readPredownloadMarker(gameDir)) === `${info.currentVersion},${pd},${langs}`
     }
     // F35: advertised sizes (patch delta, or the chunk build total).
     try {
-      const audio = await detectAudioLanguages(gameDir)
+      const audio = await detectAudioLanguages(game, gameDir)
       if (mainBranch) {
         info.mainSizeBytes = await computeTargetSize(mainBranch, info.currentVersion, audio)
       }
@@ -194,7 +194,11 @@ export async function getHoYoUpdateInfo(
     } catch {
       /* sizes are best-effort */
     }
-    if (!info.hasUpdate) info.message = '已是最新版本'
+    if (!info.hasUpdate) {
+      info.message = info.preDownloadVersion
+        ? `可预下载 ${info.preDownloadVersion}`
+        : '已是最新版本'
+    }
   } catch (error) {
     info.message = (error as Error).message
   }
@@ -227,25 +231,65 @@ export async function readPredownloadMarker(gameDir: string): Promise<string | n
 }
 
 /**
- * Voice languages already installed — KevinLauncher has no voice-language setting,
- * so the `Audio_<lang>_pkg_version` files in the game root are the source (a
- * player may have several).
+ * Voice languages already installed — KevinLauncher has no voice-language setting.
+ * Two sources are combined:
+ * - the legacy `Audio_<lang>_pkg_version` marker files in the game root, and
+ * - the voice-asset folders (`.../AudioAssets/Chinese`, `English(US)`, …), which
+ *   newer installs use instead of (or in addition to) the markers.
+ * Checking only the markers under-reports the languages (Genshin 7.x ships three
+ * voice packs with a single Chinese marker), which made the advertised
+ * pre-download size too small.
  */
-export async function detectAudioLanguages(gameDir: string): Promise<string[]> {
-  const table: [string, string][] = [
-    ['Audio_Chinese_pkg_version', 'zh-cn'],
-    ['Audio_English(US)_pkg_version', 'en-us'],
-    ['Audio_Japanese_pkg_version', 'ja-jp'],
-    ['Audio_Korean_pkg_version', 'ko-kr']
-  ]
+export async function detectAudioLanguages(
+  game: 'genshin' | 'starrail' | 'zzz',
+  gameDir: string
+): Promise<string[]> {
+  const markers: Record<string, string> = {
+    'zh-cn': 'Audio_Chinese_pkg_version',
+    'en-us': 'Audio_English(US)_pkg_version',
+    'ja-jp': 'Audio_Japanese_pkg_version',
+    'ko-kr': 'Audio_Korean_pkg_version'
+  }
+  const folders: Record<string, string[]> = {
+    'zh-cn': ['Chinese'],
+    'en-us': ['English(US)', 'English'],
+    'ja-jp': ['Japanese'],
+    'ko-kr': ['Korean']
+  }
+  const audioDirs: Record<'genshin' | 'starrail' | 'zzz', string[]> = {
+    genshin: ['YuanShen_Data/StreamingAssets/AudioAssets'],
+    starrail: [
+      'StarRail_Data/Persistent/AudioAssets',
+      'StarRail_Data/StreamingAssets/AudioAssets'
+    ],
+    zzz: ['ZenlessZoneZero_Data/StreamingAssets/AudioAssets']
+  }
   const installed: string[] = []
-  for (const [file, field] of table) {
+  for (const field of ['zh-cn', 'en-us', 'ja-jp', 'ko-kr']) {
+    let found = false
     try {
-      await fs.access(join(gameDir, file))
-      installed.push(field)
+      await fs.access(join(gameDir, markers[field]))
+      found = true
     } catch {
-      /* not installed */
+      /* no marker file */
     }
+    if (!found) {
+      for (const relative of audioDirs[game] ?? []) {
+        for (const folder of folders[field]) {
+          try {
+            const stat = await fs.stat(join(gameDir, ...relative.split('/'), folder))
+            if (stat.isDirectory()) {
+              found = true
+              break
+            }
+          } catch {
+            /* no such voice folder */
+          }
+        }
+        if (found) break
+      }
+    }
+    if (found) installed.push(field)
   }
   return installed
 }

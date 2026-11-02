@@ -258,7 +258,7 @@ export class UpdateManager {
   ): Promise<void> {
     const gameConfig = await getGameConfig(game)
     // Only the installed voice languages are downloaded (size differs per player).
-    const audioLanguages = await detectAudioLanguages(gameDir)
+    const audioLanguages = await detectAudioLanguages(game, gameDir)
     // Non-chunk games use the compressed-package flow (Starward: DefaultDownloadMode).
     const defaultMode = gameConfig?.defaultDownloadMode ?? ''
     if (
