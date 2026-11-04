@@ -49,11 +49,12 @@ parentPort?.on('message', async (message: unknown) => {
     let patched = false
 
     // Patch mode (diff from the installed version) is used for pre-download too.
-    // Like Starward: only when `diff_tags` lists the installed version, and a
-    // patch that then fails aborts the task (no full-download fallback).
-    const canPatch = msg.diffTags ? msg.diffTags.includes(msg.localVersion ?? '') : true
+    // `diff_tags` from the branch API is only a hint: a stale or empty list must
+    // not push the task into a full chunk download (tens of GB). We therefore try
+    // the patch build whenever the local version is known and only fall back when
+    // the server really has no patch for it.
     let patchBuild: Awaited<ReturnType<typeof getPatchBuild>> | null = null
-    if (msg.localVersion && msg.hpatchzPath && canPatch) {
+    if (msg.localVersion && msg.hpatchzPath) {
       try {
         patchBuild = await getPatchBuild(msg.branch)
       } catch (error) {
@@ -65,6 +66,12 @@ parentPort?.on('message', async (message: unknown) => {
         patchBuild = null
       }
     }
+    post({
+      type: 'phase',
+      message: patchBuild
+        ? '正在准备增量补丁…'
+        : '未找到可用增量补丁，将按分块更新（下载量会明显增大）…'
+    })
     if (patchBuild && msg.localVersion && msg.hpatchzPath) {
       // Starward downloads and verifies every unique patch file first, then
       // applies them (a pre-download runs only the download step).
@@ -118,6 +125,14 @@ parentPort?.on('message', async (message: unknown) => {
           if (error instanceof BuildNotFound) localBuild = undefined
           else throw error
         }
+      }
+      if (!localBuild) {
+        // Without the installed build's manifests no chunk can be reused, so the
+        // update turns into a full download — say so instead of silently doing it.
+        post({
+          type: 'phase',
+          message: '本地构建清单不可用，将下载完整文件（无法复用已安装内容）…'
+        })
       }
       await downloadSophonBuild(
         build,
