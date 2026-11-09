@@ -58,7 +58,7 @@ import { applyGlass, applyTheme, installTextureScatter, scatterTextureOffsets } 
 import { applySpecialTheme } from './specialTheme'
 import { SpecialThemeProvider } from './theme/ThemeScope'
 import { extractVideoAccent } from './videoAccent'
-import { prepareWallpaper } from './wallpaperDisplay'
+import { peekPreparedWallpaper, prepareWallpaperForDisplay } from './wallpaperPrepared'
 import { installWallpaperRegionUpdater, updateWallpaperRegions } from './wallpaperRegion'
 
 /** Local calendar date as `YYYY-MM-DD` (used to run daily update checks). */
@@ -929,18 +929,15 @@ export default function App(): ReactElement {
     }
   }, [])
 
-  // Object URL of the display-resolution wallpaper (see `wallpaperDisplay.ts`).
-  const preparedUrl = useRef<string | null>(null)
-  useEffect(
-    () => () => {
-      if (preparedUrl.current) URL.revokeObjectURL(preparedUrl.current)
-    },
-    []
-  )
-
   // Swap the background only once the incoming image has decoded, carrying the
   // new game's blur / dim with it. The previous background (with its own blur)
   // stays on screen until then, so switching games never flashes a sharp frame.
+  //
+  // The decode + high-quality downscale runs in a worker and is cached per
+  // source + target size (`wallpaperPrepared.ts`): a very large wallpaper used
+  // to block the renderer when switching to that app, and every switch redid
+  // the same work. The original file is never assigned to the background
+  // `<img>`, so the renderer no longer decodes the full-size image at all.
   useEffect(() => {
     if (!bg) {
       setBgDisplay(null)
@@ -949,37 +946,25 @@ export default function App(): ReactElement {
     const blur = current?.backgroundBlur ?? 0
     const dim = current ? current.backgroundDim : 0
     const commit = (src: string): void => {
-      // The popup layers may still paint the previous URL for a frame or two.
-      const previous = preparedUrl.current
-      preparedUrl.current = src.startsWith('blob:') ? src : null
-      if (previous && previous !== src) window.setTimeout(() => URL.revokeObjectURL(previous), 3000)
       setBgDisplay({ src, kind: isVideo ? 'video' : 'image', blur, dim })
     }
     if (isVideo) {
       commit(bg)
       return
     }
+    const cssWidth = winSize.w + 128
+    const cssHeight = winSize.h + 128
+    // A cached wallpaper commits synchronously (no decode, no frame of waiting).
+    const peek = peekPreparedWallpaper(bg, cssWidth, cssHeight, winSize.dpr)
+    if (peek.hit) {
+      commit(peek.value ? peek.value.url : bg)
+      return
+    }
     let cancelled = false
-    const image = new Image()
-    image.crossOrigin = 'anonymous'
-    image.onload = () => {
+    void prepareWallpaperForDisplay(bg, cssWidth, cssHeight, winSize.dpr).then((prepared) => {
       if (cancelled) return
-      // Downscale once to the device-pixel cover size: the browser then paints
-      // the wallpaper 1:1 instead of aliasing an 8K image into a 2K window.
-      void prepareWallpaper(image, winSize.w + 128, winSize.h + 128, winSize.dpr).then(
-        (prepared) => {
-          if (cancelled) {
-            if (prepared) URL.revokeObjectURL(prepared.url)
-            return
-          }
-          commit(prepared?.url ?? bg)
-        }
-      )
-    }
-    image.onerror = () => {
-      if (!cancelled) commit(bg)
-    }
-    image.src = bg
+      commit(prepared ? prepared.url : bg)
+    })
     return () => {
       cancelled = true
     }

@@ -267,7 +267,9 @@ export default function SettingsView({
   const [glassOpen, setGlassOpen] = useState(false)
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [themeOpen, setThemeOpen] = useState(false)
-  const [bulkTheme, setBulkTheme] = useState<SpecialThemeId>('starsnow')
+  // Bulk-apply starts on 默认, never on a special theme: the dropdown must not
+  // suggest (or apply) 霆骇列律 unless the user picks it.
+  const [bulkTheme, setBulkTheme] = useState<SpecialThemeId>('default')
   const autoTheme = entry.autoTheme ?? true
   const currentIcon = iconUrl(entry.iconFile)
   const wallpaper = currentWallpaper(entry)
