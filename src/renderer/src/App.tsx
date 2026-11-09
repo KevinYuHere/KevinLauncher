@@ -25,6 +25,7 @@ import type {
 } from '@shared/types'
 import { currentWallpaper, isVideoFile } from '@shared/appEntry'
 import Rail from './components/Rail'
+import { perf } from './perfProbe'
 import GamesRow from './components/GamesRow'
 import LinkedLaunchRow from './components/LinkedLaunchRow'
 import WindowControls from './components/WindowControls'
@@ -933,43 +934,85 @@ export default function App(): ReactElement {
   // new game's blur / dim with it. The previous background (with its own blur)
   // stays on screen until then, so switching games never flashes a sharp frame.
   //
-  // The decode + high-quality downscale runs in a worker and is cached per
+  // The heavy decode + high-quality downscale runs in a worker and is cached per
   // source + target size (`wallpaperPrepared.ts`): a very large wallpaper used
   // to block the renderer when switching to that app, and every switch redid
   // the same work. The original file is never assigned to the background
   // `<img>`, so the renderer no longer decodes the full-size image at all.
+  //
+  // Even a prepared (cached) blob is decoded *before* it is committed: swapping
+  // the `<img>` to an undecoded image painted a black frame until the bitmap was
+  // ready, which looked like "black, then the wallpaper".
   useEffect(() => {
     if (!bg) {
       setBgDisplay(null)
       return
     }
+    perf('wp-effect', bg.slice(-24))
     const blur = current?.backgroundBlur ?? 0
     const dim = current ? current.backgroundDim : 0
     const commit = (src: string): void => {
+      perf('wp-commit', src.slice(-24))
       setBgDisplay({ src, kind: isVideo ? 'video' : 'image', blur, dim })
+    }
+    let cancelled = false
+    const cleanup = (): void => {
+      cancelled = true
     }
     if (isVideo) {
       commit(bg)
-      return
+      return cleanup
     }
     const cssWidth = winSize.w + 128
     const cssHeight = winSize.h + 128
-    // A cached wallpaper commits synchronously (no decode, no frame of waiting).
+    // A cached wallpaper commits without any re-encode. The background <img> is
+    // not remounted on src changes, so it keeps the previous frame on screen
+    // until the new bitmap is ready (no black flash, no decode probe wait).
     const peek = peekPreparedWallpaper(bg, cssWidth, cssHeight, winSize.dpr)
+    perf(peek.hit ? 'wp-peek-hit' : 'wp-peek-miss', peek.value ? 'prepared' : 'raw')
     if (peek.hit) {
       commit(peek.value ? peek.value.url : bg)
-      return
+      return cleanup
     }
-    let cancelled = false
     void prepareWallpaperForDisplay(bg, cssWidth, cssHeight, winSize.dpr).then((prepared) => {
       if (cancelled) return
       commit(prepared ? prepared.url : bg)
     })
-    return () => {
-      cancelled = true
-    }
+    return cleanup
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bg, isVideo, current?.id, winSize.w, winSize.h, winSize.dpr])
+
+  // Warm the prepared-wallpaper cache for every app in the background, so the
+  // first switch to an app that has not been shown yet is instant as well. All
+  // decoding happens in the worker; this only fills the memory/IndexedDB cache.
+  useEffect(() => {
+    const cssWidth = winSize.w + 128
+    const cssHeight = winSize.h + 128
+    const targets: string[] = []
+    for (const app of apps) {
+      const wallpaper = currentWallpaper(app)
+      if (!wallpaper || isVideoFile(wallpaper.file)) continue
+      const url = backgroundUrl(wallpaper.file)
+      if (url) targets.push(url)
+    }
+    if (targets.length === 0) return
+    let cancelled = false
+    const run = async (): Promise<void> => {
+      for (const url of targets) {
+        if (cancelled) return
+        // Yield between wallpapers so the UI keeps its frames.
+        await new Promise((resolve) => setTimeout(resolve, 120))
+        if (cancelled) return
+        await prepareWallpaperForDisplay(url, cssWidth, cssHeight, winSize.dpr)
+      }
+    }
+    const timer = window.setTimeout(() => void run(), 1500)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apps, winSize.w, winSize.h, winSize.dpr])
 
   // Wallpaper rotation triggers: on app switch, once on launcher start (first
   // time an app is shown) and on an interval. `appLaunch` is handled in
@@ -1210,13 +1253,26 @@ export default function App(): ReactElement {
     return () => window.clearTimeout(timer)
   }, [view, currentId])
 
+  // Diagnostics: mark when a render commits and when its first frame is painted
+  // (used to compare app switches with page switches; see `perfProbe`).
+  useEffect(() => {
+    perf('render')
+    const raf = requestAnimationFrame(() => perf('paint'))
+    return () => cancelAnimationFrame(raf)
+  })
+
   return (
     <SpecialThemeProvider assignments={launcherSettings.themeAreas}>
       <div className="app">
-      <div className="app-anim" ref={animRef}>
+      {/* The wallpaper lives outside `.app-anim` on purpose: it is a full-window
+          layer, and animating it (even only counter-animating it) forced the
+          compositor to re-composite the whole background on every frame of the
+          page-slide transition — much heavier with a large wallpaper. */}
       {bgDisplay && bgDisplay.kind === 'image' && (
+        // No `key`: the same <img> swaps sources, so Chromium keeps painting the
+        // previous wallpaper until the new bitmap is ready (a remount painted a
+        // black frame first).
         <img
-          key={bgDisplay.src}
           className="bg-layer"
           src={bgDisplay.src}
           crossOrigin="anonymous"
@@ -1239,10 +1295,13 @@ export default function App(): ReactElement {
       )}
       <div className="bg-scrim" style={{ opacity: bgDisplay ? bgDisplay.dim / 100 : 1 }} />
       {bgDisplay && <div className="bg-dim" style={{ opacity: (bgDisplay.dim / 100) * 0.7 }} />}
-
+      <div className="app-anim" ref={animRef}>
       <Rail
         view={view}
-        onNavigate={setView}
+        onNavigate={(next) => {
+          perf('nav-select', next)
+          setView(next)
+        }}
         showGacha={!!currentAddon?.capabilities.gacha}
         showUpdate={!!currentAddon?.capabilities.update}
         updateSlot={
@@ -1276,7 +1335,10 @@ export default function App(): ReactElement {
             <GamesRow
               apps={apps}
               currentId={currentId}
-              onSelect={(id) => setCurrentId(id)}
+              onSelect={(id) => {
+                perf('app-select', id)
+                setCurrentId(id)
+              }}
               onAdd={() => setShowAdd(true)}
               onReorder={(ids) => void handleReorder(ids)}
               onDragEnd={handleGamesDragEnd}

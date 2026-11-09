@@ -2461,8 +2461,10 @@ textarea {
   font-size: 12px;
 }
 
-/* Content slides; the background / rail / topbar stay visually still via a
-   counter-animation so backdrop-filter keeps working without a flicker. */
+/* Content slides; the rail / topbar stay visually still via a counter-animation
+   so backdrop-filter keeps working without a flicker. The wallpaper layers sit
+   outside `.app-anim` (see App.tsx) so the full-window background is not
+   re-composited on every frame of the slide. */
 .app-anim {
   position: absolute;
   inset: 0;
@@ -2470,8 +2472,6 @@ textarea {
 .app-anim-run {
   animation: appIn 0.32s cubic-bezier(0.22, 1, 0.36, 1);
 }
-.app-anim-run .bg-layer,
-.app-anim-run .bg-scrim,
 .app-anim-run .rail,
 .app-anim-run .topbar {
   animation: appCounter 0.32s cubic-bezier(0.22, 1, 0.36, 1);

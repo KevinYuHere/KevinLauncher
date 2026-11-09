@@ -11,6 +11,8 @@
  *   commits instantly (no decode at all).
  */
 
+import { perf } from './perfProbe'
+
 export interface PreparedWallpaper {
   url: string
   width: number
@@ -19,6 +21,12 @@ export interface PreparedWallpaper {
 
 /** How many prepared wallpapers to keep (each is ~1 MB of WebP). */
 const CACHE_MAX = 6
+
+/**
+ * Bump when the preparation algorithm changes (e.g. the crop semantics), so
+ * persisted images from an older build are not reused.
+ */
+const FORMAT_VERSION = 2
 
 const cache = new Map<string, PreparedWallpaper>()
 /** Keys known to need no work: the caller should use the original URL. */
@@ -66,6 +74,7 @@ function ensureWorker(): Worker | null {
         height
       }
       remember(reply.key, prepared)
+      void idbPut(reply.key, { t: Date.now(), blob: reply.blob, width, height })
       resolve(prepared)
     }
     scope.onerror = (): void => {
@@ -92,13 +101,106 @@ function remember(key: string, prepared: PreparedWallpaper): void {
   }
 }
 
+// ---------------------------------------------------------------- IndexedDB
+// The prepared image is persisted so a launcher restart (or a window resize
+// that hits an already-rendered size) does not need to decode the huge source
+// again.
+interface StoredPrepared {
+  t: number
+  blob: Blob
+  width: number
+  height: number
+}
+
+const DB_NAME = 'kl-wallpaper-prepared'
+const STORE = 'prepared'
+/** Upper bound on persisted entries (a few MB each, pruned to this). */
+const MAX_STORED = 24
+
+let dbPromise: Promise<IDBDatabase | null> | null = null
+
+function openDb(): Promise<IDBDatabase | null> {
+  if (dbPromise) return dbPromise
+  dbPromise = new Promise((resolve) => {
+    try {
+      const request = indexedDB.open(DB_NAME, FORMAT_VERSION)
+      request.onupgradeneeded = () => {
+        // A format bump invalidates every stored image (crop semantics changed).
+        if (request.result.objectStoreNames.contains(STORE)) {
+          request.result.deleteObjectStore(STORE)
+        }
+        request.result.createObjectStore(STORE)
+      }
+      request.onsuccess = () => resolve(request.result)
+      request.onerror = () => resolve(null)
+    } catch {
+      resolve(null)
+    }
+  })
+  return dbPromise
+}
+
+async function idbGet(key: string): Promise<StoredPrepared | null> {
+  const db = await openDb()
+  if (!db) return null
+  return new Promise((resolve) => {
+    try {
+      const request = db.transaction(STORE, 'readonly').objectStore(STORE).get(key)
+      request.onsuccess = () => {
+        const value = request.result as StoredPrepared | undefined
+        resolve(value?.blob ? value : null)
+      }
+      request.onerror = () => resolve(null)
+    } catch {
+      resolve(null)
+    }
+  })
+}
+
+async function idbPrune(db: IDBDatabase): Promise<void> {
+  try {
+    const store = db.transaction(STORE, 'readwrite').objectStore(STORE)
+    const keys = await new Promise<IDBValidKey[]>((resolve) => {
+      const request = store.getAllKeys()
+      request.onsuccess = () => resolve(request.result)
+      request.onerror = () => resolve([])
+    })
+    if (keys.length <= MAX_STORED) return
+    for (const key of keys.slice(0, keys.length - MAX_STORED)) store.delete(key)
+  } catch {
+    /* best effort */
+  }
+}
+
+async function idbPut(key: string, value: StoredPrepared): Promise<void> {
+  const db = await openDb()
+  if (!db) return
+  try {
+    const store = db.transaction(STORE, 'readwrite').objectStore(STORE)
+    store.put(value, key)
+    void idbPrune(db)
+  } catch {
+    /* cache is best effort */
+  }
+}
+
+function fromStored(key: string, value: StoredPrepared): PreparedWallpaper {
+  const prepared: PreparedWallpaper = {
+    url: URL.createObjectURL(value.blob),
+    width: value.width,
+    height: value.height
+  }
+  remember(key, prepared)
+  return prepared
+}
+
 export function wallpaperCacheKey(
   url: string,
   cssWidth: number,
   cssHeight: number,
   dpr: number
 ): string {
-  return `${url}|${Math.round(cssWidth)}x${Math.round(cssHeight)}@${Math.round(dpr * 100) / 100}`
+  return `v${FORMAT_VERSION}|${url}|${Math.round(cssWidth)}x${Math.round(cssHeight)}@${Math.round(dpr * 100) / 100}`
 }
 
 export interface PeekResult {
@@ -141,15 +243,24 @@ export function prepareWallpaperForDisplay(
   if (existing) return existing
 
   const job = (async (): Promise<PreparedWallpaper | null> => {
+    // Persisted prepared image first: no fetch, no decode of the huge source.
+    const stored = await idbGet(key)
+    if (stored) {
+      perf('wp-idb-hit')
+      return fromStored(key, stored)
+    }
     const instance = ensureWorker()
     if (!instance) return null
     try {
+      const started = performance.now()
       const response = await fetch(url)
       if (!response.ok) return null
       const buffer = await response.arrayBuffer()
+      perf('wp-fetch', { ms: Math.round(performance.now() - started), bytes: buffer.byteLength })
       const type = response.headers.get('content-type') ?? 'image/png'
       return await new Promise<PreparedWallpaper | null>((resolve) => {
         resolvers.set(key, (value) => {
+          perf('wp-prepared', { ok: !!value, ms: Math.round(performance.now() - started) })
           if (value === null) rawKeys.add(key)
           resolve(value)
         })
