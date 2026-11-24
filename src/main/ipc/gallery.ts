@@ -1,10 +1,11 @@
-import { BrowserWindow, ClipboardItem, clipboard, ipcMain, Menu, nativeImage, shell } from 'electron'
+import { BrowserWindow, ClipboardItem, clipboard, Menu, nativeImage, shell } from 'electron'
+import { handleIpc } from './access'
 import { promises as fs } from 'fs'
 import { extname, join } from 'path'
 import type { GalleryItem } from '@shared/types'
 import { AppStore } from '../services/appStore'
 import { log } from '../services/logger'
-import { openViewer, viewerNav } from '../services/viewer'
+import { openViewer, permitsViewerFile, viewerNav } from '../services/viewer'
 
 const IMAGE_EXT = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.avif'])
 const MAX_IMAGES = 3000
@@ -52,7 +53,7 @@ async function collectImages(dir: string, out: GalleryItem[], depth = 0): Promis
 }
 
 export function registerGalleryIpc(): void {
-  ipcMain.handle('gallery:list', async (_e, appId: string) => {
+  handleIpc('gallery:list', async (_e, appId: string) => {
     const store = await AppStore.load()
     const entry = store.apps.find((a) => a.id === appId)
     const dir = entry?.screenshotDirectory
@@ -63,17 +64,17 @@ export function registerGalleryIpc(): void {
     return items
   })
 
-  ipcMain.handle('gallery:openViewer', (_e, paths: string[] | string, index: number) => {
+  handleIpc('gallery:openViewer', (_e, paths: string[] | string, index: number) => {
     openViewer(Array.isArray(paths) ? paths : [String(paths)], index)
   })
 
   // Previous/next image (wraps). Returns the new path; the viewer window updates
   // in place (no reload).
-  ipcMain.handle('gallery:viewerNav', (_e, delta: number) => viewerNav(delta))
+  handleIpc('gallery:viewerNav', (_e, delta: number) => viewerNav(delta))
 
-  ipcMain.handle('gallery:contextMenu', (e, path: string) => {
+  handleIpc('gallery:contextMenu', (e, path: string) => {
     const win = BrowserWindow.fromWebContents(e.sender)
-    if (!win) return
+    if (!win || typeof path !== 'string' || !permitsViewerFile(win, path)) return
     const isImage = IMAGE_EXT.has(extname(path).toLowerCase())
     const template = [
       { label: '在文件资源管理器中打开', click: () => shell.showItemInFolder(path) }

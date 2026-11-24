@@ -1,4 +1,4 @@
-import { app } from 'electron'
+import { isMainThread } from 'node:worker_threads'
 import { appendFile, renameSync, rmSync, statSync } from 'fs'
 import { join } from 'path'
 
@@ -20,6 +20,8 @@ function serialize(part: unknown): string {
 }
 
 function logFile(): string {
+  // Electron main-process APIs are not installed in isolated download workers.
+  const { app } = require('electron') as typeof import('electron')
   return join(app.getPath('userData'), 'launcher.log')
 }
 
@@ -45,6 +47,7 @@ function rotateIfNeeded(file: string): void {
 export function log(...parts: unknown[]): void {
   const line = `[${new Date().toISOString()}] ${parts.map(serialize).join(' ')}\n`
   console.log(line.trimEnd())
+  if (!isMainThread) return
   try {
     const file = logFile()
     rotateIfNeeded(file)

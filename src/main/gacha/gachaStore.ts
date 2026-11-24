@@ -37,7 +37,8 @@ function compareAscending(a: GachaRecord, b: GachaRecord): number {
 /** Persists gacha records per application to `%userData%/gacha/<appId>.json`. */
 export class GachaStore {
   private readonly cache = new Map<string, GachaRecord[]>()
-  private readonly saveTimers = new Map<string, NodeJS.Timeout>()
+  private readonly loading = new Map<string, Promise<GachaRecord[]>>()
+  private readonly pending = new Map<string, symbol>()
   /** App ids whose store file could not be read — writes are refused for them. */
   private readonly saveBlocked = new Set<string>()
 
@@ -46,18 +47,28 @@ export class GachaStore {
   }
 
   private file(appId: string): string {
+    if (!/^[a-z0-9_-]+$/i.test(appId)) throw new Error('无效的应用编号')
     return join(this.dir(), `${appId}.json`)
   }
 
   async load(appId: string): Promise<GachaRecord[]> {
     const cached = this.cache.get(appId)
     if (cached) return cached
+    let pending = this.loading.get(appId)
+    if (!pending) {
+      pending = this.read(appId).finally(() => this.loading.delete(appId))
+      this.loading.set(appId, pending)
+    }
+    return pending
+  }
+
+  private async read(appId: string): Promise<GachaRecord[]> {
     const { data, writable } = await openJsonStore<StoreShape>(
       this.file(appId),
       () => ({ version: CURRENT_VERSION, records: [] }),
       `gacha:${appId}`
     )
-    const records = Array.isArray(data.records) ? data.records : []
+    const records = Array.isArray(data?.records) ? data.records : []
     if (writable) this.saveBlocked.delete(appId)
     else this.saveBlocked.add(appId)
     this.cache.set(appId, records)
@@ -66,7 +77,9 @@ export class GachaStore {
 
   /** Add records, skipping duplicates. Returns the number of new records. */
   async add(appId: string, incoming: GachaRecord[]): Promise<number> {
-    const records = await this.load(appId)
+    await this.load(appId)
+    this.assertWritable(appId)
+    const records = this.cache.get(appId)!
     const seen = new Set(records.map((r) => r.id))
     let added = 0
     for (const record of incoming) {
@@ -75,18 +88,31 @@ export class GachaStore {
       records.push({ ...record, appId })
       added += 1
     }
-    if (added > 0) this.scheduleSave(appId)
+    if (added > 0) this.pending.set(appId, Symbol())
+    await this.save(appId)
     return added
   }
 
   async clear(appId: string): Promise<void> {
+    await this.load(appId)
+    this.assertWritable(appId)
     this.cache.set(appId, [])
-    this.scheduleSave(appId)
+    this.pending.set(appId, Symbol())
+    await this.save(appId)
   }
 
-  /** Drop the in-memory cache so records are re-read from disk. */
-  reload(): void {
+  async flush(): Promise<void> {
+    const results = await Promise.allSettled([...this.pending.keys()].map((appId) => this.save(appId)))
+    const failure = results.find((result) => result.status === 'rejected')
+    if (failure) throw failure.reason
+  }
+
+  /** Reload only after outstanding writes have either succeeded or reported failure. */
+  async reload(): Promise<void> {
+    await Promise.allSettled(this.loading.values())
+    await this.flush()
     this.cache.clear()
+    this.saveBlocked.clear()
   }
 
   /**
@@ -223,24 +249,24 @@ export class GachaStore {
     } catch {
       throw new Error('文件不是有效的 JSON')
     }
-    const obj = parsed as Record<string, unknown>
+    const obj = parsed as Record<string, unknown> | null
     const list =
-      (obj.list as unknown[]) ??
-      (obj.hk4e as unknown[]) ??
-      (obj.hkrpg as unknown[]) ??
-      (obj.nap as unknown[]) ??
-      (Array.isArray(parsed) ? (parsed as unknown[]) : [])
+      Array.isArray(parsed) ? parsed : (obj?.list ?? obj?.hk4e ?? obj?.hkrpg ?? obj?.nap)
+    if (!Array.isArray(list)) throw new Error('文件没有可识别的抽卡记录')
     const incoming: GachaRecord[] = []
     for (const item of list) {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) continue
       const r = item as Record<string, unknown>
       const id = String(r.id ?? r.recordId ?? '')
       if (!id) continue
+      const poolId = r.poolId ?? r.pool_id
       incoming.push({
         id,
         appId,
         game: (r.game as GachaRecord['game']) ?? 'genshin',
         uid: String(r.uid ?? ''),
         gachaType: String(r.gacha_type ?? r.gachaType ?? ''),
+        poolId: typeof poolId === 'string' ? poolId : undefined,
         bannerName: String(r.bannerName ?? ''),
         itemId: String(r.item_id ?? r.itemId ?? ''),
         itemName: String(r.name ?? r.itemName ?? ''),
@@ -252,19 +278,17 @@ export class GachaStore {
     return this.add(appId, incoming)
   }
 
-  private scheduleSave(appId: string): void {
-    if (this.saveTimers.has(appId)) return
-    const timer = setTimeout(() => {
-      this.saveTimers.delete(appId)
-      void this.save(appId)
-    }, 800)
-    this.saveTimers.set(appId, timer)
+  private assertWritable(appId: string): void {
+    if (this.saveBlocked.has(appId)) throw new Error('无法读取现有抽卡记录，已保留原文件')
   }
 
   private async save(appId: string): Promise<void> {
-    if (this.saveBlocked.has(appId)) return
-    const records = this.cache.get(appId) ?? []
+    const revision = this.pending.get(appId)
+    const records = this.cache.get(appId)
+    if (!revision || !records) return
+    this.assertWritable(appId)
     const data: StoreShape = { version: CURRENT_VERSION, records }
-    await writeFileAtomic(this.file(appId), JSON.stringify(data)).catch(() => undefined)
+    await writeFileAtomic(this.file(appId), JSON.stringify(data))
+    if (this.pending.get(appId) === revision) this.pending.delete(appId)
   }
 }

@@ -1,5 +1,6 @@
 const fs = require('node:fs')
 const path = require('node:path')
+const { prepareWindowsExecutable } = require('./windows-executable.js')
 
 /**
  * electron-builder afterPack hook.
@@ -33,6 +34,8 @@ module.exports = async function afterPack(context) {
   if (!fs.existsSync(versionedEntry)) {
     throw new Error(`afterPack: 缺少应用目录 app-${version}（检查 extraResources 配置）`)
   }
+  const archiveTool = path.join(resources, `app-${version}`, 'out', 'native', 'KevinArchive.exe')
+  if (!fs.existsSync(archiveTool)) throw new Error(`缺少本项目的 Windows 解压工具 ${archiveTool}`)
 
   // Release theme policy: the file only travels with **its own** version, so a
   // later build can never inherit (or re-apply) an older release's settings.
@@ -56,4 +59,9 @@ module.exports = async function afterPack(context) {
 
   fs.writeFileSync(path.join(resources, 'app-version.txt'), version, 'utf8')
   console.log(`afterPack: app-version.txt -> ${version}`)
+
+  if (context.electronPlatformName === 'win32') {
+    const exe = path.join(context.appOutDir, `${context.packager.appInfo.productFilename}.exe`)
+    prepareWindowsExecutable(exe, path.join(projectDir, 'resources', 'icon.ico'))
+  }
 }

@@ -39,7 +39,7 @@ import LinkedLaunchView from './components/LinkedLaunchView'
 import LaunchTransition from './components/LaunchTransition'
 import Toaster, { showToast } from './components/toast'
 import ThemeClickEffect from './components/ThemeClickEffect'
-import { sweepPageText } from './themeTextSweep'
+import { sweepAfterPageSlide } from './themeTextSweep'
 import { installInputSweep } from './inputSweep'
 import { burstMitiaMolecules, burstThemeTriangles } from './themeParticles'
 import { installNoNativeTooltips } from './noNativeTooltips'
@@ -59,7 +59,7 @@ import { applyGlass, applyTheme, installTextureScatter, scatterTextureOffsets } 
 import { applySpecialTheme } from './specialTheme'
 import { SpecialThemeProvider } from './theme/ThemeScope'
 import { extractVideoAccent } from './videoAccent'
-import { peekPreparedWallpaper, prepareWallpaperForDisplay } from './wallpaperPrepared'
+import { usePreparedWallpaper } from './usePreparedWallpaper'
 import { installWallpaperRegionUpdater, updateWallpaperRegions } from './wallpaperRegion'
 
 /** Local calendar date as `YYYY-MM-DD` (used to run daily update checks). */
@@ -99,6 +99,8 @@ export default function App(): ReactElement {
   const [bgDisplay, setBgDisplay] = useState<{
     src: string
     kind: 'image' | 'video'
+    width?: number
+    height?: number
     blur: number
     dim: number
   } | null>(null)
@@ -930,89 +932,16 @@ export default function App(): ReactElement {
     }
   }, [])
 
-  // Swap the background only once the incoming image has decoded, carrying the
-  // new game's blur / dim with it. The previous background (with its own blur)
-  // stays on screen until then, so switching games never flashes a sharp frame.
-  //
-  // The heavy decode + high-quality downscale runs in a worker and is cached per
-  // source + target size (`wallpaperPrepared.ts`): a very large wallpaper used
-  // to block the renderer when switching to that app, and every switch redid
-  // the same work. The original file is never assigned to the background
-  // `<img>`, so the renderer no longer decodes the full-size image at all.
-  //
-  // Even a prepared (cached) blob is decoded *before* it is committed: swapping
-  // the `<img>` to an undecoded image painted a black frame until the bitmap was
-  // ready, which looked like "black, then the wallpaper".
-  useEffect(() => {
-    if (!bg) {
-      setBgDisplay(null)
-      return
+  const prepared = usePreparedWallpaper(isVideo ? null : bg, winSize.w + 128, winSize.h + 128, winSize.dpr)
+  useLayoutEffect(() => {
+    if (!bg) { setBgDisplay(null); return }
+    const tuning = { blur: current?.backgroundBlur ?? 0, dim: current?.backgroundDim ?? 0 }
+    if (isVideo) setBgDisplay({ src: bg, kind: 'video', ...tuning })
+    else if (prepared?.source === bg) {
+      const { url: src, width, height } = prepared.image
+      setBgDisplay({ src, width, height, kind: 'image', ...tuning })
     }
-    perf('wp-effect', bg.slice(-24))
-    const blur = current?.backgroundBlur ?? 0
-    const dim = current ? current.backgroundDim : 0
-    const commit = (src: string): void => {
-      perf('wp-commit', src.slice(-24))
-      setBgDisplay({ src, kind: isVideo ? 'video' : 'image', blur, dim })
-    }
-    let cancelled = false
-    const cleanup = (): void => {
-      cancelled = true
-    }
-    if (isVideo) {
-      commit(bg)
-      return cleanup
-    }
-    const cssWidth = winSize.w + 128
-    const cssHeight = winSize.h + 128
-    // A cached wallpaper commits without any re-encode. The background <img> is
-    // not remounted on src changes, so it keeps the previous frame on screen
-    // until the new bitmap is ready (no black flash, no decode probe wait).
-    const peek = peekPreparedWallpaper(bg, cssWidth, cssHeight, winSize.dpr)
-    perf(peek.hit ? 'wp-peek-hit' : 'wp-peek-miss', peek.value ? 'prepared' : 'raw')
-    if (peek.hit) {
-      commit(peek.value ? peek.value.url : bg)
-      return cleanup
-    }
-    void prepareWallpaperForDisplay(bg, cssWidth, cssHeight, winSize.dpr).then((prepared) => {
-      if (cancelled) return
-      commit(prepared ? prepared.url : bg)
-    })
-    return cleanup
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bg, isVideo, current?.id, winSize.w, winSize.h, winSize.dpr])
-
-  // Warm the prepared-wallpaper cache for every app in the background, so the
-  // first switch to an app that has not been shown yet is instant as well. All
-  // decoding happens in the worker; this only fills the memory/IndexedDB cache.
-  useEffect(() => {
-    const cssWidth = winSize.w + 128
-    const cssHeight = winSize.h + 128
-    const targets: string[] = []
-    for (const app of apps) {
-      const wallpaper = currentWallpaper(app)
-      if (!wallpaper || isVideoFile(wallpaper.file)) continue
-      const url = backgroundUrl(wallpaper.file)
-      if (url) targets.push(url)
-    }
-    if (targets.length === 0) return
-    let cancelled = false
-    const run = async (): Promise<void> => {
-      for (const url of targets) {
-        if (cancelled) return
-        // Yield between wallpapers so the UI keeps its frames.
-        await new Promise((resolve) => setTimeout(resolve, 120))
-        if (cancelled) return
-        await prepareWallpaperForDisplay(url, cssWidth, cssHeight, winSize.dpr)
-      }
-    }
-    const timer = window.setTimeout(() => void run(), 1500)
-    return () => {
-      cancelled = true
-      window.clearTimeout(timer)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [apps, winSize.w, winSize.h, winSize.dpr])
+  }, [bg, prepared, isVideo, current?.backgroundBlur, current?.backgroundDim])
 
   // Wallpaper rotation triggers: on app switch, once on launcher start (first
   // time an app is shown) and on an interval. `appLaunch` is handled in
@@ -1092,39 +1021,18 @@ export default function App(): ReactElement {
   // geometry so every `.wallpaper-region` popup can paint the exact region under
   // it, then keep those offsets in sync. The display-resolution copy (not the
   // original file) is used so popups match the background pixel for pixel.
-  const [wpImage, setWpImage] = useState<{ src: string; w: number; h: number } | null>(null)
   const displaySrc = bgDisplay?.kind === 'image' ? bgDisplay.src : null
-  useEffect(() => {
-    if (!displaySrc) {
-      setWpImage(null)
-      return undefined
-    }
-    let cancelled = false
-    const image = new Image()
-    image.crossOrigin = 'anonymous'
-    image.onload = () => {
-      if (!cancelled) {
-        setWpImage({ src: displaySrc, w: image.naturalWidth, h: image.naturalHeight })
-      }
-    }
-    image.onerror = () => {
-      if (!cancelled) setWpImage(null)
-    }
-    image.src = displaySrc
-    return () => {
-      cancelled = true
-    }
-  }, [displaySrc])
-
-  useEffect(() => {
+  const imageWidth = bgDisplay?.width
+  const imageHeight = bgDisplay?.height
+  useLayoutEffect(() => {
     const root = document.documentElement
-    if (wpImage) {
+    if (displaySrc && imageWidth && imageHeight) {
       const vw = winSize.w + 128
       const vh = winSize.h + 128
-      const scale = Math.max(vw / wpImage.w, vh / wpImage.h)
-      const dw = wpImage.w * scale
-      const dh = wpImage.h * scale
-      root.style.setProperty('--wallpaper-image', `url("${wpImage.src}")`)
+      const scale = Math.max(vw / imageWidth, vh / imageHeight)
+      const dw = imageWidth * scale
+      const dh = imageHeight * scale
+      root.style.setProperty('--wallpaper-image', `url("${displaySrc}")`)
       root.style.setProperty('--wallpaper-display-w', `${dw}px`)
       root.style.setProperty('--wallpaper-display-h', `${dh}px`)
       root.style.setProperty('--wallpaper-cx', `${(vw - dw) / 2}px`)
@@ -1135,7 +1043,7 @@ export default function App(): ReactElement {
       root.dataset.wallpaperRegion = 'video'
     }
     updateWallpaperRegions()
-  }, [wpImage, winSize])
+  }, [displaySrc, imageWidth, imageHeight, winSize])
 
   useEffect(() => installWallpaperRegionUpdater(), [])
 
@@ -1216,12 +1124,12 @@ export default function App(): ReactElement {
     }
   }, [view, currentId])
 
-  // Retrigger the transition on view / app change. The background lives inside
-  // this animated element so backdrop-filter keeps blurring during the animation.
-  useEffect(() => {
+  // Navigation and app changes share a single transition lifecycle.
+  useLayoutEffect(() => {
     const el = animRef.current
     if (!el) return
-    const order: ViewId[] = [      'home',
+    const order: ViewId[] = [
+      'home',
       'playtime',
       'gacha',
       'gallery',
@@ -1236,21 +1144,7 @@ export default function App(): ReactElement {
     el.classList.remove('app-anim-run')
     void el.offsetWidth
     el.classList.add('app-anim-run')
-  }, [view, currentId])
-
-  // 霆骇列律: after the page slide settles, sweep every text line on the new
-  // page. Measuring after the 0.4s translate avoids drawing the overlays at the
-  // old (mid-animation) coordinates.
-  useEffect(() => {
-    if (document.documentElement.dataset.specialTransition !== 'starsnow') return undefined
-    // Remove the previous page's overlays immediately: waiting for the new sweep
-    // (440ms) would leave full-width rectangles floating over the new layout.
-    document.querySelectorAll('.theme-text-sweep').forEach((el) => el.remove())
-    // A focused field may unmount without firing blur; its underline must not
-    // survive over the next page.
-    document.querySelectorAll('.theme-input-sweep').forEach((el) => el.remove())
-    const timer = window.setTimeout(() => sweepPageText(), 440)
-    return () => window.clearTimeout(timer)
+    return sweepAfterPageSlide(el)
   }, [view, currentId])
 
   // Diagnostics: mark when a render commits and when its first frame is painted

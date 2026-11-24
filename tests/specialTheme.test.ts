@@ -8,12 +8,22 @@ import {
   policyTargetsVersion,
   resolveAreaTheme,
   themedAreaCount,
+  uniformTheme,
   withAllThemes,
   withAreaTheme
 } from '../src/shared/specialTheme'
 import { DEFAULT_GLASS_APPEARANCE, MATERIAL_DEFAULTS } from '../src/shared/types'
 
 describe('specialTheme', () => {
+  it('derives the bulk selection from every effective area', () => {
+    expect(uniformTheme({})).toBe('default')
+    for (const id of ['starsnow', 'mitia'] as const) {
+      const all = withAllThemes({}, id)
+      expect(uniformTheme(all)).toBe(id)
+      expect(uniformTheme(withAreaTheme(all, 'sidebar', 'default'))).toBe('default')
+    }
+  })
+
   it('falls back to default for missing or unknown values', () => {
     expect(resolveAreaTheme(undefined, 'sidebar')).toBe('default')
     expect(resolveAreaTheme({ sidebar: 'nope' }, 'sidebar')).toBe('default')

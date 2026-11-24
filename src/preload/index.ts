@@ -1,5 +1,4 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import { electronAPI } from '@electron-toolkit/preload'
 import type {
   KevinApi,
   NewAppEntry,
@@ -243,12 +242,4 @@ const api: KevinApi = {
   }
 }
 
-if (process.contextIsolated) {
-  contextBridge.exposeInMainWorld('electron', electronAPI)
-  contextBridge.exposeInMainWorld('api', api)
-} else {
-  // @ts-ignore fallback when context isolation is disabled
-  window.electron = electronAPI
-  // @ts-ignore
-  window.api = api
-}
+contextBridge.exposeInMainWorld('api', api)

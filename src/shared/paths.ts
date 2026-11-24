@@ -2,6 +2,8 @@
  * Path helpers shared by the main and renderer processes.
  */
 
+export const GAME_FILE_CATALOG_NAME = 'hoyo-file-index.sqlite'
+
 /** Normalises a directory for comparison (separators + trailing slash + case). */
 function normalize(dir: string): string {
   return dir.trim().replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase()

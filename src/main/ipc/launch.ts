@@ -1,4 +1,4 @@
-import { ipcMain } from 'electron'
+import { handleIpc } from './access'
 import { basename } from 'path'
 import { defaultLaunchMethod, launchMethodById } from '@shared/appEntry'
 import { AppStore } from '../services/appStore'
@@ -9,7 +9,7 @@ import { playTime, runtime } from './context'
 export const linkedRunKey = (id: string): string => `linked:${id}`
 
 export function registerLaunchIpc(): void {
-  ipcMain.handle('apps:launch', async (_e, id: string, methodId?: string) => {
+  handleIpc('apps:launch', async (_e, id: string, methodId?: string) => {
     const store = await AppStore.load()
     const entry = store.apps.find((a) => a.id === id)
     if (!entry) throw new Error('应用不存在')
@@ -45,7 +45,7 @@ export function registerLaunchIpc(): void {
 
   // Linked launch: one file that starts several apps. Tracked as its own task
   // (key `linked:<id>`); it never touches an app's launch state.
-  ipcMain.handle('linked:launch', async (_e, id: string) => {
+  handleIpc('linked:launch', async (_e, id: string) => {
     const list = await AppStore.linkedLaunches()
     const entry = list.find((item) => item.id === id)
     if (!entry) throw new Error('关联启动不存在')
@@ -79,14 +79,14 @@ export function registerLaunchIpc(): void {
     return result
   })
 
-  ipcMain.handle('runtime:list', () => runtime.list())
-  ipcMain.handle('runtime:stop', (_e, appId: string) => runtime.stop(appId))
+  handleIpc('runtime:list', () => runtime.list())
+  handleIpc('runtime:stop', (_e, appId: string) => runtime.stop(appId))
 
-  ipcMain.handle('playtime:totals', async () => {
+  handleIpc('playtime:totals', async () => {
     await playTime.load()
     return playTime.totalsMap()
   })
-  ipcMain.handle('playtime:summary', async (_e, appId: string, days?: number) => {
+  handleIpc('playtime:summary', async (_e, appId: string, days?: number) => {
     await playTime.load()
     return playTime.summary(appId, days)
   })

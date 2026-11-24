@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { createServer, type Server } from 'node:http'
 import { createHash } from 'node:crypto'
 import { promises as fs } from 'node:fs'
@@ -11,6 +11,7 @@ import {
   type SophonBuild,
   type SophonChunk
 } from '../src/main/update/sophon'
+import { hoyoPortBudget } from '../src/main/update/hoyoNetwork'
 
 // `zlib.zstdCompressSync` only exists on Node 22.15+/24; the fixtures need it, so
 // the suite is skipped (rather than failing) on older runtimes.
@@ -89,6 +90,7 @@ let manifestZstd = Buffer.alloc(0)
 let chunkBodies = new Map<string, Buffer>()
 let chunkReqs = new Map<string, number>()
 let corruptOnce = new Set<string>()
+let drip = new Set<string>()
 let inFlight = 0
 let maxInFlight = 0
 
@@ -116,7 +118,11 @@ beforeAll(async () => {
         res.end(zstd(Buffer.from('corrupt')))
         return
       }
-      res.end(zstd(body))
+      const encoded = zstd(body)
+      if (drip.has(name)) {
+        res.write(encoded.subarray(0, 5))
+        setTimeout(() => res.end(encoded.subarray(5)), 100)
+      } else res.end(encoded)
     }, 10)
   })
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
@@ -129,9 +135,12 @@ afterAll(async () => {
 })
 
 beforeEach(() => {
+  // The CDN negotiation itself is exercised in hoyoNetwork.test.ts.
+  Atomics.store(new BigUint64Array(hoyoPortBudget), 0, (BigInt(Date.now() + 60_000) << 4n) + 10n)
   chunkBodies = new Map()
   chunkReqs = new Map()
   corruptOnce = new Set()
+  drip = new Set()
   inFlight = 0
   maxInFlight = 0
 })
@@ -158,21 +167,65 @@ function makeBuild(): SophonBuild {
   }
 }
 
-const tmpDir = (): Promise<string> => fs.mkdtemp(join(tmpdir(), 'sophon-test-'))
+const temporaryDirs = new Set<string>()
+
+afterEach(async () => {
+  await Promise.all([...temporaryDirs].map(dir => fs.rm(dir, { recursive: true, force: true })))
+  temporaryDirs.clear()
+})
+
+async function tmpDir(): Promise<string> {
+  const dir = await fs.mkdtemp(join(tmpdir(), 'sophon-test-'))
+  temporaryDirs.add(dir)
+  return dir
+}
 const read = (p: string): Promise<Buffer> => fs.readFile(p)
 
 describe.skipIf(!hasZstd)('downloadSophonBuild', () => {
-  it('downloads chunks concurrently and assembles the asset', async () => {
-    const names = Array.from({ length: 40 }, (_, i) => `ch${String(i).padStart(3, '0')}`)
-    const asset = makeAsset('big.bin', names)
+  it('downloads different files in parallel and handles each file in chunk order', async () => {
+    const one = makeAsset('a.bin', ['a1', 'a2', 'a3'])
+    const two = makeAsset('b.bin', ['b1', 'b2', 'b3'])
+    manifestZstd = zstd(encodeManifest([one, two]))
+    const dir = await tmpDir()
+    await downloadSophonBuild(makeBuild(), dir, () => {})
+    expect(md5(await read(join(dir, 'a.bin')))).toBe(one.md5)
+    expect(md5(await read(join(dir, 'b.bin')))).toBe(two.md5)
+    expect(maxInFlight).toBe(2)
+    const calls = [...chunkReqs.keys()]
+    expect(calls.filter(id => id.startsWith('a'))).toEqual(['a1', 'a2', 'a3'])
+    expect(calls.filter(id => id.startsWith('b'))).toEqual(['b1', 'b2', 'b3'])
+  })
+
+  it.each([false, true])('reports received bytes before a chunk completes, cacheOnly=%s', async cacheOnly => {
+    const asset = makeAsset('progress.bin', ['slow'])
     manifestZstd = zstd(encodeManifest([asset]))
+    drip.add('slow')
     const dest = await tmpDir()
+    const seen: number[] = []
+    await downloadSophonBuild(makeBuild(), dest, p => seen.push(p.downloaded), undefined,
+      { cacheDir: join(dest, 'chunk'), cacheOnly })
+    expect(seen).toContain(5)
+    expect(seen.at(-1)).toBe(asset.chunks[0].size)
+  })
 
-    await downloadSophonBuild(makeBuild(), dest, () => {})
-
-    expect(md5(await read(join(dest, 'big.bin')))).toBe(asset.md5)
-    // Many chunks were in flight at the same time => concurrent (multi-threaded) batches.
-    expect(maxInFlight).toBeGreaterThan(1)
+  it('credits bytes copied from an older file while assembling a changed file', async () => {
+    const dest = await tmpDir()
+    const asset = makeAsset('new', ['keep', 'next'])
+    asset.chunks[0].uncompressedMd5 = md5(chunkBody('keep'))
+    await fs.writeFile(join(dest, 'old'), chunkBody('keep'))
+    const build = makeBuild()
+    const seen: [number, number][] = []
+    await downloadSophonBuild(build, dest, p => seen.push([p.downloaded, p.total]), undefined, {
+      originDir: dest, prepared: {
+        files: [{ category: build.categories[0], asset }],
+        oldChunks: new Map([['keep', { file: 'old', offset: 0 }]]), oldFiles: new Map()
+      }
+    })
+    const bytes = asset.chunks[1].size
+    expect(seen[0]).toEqual([0, bytes])
+    expect(seen.at(-1)).toEqual([bytes * 2, bytes * 2])
+    expect([...chunkReqs.keys()]).toEqual(['next'])
+    expect(await fs.readFile(join(dest, 'new'))).toEqual(expectedContent(['keep', 'next']))
   })
 
   it('reports monotonically increasing progress up to the total', async () => {
@@ -183,7 +236,7 @@ describe.skipIf(!hasZstd)('downloadSophonBuild', () => {
 
     await downloadSophonBuild(makeBuild(), dest, (p) => seen.push(p.downloaded))
 
-    expect(seen.at(-1)).toBe(asset.size)
+    expect(seen.at(-1)).toBe(asset.chunks.reduce((sum, chunk) => sum + chunk.size, 0))
     for (let i = 1; i < seen.length; i++) expect(seen[i]).toBeGreaterThanOrEqual(seen[i - 1])
   })
 
@@ -210,7 +263,7 @@ describe.skipIf(!hasZstd)('downloadSophonBuild', () => {
 
     await expect(downloadSophonBuild(makeBuild(), dest, () => {})).rejects.toThrow(/校验失败/)
     expect(chunkReqs.get('b1')).toBe(3)
-  })
+  }, 12_000)
 
   it('skips unchanged files (resume)', async () => {
     const asset = makeAsset('keep.bin', ['k1', 'k2'])

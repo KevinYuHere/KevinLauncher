@@ -1,6 +1,6 @@
 # Builds and publishes a release:
 #   1. electron-vite build
-#   2. electron-builder --dir  (then rcedit applies the exe icon locally)
+#   2. electron-builder --dir  (afterPack sets the icon and app manifest)
 #   3. electron-builder --prepackaged   -> self-drawn installer (portable target)
 #   4. node scripts/build-update-payload.mjs -> KevinLauncher-<v>-app.zip + manifest
 #   5. gh release create/upload (installer, app payload, manifest)
@@ -69,26 +69,25 @@ function Find-Gh {
 }
 
 # ---------------------------------------------------------------- 1. build
+npm.cmd run typecheck
+if ($LASTEXITCODE -ne 0) { throw 'Typecheck failed' }
+npm.cmd test
+if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
+
 npm.cmd run build
 if ($LASTEXITCODE -ne 0) { throw 'electron-vite build failed' }
 
-# ------------------------------------------------- 2. unpacked + exe icon
+# ------------------------------------------- 2. unpacked + app resources
 $env:CSC_IDENTITY_AUTO_DISCOVERY = 'false'
 npx.cmd electron-builder --win --dir
 if ($LASTEXITCODE -ne 0) { throw 'electron-builder --dir failed' }
 
-$exe = Join-Path $root 'release\win-unpacked\KevinLauncher.exe'
-$rcedit = Get-ChildItem "$env:LOCALAPPDATA\electron-builder\Cache\winCodeSign" -Recurse -Filter rcedit-x64.exe -ErrorAction SilentlyContinue |
-  Select-Object -First 1
-if ($rcedit) {
-  & $rcedit.FullName $exe --set-icon (Join-Path $root 'resources\icon.ico')
-} else {
-  Write-Host '!! rcedit not cached: exe icon not applied' -ForegroundColor Yellow
-}
-
 # ------------------------------- 3. installer (self-drawn, portable target)
 npx.cmd electron-builder --win --prepackaged (Join-Path $root 'release\win-unpacked') --publish never
 if ($LASTEXITCODE -ne 0) { throw 'electron-builder failed' }
+
+node scripts/windows-executable.js (Join-Path $root 'release\win-unpacked\KevinLauncher.exe') (Join-Path $root "release\KevinLauncher-Installer-$Version.exe")
+if ($LASTEXITCODE -ne 0) { throw 'Installer or app elevation manifest is invalid' }
 
 # --------------------------------------- 4. update payload assets
 # The release notes come from CHANGELOG.md (newest version first). Publishing is

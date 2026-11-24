@@ -1,109 +1,140 @@
+import { setTimeout as wait } from 'node:timers/promises'
 import type { GachaRecord } from '@shared/types'
-import { MIHOYO, MIHOYO_QUERY_TYPES } from './metadata'
-
-type MiHoYoGame = 'genshin' | 'starrail' | 'zzz'
+import { MIHOYO, type GachaTypeDef, type MiHoYoGame } from './metadata'
+import { parseMiHoYoLink } from './mihoyoLink'
 
 const PAGE_SIZE = 20
-const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+const PAGE_DELAY = 250
+const REQUEST_TIMEOUT = 20_000
 
-/**
- * Turn a captured gacha-page URL into the `getGachaLog` request prefix.
- *
- * Ported from Starward (Scighost/Starward, MIT). The games cache a
- * `https://webstatic.mihoyo.com/...e20190909gacha...` URL that carries the
- * whole auth query (`authkey`, `authkey_ver`, `sign_type`, `region`, `lang`,
- * `game_biz`, …). We keep that query string verbatim and only swap the path for
- * the API endpoint — that is what makes the request actually succeed.
- */
-export function toApiPrefix(game: MiHoYoGame, url: string): string {
-  const meta = MIHOYO[game]
-  const value = url.trim()
-
-  // Already an API URL — strip any paging params that may be present.
-  if (value.includes('public-operation-')) {
-    return value
-      .replace(/[?&](real_)?gacha_type=\d+/g, '')
-      .replace(/[?&]page=\d+/g, '')
-      .replace(/[?&]size=\d+/g, '')
-      .replace(/[?&]end_id=\d+/g, '')
-  }
-
-  const q = value.indexOf('?')
-  if (q < 0) throw new Error('链接缺少参数（需包含 authkey 等）')
-  const query = value.slice(q).replace(/#\/log.*$/, '')
-  if (!query.includes('authkey=')) throw new Error('链接中缺少 authkey')
-  return meta.apiHost + query
+export function toApiPrefix(game: MiHoYoGame, input: string): string {
+  const { endpoint, query } = parseMiHoYoLink(game, input)
+  return `${endpoint}?${query}`
 }
 
-interface MiHoYoItem {
-  uid: string
-  gacha_type: string
-  item_id: string
-  name: string
-  rank_type: string
+interface ParsedDraw {
   id: string
+  uid: string
+  item: string
+  name: string
+  rank: number
   time: string
 }
 
-/**
- * Fetch every banner's records via `getGachaLog` (paged 20 at a time), exactly
- * like Starward: `{prefix}&gacha_type=<t>&page=<n>&size=20&end_id=<id>`
- * (ZZZ uses `real_gacha_type`).
- */
+function decimal(value: unknown): string | null {
+  if (typeof value === 'string' && /^\d+$/.test(value)) return value
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return String(value)
+  return null
+}
+
+function readDraw(input: unknown): ParsedDraw {
+  if (!input || typeof input !== 'object') throw new Error('抽卡接口返回了无效记录')
+  const row = input as Record<string, unknown>
+  const id = decimal(row.id)
+  const uid = decimal(row.uid)
+  const item = decimal(row.item_id)
+  const rank = decimal(row.rank_type)
+  if (!id || !uid || !item || !rank || !Number.isSafeInteger(Number(rank)) ||
+      typeof row.name !== 'string' || typeof row.time !== 'string' || !row.time.trim()) {
+    throw new Error('抽卡接口返回了无效记录')
+  }
+  return { id, uid, item, rank: Number(rank), name: row.name, time: row.time }
+}
+
+async function requestPage(url: string): Promise<ParsedDraw[]> {
+  let response: Response
+  try {
+    response = await fetch(url, {
+      redirect: 'error',
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT),
+      headers: { 'User-Agent': 'KevinLauncher', Accept: 'application/json' }
+    })
+  } catch {
+    throw new Error('无法连接抽卡接口，请稍后重试')
+  }
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => undefined)
+    throw new Error(`抽卡接口暂不可用（HTTP ${response.status}）`)
+  }
+  let envelope: { retcode?: unknown; data?: { list?: unknown } } | null
+  try {
+    envelope = await response.json()
+  } catch {
+    throw new Error('抽卡接口返回了无法读取的数据')
+  }
+  if (!envelope || typeof envelope.retcode !== 'number') throw new Error('抽卡接口返回了无效数据')
+  if (envelope.retcode === -110) throw new Error('抽卡接口请求过快，请稍后重试')
+  if (envelope.retcode !== 0) {
+    throw new Error(`抽卡接口拒绝请求（${envelope.retcode}），请在游戏内重新打开记录后获取链接`)
+  }
+  const list = envelope.data?.list
+  if (!Array.isArray(list) || list.length > PAGE_SIZE) throw new Error('抽卡接口返回了无效分页数据')
+  return list.map(readDraw)
+}
+
+interface PageProgress {
+  bannerName: string
+  page: number
+}
+
+/** Keep cursor IDs as decimal strings all the way through the API and store. */
+async function* bannerDraws(
+  prefix: string,
+  queryName: string,
+  banner: GachaTypeDef,
+  progress: ((info: PageProgress) => void) | undefined
+): AsyncGenerator<ParsedDraw> {
+  let cursor = '0'
+  for (let page = 1; ; page++) {
+    progress?.({ bannerName: banner.name, page })
+    const pagination = new URLSearchParams({
+      [queryName]: banner.type,
+      page: String(page),
+      size: String(PAGE_SIZE),
+      end_id: cursor
+    })
+    const records = await requestPage(`${prefix}&${pagination}`)
+    const next = records.at(-1)?.id
+    if (page > 1 && next && BigInt(next) >= BigInt(cursor)) {
+      throw new Error('抽卡接口分页未向前推进，请重新打开游戏内的记录后重试')
+    }
+    yield* records
+    if (records.length < PAGE_SIZE) return
+    cursor = next!
+    if (cursor === '0') throw new Error('抽卡接口返回了无效分页游标')
+    await wait(PAGE_DELAY)
+  }
+}
+
 export async function fetchMiHoYoGacha(
   game: MiHoYoGame,
   url: string,
   appId: string,
-  onProgress?: (info: { bannerName: string; page: number }) => void
+  onProgress?: (info: PageProgress) => void
 ): Promise<GachaRecord[]> {
-  const meta = MIHOYO[game]
   const prefix = toApiPrefix(game, url)
-  const types = MIHOYO_QUERY_TYPES[game]
-  const out: GachaRecord[] = []
+  const config = MIHOYO[game]
+  const queryName = config.realGachaType ? 'real_gacha_type' : 'gacha_type'
+  const unique = new Map<string, GachaRecord>()
+  let uid: string | undefined
 
-  for (const type of types) {
-    const banner = meta.gachaTypes.find((t) => t.type === type)
-    const bannerName = banner?.name ?? type
-    let endId = '0'
-    let page = 1
-    for (;;) {
-      onProgress?.({ bannerName, page })
-      const param = meta.realGachaType
-        ? `real_gacha_type=${type}&page=${page}&size=${PAGE_SIZE}&end_id=${endId}`
-        : `gacha_type=${type}&page=${page}&size=${PAGE_SIZE}&end_id=${endId}`
-      const res = await fetch(`${prefix}&${param}`, { headers: { 'User-Agent': 'Mozilla/5.0' } })
-      const json = (await res.json()) as {
-        retcode: number
-        message: string
-        data?: { list?: MiHoYoItem[] }
-      }
-      if (json.retcode !== 0) {
-        throw new Error(
-          json.message ||
-            `接口返回错误码 ${json.retcode}（authkey 可能已过期，请在游戏内重新打开抽卡记录）`
-        )
-      }
-      const list = json.data?.list ?? []
-      if (list.length === 0) break
-      for (const item of list) {
-        out.push({
-          id: `${game}:${item.uid}:${item.id}`,
-          appId,
-          game,
-          uid: item.uid,
-          gachaType: type,
-          bannerName,
-          itemId: item.item_id,
-          itemName: item.name,
-          rankType: Number(item.rank_type),
-          time: item.time
-        })
-      }
-      if (list.length < PAGE_SIZE) break
-      endId = list[list.length - 1].id
-      page++
-      await delay(250)
+  for (const banner of config.gachaTypes) {
+    if (banner.displayOnly) continue
+    for await (const draw of bannerDraws(prefix, queryName, banner, onProgress)) {
+      uid ??= draw.uid
+      if (draw.uid !== uid) throw new Error('抽卡接口在同一次查询中返回了不同账号')
+      const id = `${game}:${uid}:${draw.id}`
+      if (unique.has(id)) continue
+      unique.set(id, {
+        id, appId, game, uid,
+        gachaType: banner.type,
+        bannerName: banner.name,
+        itemId: draw.item,
+        itemName: draw.name,
+        rankType: draw.rank,
+        time: draw.time
+      })
     }
   }
-  return out
+  return [...unique.values()]
 }

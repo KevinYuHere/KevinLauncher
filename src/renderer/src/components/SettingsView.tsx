@@ -36,7 +36,7 @@ import Segmented from './Segmented'
 import Select from './Select'
 import Switch from './Switch'
 
-import { SPECIAL_AREAS, SPECIAL_AREA_GROUPS, SPECIAL_THEMES, specialThemeLabel, themedAreaCount, withAllThemes, withAreaTheme } from '@shared/specialTheme'
+import { SPECIAL_AREAS, SPECIAL_AREA_GROUPS, SPECIAL_THEMES, specialThemeLabel, themedAreaCount, uniformTheme, withAllThemes, withAreaTheme } from '@shared/specialTheme'
 
 /** Project repository (shown in the "About" section). */
 const REPO_URL = 'https://github.com/KevinYuHere/KevinLauncher'
@@ -267,9 +267,10 @@ export default function SettingsView({
   const [glassOpen, setGlassOpen] = useState(false)
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [themeOpen, setThemeOpen] = useState(false)
-  // Bulk-apply starts on 默认, never on a special theme: the dropdown must not
-  // suggest (or apply) 霆骇列律 unless the user picks it.
-  const [bulkTheme, setBulkTheme] = useState<SpecialThemeId>('default')
+  const appliedTheme = uniformTheme(launcher.themeAreas)
+  const [draftTheme, setBulkTheme] = useState<SpecialThemeId | null>(null)
+  const bulkTheme = draftTheme ?? appliedTheme
+  useEffect(() => setBulkTheme(null), [appliedTheme])
   const autoTheme = entry.autoTheme ?? true
   const currentIcon = iconUrl(entry.iconFile)
   const wallpaper = currentWallpaper(entry)
@@ -798,21 +799,18 @@ export default function SettingsView({
                       />
                       <button
                         className="btn sm"
-                        onClick={() =>
-                          onSetBehavior({
-                            themeAreas: withAllThemes(launcher.themeAreas, bulkTheme)
-                          })
-                        }
+                        onClick={() => {
+                          onSetBehavior({ themeAreas: withAllThemes(launcher.themeAreas, bulkTheme) })
+                        }}
                       >
                         应用到全部
                       </button>
                       <button
                         className="btn sm ghost"
-                        onClick={() =>
-                          onSetBehavior({
-                            themeAreas: withAllThemes({}, 'default')
-                          })
-                        }
+                        onClick={() => {
+                          onSetBehavior({ themeAreas: withAllThemes({}, 'default') })
+                          setBulkTheme(null)
+                        }}
                       >
                         恢复默认
                       </button>

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { MAX_WALLPAPER_EDGE, wallpaperCoverCrop } from '../src/renderer/src/wallpaperDisplay'
+import { imageHeaderSize } from '../src/renderer/src/wallpaperHeader'
 
 describe('wallpaperCoverCrop', () => {
   it('cuts out the part `cover` shows and matches the device pixels exactly', () => {
@@ -50,5 +51,28 @@ describe('wallpaperCoverCrop', () => {
     expect(wallpaperCoverCrop(0, 4320, 1308, 890, 1.5)).toBeNull()
     expect(wallpaperCoverCrop(7680, 4320, 0, 890, 1.5)).toBeNull()
     expect(wallpaperCoverCrop(7680, 4320, 1308, 890, 0)).toBeNull()
+  })
+
+  it('prepares wide panoramas even when their short edge needs upscaling', () => {
+    expect(wallpaperCoverCrop(16000, 480, 1000, 800, 1)).toMatchObject({
+      sw: 600, sh: 480, width: 1000, height: 800
+    })
+  })
+})
+
+describe('imageHeaderSize', () => {
+  const bytes = (hex: string) => Buffer.from(hex, 'hex')
+
+  it('reads dimensions from bounded PNG and JPEG headers', () => {
+    expect(imageHeaderSize(bytes('89504e470d0a1a0a0000000d4948445200003c00000021c0')))
+      .toEqual({ width: 15360, height: 8640 })
+    expect(imageHeaderSize(bytes('ffd8ffc2000b0821c03c0001011100')))
+      .toEqual({ width: 15360, height: 8640 })
+  })
+
+  it('defers EXIF orientation, incomplete headers and invalid dimensions to the worker decoder', () => {
+    for (const hex of ['ffd8ffe10008', 'ffd8ffc2', 'ffd8ffc200020800000000', '89504e470d0a1a0a0000000d494844520000000000000100']) {
+      expect(imageHeaderSize(bytes(hex))).toBeNull()
+    }
   })
 })

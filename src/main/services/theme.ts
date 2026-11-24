@@ -1,13 +1,26 @@
 import { nativeImage } from 'electron'
 import { accentFromRgba } from '@shared/accent'
 
-/**
- * Extract a vivid accent colour from an image file, suitable as a theme colour.
- * Uses Electron's nativeImage so no extra dependencies are needed.
- */
-export function extractAccent(filePath: string): string | null {
+// Imported wallpaper filenames are immutable. Share an in-flight thumbnail and
+// its tiny colour result across rotations; failures remain retryable.
+const colors = new Map<string, Promise<string | null>>()
+
+/** Extract a theme colour from an asynchronous Windows thumbnail. */
+export function extractAccent(filePath: string): Promise<string | null> {
+  const cached = colors.get(filePath)
+  if (cached) return cached
+  const result = thumbnailAccent(filePath)
+  colors.set(filePath, result)
+  if (colors.size > 256) colors.delete(colors.keys().next().value!)
+  void result.then(color => {
+    if (!color && colors.get(filePath) === result) colors.delete(filePath)
+  })
+  return result
+}
+
+async function thumbnailAccent(filePath: string): Promise<string | null> {
   try {
-    const image = nativeImage.createFromPath(filePath)
+    const image = await nativeImage.createThumbnailFromPath(filePath, { width: 64, height: 64 })
     if (image.isEmpty()) return null
     const small = image.resize({ width: 64, height: 64, quality: 'good' })
     const bitmap = small.toBitmap() // BGRA

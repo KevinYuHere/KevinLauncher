@@ -179,6 +179,12 @@ export function resolveAreaTheme(
   return isSpecialThemeId(id) ? id : 'default'
 }
 
+/** Applied value shown by the bulk picker when all areas agree. */
+export function uniformTheme(assignments: ThemeAssignments | undefined): SpecialThemeId {
+  const first = resolveAreaTheme(assignments, SPECIAL_AREAS[0].id)
+  return SPECIAL_AREAS.every(area => resolveAreaTheme(assignments, area.id) === first) ? first : 'default'
+}
+
 /** Set one area (removes the entry when switching back to `default`). */
 export function withAreaTheme(
   assignments: ThemeAssignments | undefined,

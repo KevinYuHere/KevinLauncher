@@ -3,8 +3,9 @@
 // The original image can be 8K/16K (tens of MB decoded). We cut out the part
 // that `object-fit: cover` actually shows and rasterise it to the exact
 // device-pixel size of the display, so the renderer paints it 1:1 (no wasted
-// resolution, no per-frame resampling). The renderer reads the file into an
-// ArrayBuffer and transfers it here; the resulting WebP blob is sent back.
+// resolution, no per-frame resampling). The worker reads the source directly
+// and returns a display-sized blob to the renderer.
+import { imageHeaderSize } from './wallpaperHeader'
 import { MAX_WALLPAPER_EDGE, wallpaperCoverCrop } from './wallpaperDisplay'
 
 interface WorkerScope {
@@ -16,47 +17,10 @@ const scope = self as unknown as WorkerScope
 
 interface Task {
   key: string
-  buffer: ArrayBuffer
-  type: string
+  url: string
   cssWidth: number
   cssHeight: number
   dpr: number
-}
-
-interface Dimensions {
-  width: number
-  height: number
-}
-
-/**
- * Read the coded dimensions from the image header only (WebCodecs
- * `ImageDecoder`), so the big bitmap can be decoded **cropped and scaled**
- * instead of at full 8K size.
- */
-async function readDimensions(blob: Blob, type: string): Promise<Dimensions | null> {
-  try {
-    const Decoder = (
-      self as unknown as {
-        ImageDecoder?: new (init: { data: ArrayBuffer; type: string }) => {
-          tracks: {
-            ready: Promise<void>
-            selectedTrack?: { codedWidth?: number; codedHeight?: number }
-          }
-          close?: () => void
-        }
-      }
-    ).ImageDecoder
-    if (!Decoder) return null
-    const decoder = new Decoder({ data: await blob.arrayBuffer(), type })
-    await decoder.tracks.ready
-    const track = decoder.tracks.selectedTrack
-    const width = track?.codedWidth ?? 0
-    const height = track?.codedHeight ?? 0
-    decoder.close?.()
-    return width > 0 && height > 0 ? { width, height } : null
-  } catch {
-    return null
-  }
 }
 
 async function encode(
@@ -81,21 +45,22 @@ async function encode(
   return canvas.convertToBlob({ type: 'image/webp', quality: 0.95 })
 }
 
-scope.onmessage = async (event: MessageEvent): Promise<void> => {
-  const { key, buffer, type, cssWidth, cssHeight, dpr } = event.data as Task
+async function prepare({ key, url, cssWidth, cssHeight, dpr }: Task): Promise<void> {
   try {
-    const blob = new Blob([buffer], { type: type || 'image/png' })
-    const dimensions = await readDimensions(blob, type)
+    const response = await fetch(url)
+    if (!response.ok) throw new Error('Wallpaper unavailable')
+    const blob = await response.blob()
+    const dimensions = imageHeaderSize(new Uint8Array(await blob.slice(0, 128 * 1024).arrayBuffer()))
     const crop = dimensions
       ? wallpaperCoverCrop(dimensions.width, dimensions.height, cssWidth, cssHeight, dpr, MAX_WALLPAPER_EDGE)
       : null
     if (dimensions && !crop) {
       // The visible part is not bigger than the display: use the original.
-      scope.postMessage({ key, raw: true })
+      scope.postMessage({ key, blob, ...dimensions })
       return
     }
     if (crop) {
-      // Crop + scaled decode in one step (no full-size bitmap at all).
+      // Ask the decoder for only the crop at display resolution.
       const bitmap = await createImageBitmap(
         blob,
         crop.sx,
@@ -119,8 +84,9 @@ scope.onmessage = async (event: MessageEvent): Promise<void> => {
       MAX_WALLPAPER_EDGE
     )
     if (!fallback) {
+      const { width, height } = bitmap
       bitmap.close()
-      scope.postMessage({ key, raw: true })
+      scope.postMessage({ key, blob, width, height })
       return
     }
     const out = await encode(
@@ -136,4 +102,11 @@ scope.onmessage = async (event: MessageEvent): Promise<void> => {
   } catch (error) {
     scope.postMessage({ key, error: String(error) })
   }
+}
+
+/** Bound peak decode memory even when many thumbnail requests arrive together. */
+let tail = Promise.resolve()
+scope.onmessage = (event: MessageEvent): void => {
+  const task = event.data as Task
+  tail = tail.then(() => prepare(task))
 }

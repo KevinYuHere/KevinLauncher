@@ -1,6 +1,7 @@
 import { app, shell, BrowserWindow, protocol } from 'electron'
 import { promises as fs } from 'fs'
 import { join, basename, dirname } from 'path'
+import { bindWindowRole } from './services/windowRole'
 import { serveMediaFile } from './services/mediaProtocol'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { registerIpc, registerUpdatePreview, runtime, warmUpFonts, appUpdate } from './ipc'
@@ -19,15 +20,15 @@ import {
 import { applyAutoStart, startedHidden } from './services/autostart'
 import { applyDataDir } from './services/dataDir'
 import { applyThemePolicyOnStartup } from './services/themePolicy'
-import { relaunchInstallerElevated, syncInstalledVersion } from './services/install'
+import { syncInstalledVersion } from './services/install'
 import { cleanArknightsStaging, cleanUpdateStaging } from './services/housekeeping'
 import { currentAppVersion } from './services/appVersion'
 import { flushBeforeShutdown } from './services/shutdown'
+import { recoverSettingsImport } from './services/settingsBackup'
 import { BgStore } from './services/background'
 import { BrandStore } from './services/brand'
 import { IconStore } from './services/icon'
-import { isElevated } from './services/elevation'
-import { psQuote, runPowerShell } from './services/powershell'
+import { ensureAdministrator, isElevated } from './services/elevation'
 import { log } from './services/logger'
 
 protocol.registerSchemesAsPrivileged([
@@ -69,35 +70,9 @@ function detectMode(): RunMode {
 
 const runMode: RunMode = detectMode()
 
-/** Set once the launcher holds the single-instance lock (app mode only). */
-let holdsLock = false
-
 /** Icon used for the window / taskbar (resolved once on startup). */
 let windowIcon: string | undefined
 
-/**
- * Relaunch the current executable elevated (used by packaged builds).
- *
- * Resolves `true` once the elevated process was created. PowerShell is awaited
- * on purpose: quitting immediately after spawning used to lose the race, so
- * double-clicking the shortcut appeared to do nothing.
- */
-async function relaunchElevated(): Promise<boolean> {
-  const args = process.argv.slice(1).map(psQuote)
-  // `-ArgumentList @()` is rejected by Start-Process, so only pass it when there
-  // actually are arguments (this used to make every elevation attempt fail).
-  const script =
-    `Start-Process -FilePath ${psQuote(process.execPath)}` +
-    (args.length ? ` -ArgumentList @(${args.join(',')})` : '') +
-    ' -Verb RunAs'
-  try {
-    await runPowerShell(script, { timeout: 180_000 })
-    return true
-  } catch (error) {
-    log(`app: elevation failed (${(error as Error).message})`)
-    return false
-  }
-}
 
 /** Window size / role of the current run. */
 function createWindow(icon?: string, hidden = false, mode: RunMode = 'app'): void {
@@ -116,10 +91,11 @@ function createWindow(icon?: string, hidden = false, mode: RunMode = 'app'): voi
     icon,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      sandbox: false
+      sandbox: true
     }
   })
 
+  bindWindowRole(mainWindow.webContents, mode, is.dev ? process.env.ELECTRON_RENDERER_URL : undefined)
   mainWindow.on('ready-to-show', () => {
     // Autostart in tray mode: stay hidden, the tray icon opens the window.
     if (hidden) return
@@ -144,7 +120,7 @@ function createWindow(icon?: string, hidden = false, mode: RunMode = 'app'): voi
   })
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
-    shell.openExternal(details.url)
+    if (/^https?:\/\//i.test(details.url)) void shell.openExternal(details.url)
     return { action: 'deny' }
   })
 
@@ -158,41 +134,11 @@ function createWindow(icon?: string, hidden = false, mode: RunMode = 'app'): voi
 app.whenReady().then(async () => {
   electronApp.setAppUserModelId('com.kevin.kevinlauncher')
 
-  // Elevation must happen *before* the single-instance lock: a non-elevated
-  // instance that took the lock and then relaunched itself elevated would lose
-  // the race (the elevated process finds the lock taken and exits), so
-  // double-clicking the shortcut would appear to do nothing.
-  //
-  // Packaged launcher runs elevated so launching protected game clients never
-  // triggers a UAC prompt and their processes can be tracked/stopped. In dev
-  // this is handled by scripts/dev.ps1 (avoids an electron-vite restart loop).
-  // The installer elevates itself only when the chosen directory needs it and
-  // the uninstaller never needs administrator rights.
-  if (runMode === 'app' && !is.dev && !(await isElevated())) {
-    log('app: not elevated — requesting administrator rights')
-    if (await relaunchElevated()) {
-      app.quit()
-      return
-    }
-    // UAC was declined or unavailable: keep running without administrator
-    // rights (games then ask for elevation when they are launched) rather than
-    // leaving the user with no window at all.
-    log('app: continuing without administrator rights')
-  }
-
-  // The installer always runs elevated: it may have to stop a launcher that runs
-  // elevated itself and to write into protected directories. Elevating up front
-  // (before any UI) means the setup never has to quit itself half way through —
-  // which looked like "the installer closed itself".
-  if (runMode === 'install' && !is.dev && !(await isElevated())) {
-    log('install: requesting administrator rights')
-    if (await relaunchInstallerElevated()) {
-      app.quit()
-      return
-    }
-    // UAC declined: keep going non-elevated rather than closing the setup, so
-    // the user is never left with a window that simply vanished.
-    log('install: continuing without administrator rights')
+  // A lightweight update may run on a legacy shell with an asInvoker manifest.
+  // Hand off before taking the instance lock, binding IPC or opening any window.
+  if (app.isPackaged && runMode !== 'uninstall' && !(await ensureAdministrator(runMode))) {
+    app.quit()
+    return
   }
 
   // Only a single instance of the *launcher* may run. The installer/uninstaller
@@ -204,7 +150,6 @@ app.whenReady().then(async () => {
       app.quit()
       return
     }
-    holdsLock = true
     app.on('second-instance', () => showMainWindow())
   }
   log(`app: mode=${runMode} packaged=${app.isPackaged} dev=${is.dev}`)
@@ -241,15 +186,23 @@ app.whenReady().then(async () => {
 
   void isElevated().then((elevated) => log(`app: administrator=${elevated}`))
 
-  registerIpc()
-
-  // Apply a release theme policy before the window opens, so the first render
-  // already shows the developer-selected assignments (and never flashes the
-  // user's previous choice). It stays a no-op once this policy version ran.
-  await applyThemePolicyOnStartup()
-
   const mode = runMode
-  windowIcon = (await launcherIconPaths()).png
+  if (mode === 'app') {
+    try {
+      await recoverSettingsImport(app.getPath('userData'))
+    } catch (error) {
+      log(`startup: could not recover an interrupted import (${String(error)})`)
+      app.exit(1)
+      return
+    }
+  }
+  registerIpc(mode)
+  registerQuitHandlers()
+  if (mode === 'app') {
+    // A release policy applies only when the installed launcher starts.
+    await applyThemePolicyOnStartup()
+    windowIcon = (await launcherIconPaths()).png
+  }
   // `startedHidden()` is true when the Run entry launched us with `--tray`.
   createWindow(windowIcon, mode === 'app' && startedHidden(), mode)
 
@@ -315,16 +268,18 @@ app.whenReady().then(async () => {
   })
 })
 
-if (holdsLock || runMode !== 'app') {
-  let shutdownFlushed = false
+function registerQuitHandlers(): void {
+  let state: 'ready' | 'flushing' | 'flushed' = 'ready'
   app.on('before-quit', (event) => {
     markQuitting()
     // Flush play-time (and close out running sessions) before exiting. The
     // handler prevents the first quit, flushes, then quits for real.
-    if (shutdownFlushed) return
+    if (state === 'flushed') return
     event.preventDefault()
+    if (state === 'flushing') return
+    state = 'flushing'
     void flushBeforeShutdown().finally(() => {
-      shutdownFlushed = true
+      state = 'flushed'
       app.quit()
     })
   })

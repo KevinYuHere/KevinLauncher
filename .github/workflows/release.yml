@@ -92,27 +92,24 @@ jobs:
           npm_config_registry: https://registry.npmjs.org/
         run: npm ci --no-audit --no-fund
 
-      - name: Typecheck and test
-        run: |
-          npm run typecheck
-          npm test
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
 
       - name: Build the app
         run: npm run build
 
-      # signAndEditExecutable is disabled in electron-builder.yml (it needs the
-      # winCodeSign download locally), so the exe icon is applied here instead.
+      # afterPack applies the app icon and requires elevation in the app manifest.
       - name: Package the app directory
         run: npx electron-builder --win --dir
 
-      - name: Apply the exe icon
-        shell: pwsh
-        run: |
-          Invoke-WebRequest -Uri 'https://github.com/electron/rcedit/releases/download/v2.0.0/rcedit-x64.exe' -OutFile rcedit.exe
-          ./rcedit.exe release/win-unpacked/KevinLauncher.exe --set-icon resources/icon.ico
-
       - name: Build the installer (portable, self-drawn UI)
         run: npx electron-builder --win --prepackaged release/win-unpacked --publish never
+
+      - name: Verify both Windows elevation manifests
+        run: node scripts/windows-executable.js release/win-unpacked/KevinLauncher.exe release/KevinLauncher-Installer-${{ steps.version.outputs.version }}.exe
 
       # Notes first: build-update-payload embeds RELEASE_NOTES.md into the
       # manifest, so the free `releases/latest/download/...` path can show the

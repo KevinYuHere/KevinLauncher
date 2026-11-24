@@ -1,12 +1,22 @@
-import { promises as fs } from 'fs'
+import { createReadStream, promises as fs } from 'fs'
+import type { FileHandle } from 'fs/promises'
+import { Readable } from 'stream'
+import { pipeline } from 'stream/promises'
+import { createZstdDecompress } from 'zlib'
 import { createHash } from 'crypto'
-import { join, dirname } from 'path'
-import { decompress } from 'fzstd'
+import { fields } from './sophonProto'
+import { dirname } from 'path'
+import { openWritableGameFile } from '../services/writableGameFile'
+import type { HardLinkService } from '../services/hardLinkService'
+import { forEachResource, resourceProgress } from './hoyoSchedule'
+import { cacheHoYoResource } from './hoyoResourceCache'
+import { gamePath, retryHoYo } from './hoyoFiles'
+
 import { md5File } from '../services/hash'
-import { readBodyThrottled } from '../services/rateLimit'
+import { downloadGameBytes, streamGameBytes, downloadManifest, getHoYoMetadata, hoyoFetch } from './hoyoNetwork'
 
 const CHUNK_API = 'https://downloader-api.mihoyo.com/downloader/sophon_chunk/api'
-const CONCURRENCY = 16
+
 
 export class BuildNotFound extends Error {}
 
@@ -15,6 +25,8 @@ export interface SophonCategory {
   categoryName: string
   /** `game`, a numeric resource field, or an audio language (`zh-cn`, …). */
   matchingField: string
+  manifestMd5?: string
+  manifestSize?: number
   manifestId: string
   manifestUrlPrefix: string
   manifestCompression: number
@@ -42,6 +54,7 @@ export interface SophonChunk {
   sizeDecompressed: number
 }
 export interface SophonAsset {
+  directory?: boolean
   name: string
   size: number
   md5: string
@@ -54,13 +67,18 @@ export async function getSophonBuild(
     packageId: string
     password: string
   },
-  tag = ''
+  tag?: string,
+  signal?: AbortSignal
 ): Promise<SophonBuild> {
   const url =
     `${CHUNK_API}/getBuild?branch=${encodeURIComponent(branch.branch)}` +
     `&package_id=${encodeURIComponent(branch.packageId)}&password=${encodeURIComponent(branch.password)}` +
     (tag ? `&tag=${encodeURIComponent(tag)}` : '')
-  const res = await fetchRetry(url, { headers: { 'User-Agent': 'Mozilla/5.0' } })
+  return getHoYoMetadata(`GameSophonChunkBuild_${branch.packageId}_${tag ?? ''}`,
+    async token => parseSophonBuild(await hoyoFetch(url, { signal: token })), signal)
+}
+
+async function parseSophonBuild(res: Response): Promise<SophonBuild> {
   const json = (await res.json()) as {
     retcode: number
     message: string
@@ -71,14 +89,14 @@ export async function getSophonBuild(
         category_id: string
         category_name: string
         matching_field?: string
-        manifest: { id: string; compressed_size: string }
+        manifest: { id: string; compressed_size: string; uncompressed_size?: string; checksum?: string }
         manifest_download: { url_prefix: string; compression?: number; url_suffix?: string }
         chunk_download: { url_prefix: string; compression?: number; url_suffix?: string }
         stats?: { compressed_size?: string }
       }[]
     }
   }
-  if (json.retcode === -202) throw new BuildNotFound(json.message || 'build not found')
+  if (typeof json.retcode === 'number' && json.retcode !== 0) throw new BuildNotFound(json.message || 'getBuild 失败')
   if (json.retcode !== 0 || !json.data) throw new Error(json.message || 'getBuild failed')
   return {
     buildId: json.data.build_id,
@@ -88,6 +106,8 @@ export async function getSophonBuild(
       categoryName: m.category_name,
       matchingField: m.matching_field ?? '',
       manifestId: m.manifest.id,
+      manifestMd5: m.manifest.checksum,
+      manifestSize: m.manifest.uncompressed_size === undefined ? undefined : Number(m.manifest.uncompressed_size),
       manifestUrlPrefix: m.manifest_download.url_prefix,
       manifestCompression: m.manifest_download.compression ?? 1,
       manifestSuffix: m.manifest_download.url_suffix ?? '',
@@ -99,156 +119,55 @@ export async function getSophonBuild(
   }
 }
 
-// --- minimal proto3 reader for SophonManifestProto ---
-
-function readVarint(buf: Uint8Array, pos: number): [bigint, number] {
-  let result = 0n
-  let shift = 0n
-  for (;;) {
-    const b = buf[pos++]
-    result |= BigInt(b & 0x7f) << shift
-    if ((b & 0x80) === 0) break
-    shift += 7n
-  }
-  return [result, pos]
-}
-
-function parseChunk(buf: Uint8Array): SophonChunk {
-  const chunk: SophonChunk = {
-    name: '',
-    uncompressedMd5: '',
-    compressedMd5: '',
-    offset: 0,
-    size: 0,
-    sizeDecompressed: 0
-  }
-  let pos = 0
-  while (pos < buf.length) {
-    const [tag, p1] = readVarint(buf, pos)
-    pos = p1
-    const field = Number(tag >> 3n)
-    const wire = Number(tag & 7n)
-    if (wire === 2) {
-      const [len, p2] = readVarint(buf, pos)
-      const end = p2 + Number(len)
-      if (field === 1) chunk.name = Buffer.from(buf.subarray(p2, end)).toString('utf8')
-      else if (field === 2) chunk.uncompressedMd5 = Buffer.from(buf.subarray(p2, end)).toString('utf8')
-      else if (field === 7) chunk.compressedMd5 = Buffer.from(buf.subarray(p2, end)).toString('utf8')
-      pos = end
-    } else if (wire === 0) {
-      const [value, p2] = readVarint(buf, pos)
-      pos = p2
-      if (field === 3) chunk.offset = Number(value)
-      else if (field === 4) chunk.size = Number(value)
-      else if (field === 5) chunk.sizeDecompressed = Number(value)
-    } else break
+function parseChunk(input: Uint8Array): SophonChunk {
+  const chunk: SophonChunk = { name: '', uncompressedMd5: '', compressedMd5: '', size: 0, sizeDecompressed: 0, offset: 0 }
+  for (const { field, sub, num } of fields(input)) {
+    if (sub) {
+      const value = Buffer.from(sub).toString('utf8')
+      if (field === 1) chunk.name = value
+      if (field === 2) chunk.uncompressedMd5 = value
+      if (field === 7) chunk.compressedMd5 = value
+    } else if (num !== undefined) {
+      if (field === 3) chunk.offset = Number(num)
+      if (field === 4) chunk.size = Number(num)
+      if (field === 5) chunk.sizeDecompressed = Number(num)
+    }
   }
   return chunk
 }
 
-function parseAsset(buf: Uint8Array): SophonAsset {
+function parseAsset(input: Uint8Array): SophonAsset {
   const asset: SophonAsset = { name: '', size: 0, md5: '', chunks: [] }
-  let pos = 0
-  while (pos < buf.length) {
-    const [tag, p1] = readVarint(buf, pos)
-    pos = p1
-    const field = Number(tag >> 3n)
-    const wire = Number(tag & 7n)
-    if (wire === 2) {
-      const [len, p2] = readVarint(buf, pos)
-      const end = p2 + Number(len)
-      if (field === 1) asset.name = Buffer.from(buf.subarray(p2, end)).toString('utf8')
-      else if (field === 2) asset.chunks.push(parseChunk(buf.subarray(p2, end)))
-      else if (field === 5) asset.md5 = Buffer.from(buf.subarray(p2, end)).toString('utf8')
-      pos = end
-    } else if (wire === 0) {
-      const [value, p2] = readVarint(buf, pos)
-      pos = p2
-      if (field === 4) asset.size = Number(value)
-    } else break
+  for (const { field, sub, num } of fields(input)) {
+    if (sub) {
+      if (field === 1) asset.name = Buffer.from(sub).toString('utf8')
+      if (field === 2) asset.chunks.push(parseChunk(sub))
+      if (field === 5) asset.md5 = Buffer.from(sub).toString('utf8')
+    } else if (num !== undefined) {
+      if (field === 3) asset.directory = num === 0x40n
+      if (field === 4) asset.size = Number(num)
+    }
   }
   return asset
 }
 
-function parseManifest(buf: Uint8Array): SophonAsset[] {
+function parseManifest(input: Uint8Array): SophonAsset[] {
   const assets: SophonAsset[] = []
-  let pos = 0
-  while (pos < buf.length) {
-    const [tag, p1] = readVarint(buf, pos)
-    pos = p1
-    const field = Number(tag >> 3n)
-    const wire = Number(tag & 7n)
-    if (wire === 2) {
-      const [len, p2] = readVarint(buf, pos)
-      const end = p2 + Number(len)
-      if (field === 1) assets.push(parseAsset(buf.subarray(p2, end)))
-      pos = end
-    } else if (wire === 0) {
-      const [, p2] = readVarint(buf, pos)
-      pos = p2
-    } else break
-  }
+  for (const { field, sub } of fields(input)) if (field === 1 && sub) assets.push(parseAsset(sub))
   return assets
 }
 
-/** Fetch with a small exponential backoff (Starward retries transient failures). */
-export async function fetchRetry(url: string, init?: RequestInit, attempts = 6): Promise<Response> {
-  let last: unknown
-  for (let i = 0; i < attempts; i++) {
-    try {
-      return await fetch(url, init)
-    } catch (error) {
-      if (init?.signal?.aborted) throw error
-      last = error
-      // Starward Polly: MaxRetryAttempts = 5, linear backoff (2s, 4s, 6s, 8s, 10s).
-      if (i < attempts - 1) await new Promise((resolve) => setTimeout(resolve, 2000 * (i + 1)))
-    }
-  }
-  throw last
-}
-export async function fetchManifest(category: SophonCategory): Promise<SophonAsset[]> {
-  const url = `${category.manifestUrlPrefix}/${category.manifestId}${category.manifestSuffix}`
-  const bytes = await fetchBodyResilient(url, {})
-  return parseManifest(category.manifestCompression ? decompress(bytes) : bytes)
-}
-
-export async function fetchChunk(
-  prefix: string,
-  name: string,
-  signal?: AbortSignal,
-  compression = 1,
-  suffix = ''
-): Promise<Buffer> {
-  const bytes = await fetchBodyResilient(`${prefix}/${name}${suffix}`, { signal })
-  return Buffer.from(compression ? decompress(bytes) : bytes)
-}
-
-/**
- * Fetch a body with retries around the **read**, not just the connection: a CDN
- * reset in the middle of a response (`terminated`) used to abort the whole
- * pre-download, which looked like an extremely slow download.
- */
-async function fetchBodyResilient(
-  url: string,
-  options: { signal?: AbortSignal; headers?: Record<string, string>; attempts?: number }
-): Promise<Uint8Array> {
-  const attempts = options.attempts ?? 4
-  let last: unknown
-  for (let i = 0; i < attempts; i++) {
-    try {
-      const res = await fetch(url, {
-        headers: { 'User-Agent': 'Mozilla/5.0', ...options.headers },
-        signal: options.signal
-      })
-      if (!res.ok) throw new Error(`download chunk failed HTTP ${res.status}`)
-      return new Uint8Array(await readBodyThrottled(res))
-    } catch (error) {
-      if (options.signal?.aborted) throw error
-      last = error
-      if (i < attempts - 1) await new Promise((resolve) => setTimeout(resolve, 1500 * (i + 1)))
-    }
-  }
-  throw last
+export async function fetchManifest(category: SophonCategory, signal?: AbortSignal): Promise<SophonAsset[]> {
+  return retryHoYo(async () => {
+    const plain = await downloadManifest({
+      id: category.manifestId,
+      url: `${category.manifestUrlPrefix}/${category.manifestId}${category.manifestSuffix}`,
+      compressed: category.manifestCompression !== 0,
+      uncompressedSize: category.manifestSize,
+      md5: category.manifestMd5
+    }, signal)
+    return parseManifest(plain)
+  }, signal)
 }
 
 async function fileMatches(path: string, size: number, md5: string): Promise<boolean> {
@@ -256,9 +175,10 @@ async function fileMatches(path: string, size: number, md5: string): Promise<boo
     const stat = await fs.stat(path)
     if (stat.size !== size) return false
     if (!md5) return true
-    return (await md5File(path)) === md5
-  } catch {
-    return false
+    return (await md5File(path)) === md5.toLowerCase()
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw error
   }
 }
 
@@ -275,6 +195,10 @@ export function isLanguageField(field: string): boolean {
 
 /** Resource categories the game config marks as deleted (`is_delete`). */
 export interface SophonDownloadOptions {
+  links?: HardLinkService
+  finished?: Set<string>
+  prepared?: PreparedChunkFiles
+  repair?: boolean
   /** Skip files that already match in `originDir` (delta: never stage unchanged). */
   skipUnchanged?: boolean
   /** Installed game dir: delta comparison + partial-file resume source. */
@@ -289,6 +213,7 @@ export interface SophonDownloadOptions {
   cacheDir?: string
   /** Pre-download: only fill the chunk cache, do not assemble the game files. */
   cacheOnly?: boolean
+  categoriesSelected?: boolean
   /** Files listed in the game's resource blacklist — never (re)downloaded. */
   blacklist?: string[]
 }
@@ -300,62 +225,40 @@ export async function fetchChunkRaw(
   signal?: AbortSignal,
   suffix = ''
 ): Promise<Buffer> {
-  const res = await fetchRetry(`${prefix}/${name}${suffix}`, {
-    headers: { 'User-Agent': 'Mozilla/5.0' },
-    signal
-  })
-  if (!res.ok) throw new Error(`download chunk failed HTTP ${res.status}`)
-  return await readBodyThrottled(res)
+  return downloadGameBytes(`${prefix}/${name}${suffix}`, signal)
 }
 
-/** Reuse a cached chunk when present (+size match), else fetch and cache it. */
 function md5Buffer(buffer: Buffer): string {
   return createHash('md5').update(buffer).digest('hex')
 }
 
-async function chunkFromCache(
-  category: SophonCategory,
-  chunk: SophonChunk,
-  cacheDir: string | undefined,
-  signal?: AbortSignal
-): Promise<Buffer> {
-  const path = cacheDir ? join(cacheDir, chunk.name) : null
-  if (path) {
-    try {
-      const raw = await fs.readFile(path)
-      // Verify both size and compressed MD5 (Starward's `CheckFileMD5Async`).
-      if (
-        raw.length === chunk.size &&
-        (!chunk.compressedMd5 || md5Buffer(raw) === chunk.compressedMd5)
-      ) {
-        return Buffer.from(decompress(raw))
-      }
-      await fs.rm(path, { force: true })
-    } catch {
-      /* not cached yet */
-    }
+async function writeAt(file: FileHandle, data: Uint8Array, position: number): Promise<void> {
+  let offset = 0
+  while (offset < data.length) {
+    const { bytesWritten } = await file.write(data, offset, data.length - offset, position + offset)
+    if (!bytesWritten) throw new Error('无法写入游戏分块')
+    offset += bytesWritten
   }
-  const raw = await fetchChunkRaw(category.chunkUrlPrefix, chunk.name, signal, category.chunkSuffix)
-  if (chunk.compressedMd5 && md5Buffer(raw) !== chunk.compressedMd5) {
-    throw new Error(`分块校验失败：${chunk.name}`)
-  }
-  if (path) {
-    await fs.mkdir(dirname(path), { recursive: true })
-    await fs.writeFile(path, raw)
-  }
-  return Buffer.from(decompress(raw))
 }
 
-/**
- * Download and assemble a Sophon build into `destDir` (Starward semantics):
- *
- * - only the `game`/resource manifests plus the **installed voice languages** are
- *   used (pre-download size therefore differs per player);
- * - when `originDir` is given, files that already match there are skipped, so a
- *   pre-download only stages the delta instead of the whole game;
- * - partially written files resume at chunk boundaries instead of restarting.
- */
-async function runPool<T>(items: T[], concurrency: number, fn: (item: T) => Promise<void>): Promise<void> {
+async function writeChunk(category: SophonCategory, chunk: SophonChunk, cacheDir: string | undefined, file: FileHandle,
+  signal: AbortSignal, progress: (bytes: number) => void): Promise<void> {
+  const path = cacheDir && gamePath(cacheDir, chunk.name)
+  const cached = path && await fileMatches(path, chunk.size, chunk.compressedMd5)
+  const url = category.chunkUrlPrefix + '/' + chunk.name + category.chunkSuffix
+  const source = cached ? createReadStream(path) : Readable.from(streamGameBytes(url, signal, progress), { objectMode: false })
+  let position = chunk.offset
+  async function save(data: AsyncIterable<Uint8Array>): Promise<void> {
+    for await (const bytes of data) {
+      signal.throwIfAborted()
+      await writeAt(file, bytes, position)
+      position += bytes.length
+    }
+  }
+  if (category.chunkCompression) await pipeline(source, createZstdDecompress(), save, { signal })
+  else await pipeline(source, save, { signal })
+}
+export async function runPool<T>(items: T[], concurrency: number, fn: (item: T) => Promise<void>): Promise<void> {
   let index = 0
   const workers = Array.from({ length: Math.min(concurrency, Math.max(1, items.length)) }, async () => {
     for (;;) {
@@ -364,208 +267,153 @@ async function runPool<T>(items: T[], concurrency: number, fn: (item: T) => Prom
       await fn(items[i])
     }
   })
-  await Promise.all(workers)
+  const results = await Promise.allSettled(workers)
+  for (const result of results) if (result.status === 'rejected') throw result.reason
 }
-export async function downloadSophonBuild(
-  build: SophonBuild,
-  destDir: string,
-  onProgress: (progress: SophonProgress) => void,
-  signal?: AbortSignal,
-  options: SophonDownloadOptions = {}
-): Promise<void> {
-  const {
-    skipUnchanged = false,
-    originDir,
-    audioLanguages = [],
-    ignoreFields = [],
-    localBuild,
-    cacheDir,
-    cacheOnly = false,
-    blacklist = []
-  } = options
+export interface PreparedChunkFiles {
+  files: { category: SophonCategory; asset: SophonAsset }[]
+  oldChunks: Map<string, MapEntry>
+  oldFiles: Map<string, string>
+}
+
+interface MapEntry { file: string; offset: number }
+
+export async function prepareChunkFiles(build: SophonBuild, options: SophonDownloadOptions, signal: AbortSignal): Promise<PreparedChunkFiles> {
+  const { audioLanguages = [], ignoreFields = [], localBuild, blacklist = [] } = options
   const installedAudio = new Set(audioLanguages)
   const ignored = new Set(ignoreFields)
   const wanted = (field: string): boolean =>
     !ignored.has(field) && !(isLanguageField(field) && !installedAudio.has(field))
 
-  // Target manifests, per selected category (fetched concurrently: sequential
-  // fetches of ~120 categories looked like a stuck 0% progress bar).
-  const targetCats: { category: SophonCategory; assets: SophonAsset[] }[] = []
-  await runPool(
-    build.categories.filter((category) => wanted(category.matchingField)),
-    8,
-    async (category) => {
-      targetCats.push({ category, assets: await fetchManifest(category) })
-    }
-  )
-
-  // Installed version manifests → `file → (uncompressedMd5 → {offset, size})`.
-  const localChunks = new Map<string, Map<string, { offset: number; size: number }>>()
-  if (localBuild && originDir) {
-    await runPool(
-      localBuild.categories.filter((category) => wanted(category.matchingField)),
-      8,
-      async (category) => {
-        let assets: SophonAsset[]
-        try {
-          assets = await fetchManifest(category)
-        } catch (error) {
-          // A category absent from the local build is skipped; real errors abort.
-          if (/HTTP 404/.test((error as Error).message)) return
-          throw error
-        }
-        for (const asset of assets) {
-          const map = new Map<string, { offset: number; size: number }>()
-          for (const chunk of asset.chunks) {
-            if (chunk.uncompressedMd5 && !map.has(chunk.uncompressedMd5)) {
-              map.set(chunk.uncompressedMd5, {
-                offset: chunk.offset,
-                size: chunk.sizeDecompressed
-              })
-            }
-          }
-          localChunks.set(asset.name, map)
+  const allowed = (category: SophonCategory): boolean => options.categoriesSelected === true || wanted(category.matchingField)
+  const oldChunks = new Map<string, { file: string; offset: number }>()
+  const oldFiles = new Map<string, string>()
+  if (localBuild) {
+    await forEachResource(localBuild.categories.filter(allowed), signal, async (category, token) => {
+      for (const asset of await fetchManifest(category, token)) {
+        if (blacklist.includes(asset.name)) continue
+        if (!oldFiles.has(asset.name)) oldFiles.set(asset.name, asset.md5)
+        for (const chunk of asset.chunks) {
+          if (!oldChunks.has(chunk.name)) oldChunks.set(chunk.name, { file: asset.name, offset: chunk.offset })
         }
       }
-    )
+    }, false)
   }
 
-  // Plan: which chunks can be copied from the installed file, which must be
-  // downloaded. `total` is the real network delta (fresh run).
-  interface Plan {
-    category: SophonCategory
-    asset: SophonAsset
-    reuse: (number | null)[]
-  }
-  const plans: Plan[] = []
-  let total = 0
-  for (const { category, assets } of targetCats) {
-    for (const asset of assets) {
-      if (blacklist.includes(asset.name)) continue
-      const segments = asset.name.split('/')
-      const originPath = originDir ? join(originDir, ...segments) : join(destDir, ...segments)
-      if (skipUnchanged && (await fileMatches(originPath, asset.size, asset.md5))) continue
-      const local = localChunks.get(asset.name)
-      const reuse: (number | null)[] = []
-      for (const chunk of asset.chunks) {
-        const found = chunk.uncompressedMd5 ? local?.get(chunk.uncompressedMd5) : undefined
-        if (found && found.size === chunk.sizeDecompressed) {
-          reuse.push(found.offset)
-        } else {
-          reuse.push(null)
-          total += chunk.sizeDecompressed
-        }
-      }
-      plans.push({ category, asset, reuse })
+  const files: { category: SophonCategory; asset: SophonAsset }[] = []
+  await forEachResource(build.categories.filter(allowed), signal, async (category, token) => {
+    for (const asset of await fetchManifest(category, token)) {
+      if (!blacklist.includes(asset.name)) files.push({ category, asset })
     }
-  }
+  }, false)
+  return { oldChunks, oldFiles, files }
+}
 
-  let downloaded = 0
-  onProgress({ downloaded, total, currentFile: '' })
-
-  if (cacheDir) {
-    await fs.mkdir(cacheDir, { recursive: true })
-    // Starward's order: download and verify every missing chunk first, then assemble.
-    const unique = new Map<string, { category: SophonCategory; chunk: SophonChunk; file: string }>()
-    for (const { category, asset, reuse } of plans) {
-      for (let i = 0; i < asset.chunks.length; i++) {
-        if (reuse[i] != null) continue
-        const chunk = asset.chunks[i]
-        if (!unique.has(chunk.name)) unique.set(chunk.name, { category, chunk, file: asset.name })
-      }
+export async function downloadSophonBuild(build: SophonBuild, destDir: string, onProgress: (progress: SophonProgress) => void,
+  signal: AbortSignal = new AbortController().signal, options: SophonDownloadOptions = {}): Promise<void> {
+  const { cacheDir, cacheOnly, originDir, links, finished = new Set<string>(), localBuild } = options
+  const { files, oldFiles, oldChunks } = options.prepared ?? await prepareChunkFiles(build, options, signal)
+  const needed = new Map<string, { category: SophonCategory; chunk: SophonChunk }>()
+  const report = (done: number, total: number, name: string) => onProgress({ downloaded: done, total, currentFile: name })
+  if (cacheOnly) {
+    if (!cacheDir) throw new Error('缺少预下载缓存目录')
+    for (const { category, asset } of files) for (const chunk of asset.chunks) {
+      if (!oldChunks.has(chunk.name) && !needed.has(chunk.name)) needed.set(chunk.name, { category, chunk })
     }
-    await runPool([...unique.values()], 8, async ({ category, chunk, file }) => {
-      await chunkFromCache(category, chunk, cacheDir, signal)
-      downloaded += chunk.sizeDecompressed
-      onProgress({ downloaded, total, currentFile: file })
+    const total = [...needed.values()].reduce((sum, x) => sum + x.chunk.size, 0)
+    const count = resourceProgress(total, report)
+    await forEachResource([...needed.values()], signal, async ({ category, chunk }, token) => {
+      if (!finished.has(chunk.name)) {
+        await cacheHoYoResource(gamePath(cacheDir, chunk.name), category.chunkUrlPrefix + '/' + chunk.name + category.chunkSuffix,
+          chunk.size, chunk.compressedMd5, links, token, n => count(chunk.name, n))
+        finished.add(chunk.name)
+      }
+      count(chunk.name, chunk.size)
     })
+    return
   }
-  if (cacheOnly) return
 
-  await runPool(plans, 4, async ({ category, asset, reuse }) => {
-    if (signal?.aborted) throw new Error('cancelled')
-    const segments = asset.name.split('/')
-    const assetPath = join(destDir, ...segments)
-    const originPath = originDir ? join(originDir, ...segments) : assetPath
-    await fs.mkdir(dirname(assetPath), { recursive: true })
-
-    // Open the installed file for chunk reuse; if it cannot be read, download.
-    let originHandle: Awaited<ReturnType<typeof fs.open>> | null = null
-    if (reuse.some((offset) => offset != null)) {
-      try {
-        originHandle = await fs.open(originPath, 'r')
-      } catch {
-        originHandle = null
-      }
-      if (!originHandle) {
-        for (let i = 0; i < reuse.length; i++) reuse[i] = null
-      }
+  const work = files.filter(({ asset }) => !asset.directory && oldFiles.get(asset.name)?.toLowerCase() !== asset.md5.toLowerCase())
+  const netSize = (asset: SophonAsset) => asset.chunks.reduce((sum, chunk) => sum + (oldChunks.has(chunk.name) ? 0 : chunk.size), 0)
+  const total = work.reduce((sum, item) => sum + netSize(item.asset), 0)
+  const present = async (asset: SophonAsset, path: string, token: AbortSignal): Promise<boolean> => {
+    if (finished.has(asset.name)) return true
+    if (links && await links.tryLink(path, asset.size, asset.md5, token)) { finished.add(asset.name); return true }
+    if ((options.skipUnchanged || options.repair) && await fileMatches(path, asset.size, asset.md5)) {
+      void links?.insert(path, asset.size, asset.md5)
+      finished.add(asset.name)
+      return true
     }
-
-    try {
-      let resumeFrom = 0
+    return false
+  }
+  if (options.repair) await forEachResource(work, signal, async ({ asset }, token) => {
+    await present(asset, gamePath(destDir, asset.name), token)
+  })
+  const count = resourceProgress(total, report)
+  report(0, total, '')
+  await forEachResource(work, signal, async ({ category, asset }, token) => {
+    const path = gamePath(destDir, asset.name)
+    if (!await present(asset, path, token)) {
+      await fs.mkdir(dirname(path), { recursive: true })
+      const tmp = path + '.tmp'
+      const handle = await openWritableGameFile(tmp)
+      let received = 0
       try {
-        const stat = await fs.stat(assetPath)
-        if (stat.size > 0 && stat.size < asset.size) resumeFrom = stat.size
-      } catch {
-        /* new file */
-      }
-
-      let ok = false
-      for (let attempt = 0; attempt < 3 && !ok; attempt++) {
-        if (signal?.aborted) throw new Error('cancelled')
-        if (attempt > 0) {
-          resumeFrom = 0
-          await fs.rm(assetPath, { force: true })
-        }
-        let fetched = 0
-        const handle = await fs.open(assetPath, resumeFrom > 0 ? 'r+' : 'w')
-        try {
-          for (let i = 0; i < asset.chunks.length; i += CONCURRENCY) {
-            if (signal?.aborted) throw new Error('cancelled')
-            const end = Math.min(i + CONCURRENCY, asset.chunks.length)
-            const need: number[] = []
-            for (let j = i; j < end; j++) {
-              const chunk = asset.chunks[j]
-              if (chunk.offset + chunk.sizeDecompressed <= resumeFrom) {
-                // Already written by an earlier run (count only the downloaded ones).
-                if (reuse[j] == null) downloaded += chunk.sizeDecompressed
-                continue
-              }
-              if (reuse[j] != null && originHandle) {
-                const buffer = Buffer.alloc(chunk.sizeDecompressed)
-                await originHandle.read(buffer, 0, chunk.sizeDecompressed, reuse[j] as number)
-                await handle.write(buffer, 0, buffer.length, chunk.offset)
-              } else {
-                need.push(j)
-              }
-            }
-            if (need.length) {
-              const datas = await Promise.all(
-                need.map((j) => chunkFromCache(category, asset.chunks[j], cacheDir, signal))
-              )
-              for (let k = 0; k < need.length; k++) {
-                const j = need[k]
-                const data = datas[k]
-                await handle.write(data, 0, data.length, asset.chunks[j].offset)
-                downloaded += data.length
-                fetched += data.length
-                onProgress({ downloaded, total, currentFile: asset.name })
-              }
+        for (const chunk of asset.chunks) {
+          token.throwIfAborted()
+          const budget = chunk.size
+          if (await verifiedSlice(handle, chunk.offset, chunk)) {
+            received += budget
+            count(asset.name, received)
+            continue
+          }
+          let data: Buffer | undefined
+          const previous = oldChunks.get(chunk.name)
+          if (previous && originDir) {
+            const original = await fs.open(gamePath(originDir, previous.file), 'r').catch(error => {
+              if (error.code === 'ENOENT') return null
+              throw error
+            })
+            if (original) {
+              try { data = await verifiedSlice(original, previous.offset, chunk) } finally { await original.close() }
             }
           }
-        } finally {
-          await handle.close()
+          if (data) await writeAt(handle, data, chunk.offset)
+          else await writeChunk(category, chunk, cacheDir, handle, token, n => count(asset.name, received + Math.min(budget, n)))
+          received += budget
+          count(asset.name, received)
         }
-        ok = !asset.md5 || (await md5File(assetPath)) === asset.md5
-        if (!ok) downloaded -= fetched
+      } catch (error) {
+        count(asset.name, 0)
+        throw error
+      } finally { await handle.close() }
+      if (!await fileMatches(tmp, asset.size, asset.md5)) {
+        await fs.rm(tmp, { force: true })
+        count(asset.name, 0)
+        throw new Error('文件校验失败：' + asset.name)
       }
-      if (!ok) throw new Error(`文件校验失败：${asset.name}`)
-    } finally {
-      await originHandle?.close()
-    }
+      await fs.rename(tmp, path)
+      void links?.insert(path, asset.size, asset.md5)
+      finished.add(asset.name)
+    } else count(asset.name, netSize(asset))
   })
+  if (localBuild) {
+    const currentFiles = new Set(files.map(({ asset }) => asset.name))
+    for (const name of oldFiles.keys()) {
+      if (currentFiles.has(name)) continue
+      const path = gamePath(destDir, name)
+      try { await fs.unlink(path) } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') continue
+      }
+      links?.deleteFile(path)
+    }
+  }
+  if (cacheDir && !options.prepared) await fs.rm(cacheDir, { recursive: true, force: true })
+}
 
-  // The cache is no longer needed once the game files are assembled.
-  if (cacheDir) await fs.rm(cacheDir, { recursive: true, force: true }).catch(() => undefined)
+async function verifiedSlice(handle: Awaited<ReturnType<typeof fs.open>>, offset: number, chunk: SophonChunk): Promise<Buffer | undefined> {
+  if (!chunk.uncompressedMd5 || (await handle.stat()).size < offset + chunk.sizeDecompressed) return undefined
+  const data = Buffer.alloc(chunk.sizeDecompressed)
+  const { bytesRead } = await handle.read(data, 0, data.length, offset)
+  return bytesRead === data.length && md5Buffer(data) === chunk.uncompressedMd5.toLowerCase() ? data : undefined
 }

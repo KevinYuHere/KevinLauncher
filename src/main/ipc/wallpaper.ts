@@ -1,4 +1,5 @@
-import { dialog, ipcMain } from 'electron'
+import { dialog } from 'electron'
+import { handleIpc } from './access'
 import { randomUUID } from 'crypto'
 import { basename, join } from 'path'
 import type { AppEntry, Wallpaper, WallpaperSettings } from '@shared/types'
@@ -28,9 +29,9 @@ function clampIndex(entry: AppEntry): void {
 export function registerWallpaperIpc(): void {
   // Current Windows desktop wallpaper — used as the background when the
   // launcher has no apps yet.
-  ipcMain.handle('wallpaper:desktop', () => getDesktopWallpaper())
+  handleIpc('wallpaper:desktop', () => getDesktopWallpaper())
 
-  ipcMain.handle('wallpaper:pick', async () => {
+  handleIpc('wallpaper:pick', async () => {
     const result = await dialog.showOpenDialog({
       properties: ['openFile', 'multiSelections'],
       filters: [
@@ -43,7 +44,7 @@ export function registerWallpaperIpc(): void {
     return result.canceled ? [] : result.filePaths
   })
 
-  ipcMain.handle('wallpaper:add', async (_e, appId: string, sourcePath: string) => {
+  handleIpc('wallpaper:add', async (_e, appId: string, sourcePath: string) => {
     const store = await AppStore.load()
     const entry = requireApp(store, appId)
     entry.wallpapers ??= []
@@ -56,7 +57,7 @@ export function registerWallpaperIpc(): void {
     if (entry.wallpapers.length === 1) entry.wallpaperIndex = 0
     // Use the new wallpaper as the current one and refresh the accent if needed.
     entry.wallpaperIndex = entry.wallpapers.length - 1
-    applyAutoTheme(entry)
+    await applyAutoTheme(entry)
     entry.updatedAt = new Date().toISOString()
     await AppStore.save()
     notifyAppsChanged()
@@ -64,7 +65,7 @@ export function registerWallpaperIpc(): void {
     return entry
   })
 
-  ipcMain.handle('wallpaper:remove', async (_e, appId: string, wallpaperId: string) => {
+  handleIpc('wallpaper:remove', async (_e, appId: string, wallpaperId: string) => {
     const store = await AppStore.load()
     const entry = requireApp(store, appId)
     const index = entry.wallpapers.findIndex((w) => w.id === wallpaperId)
@@ -86,18 +87,18 @@ export function registerWallpaperIpc(): void {
       }
     }
     clampIndex(entry)
-    applyAutoTheme(entry)
+    await applyAutoTheme(entry)
     entry.updatedAt = new Date().toISOString()
     await AppStore.save()
     notifyAppsChanged()
     return entry
   })
 
-  ipcMain.handle('wallpaper:select', async (_e, appId: string, index: number) => {
+  handleIpc('wallpaper:select', async (_e, appId: string, index: number) => {
     const store = await AppStore.load()
     const entry = requireApp(store, appId)
     entry.wallpaperIndex = Math.max(0, Math.min(entry.wallpapers.length - 1, index | 0))
-    applyAutoTheme(entry)
+    await applyAutoTheme(entry)
     entry.updatedAt = new Date().toISOString()
     await AppStore.save()
     notifyAppsChanged()
@@ -106,7 +107,7 @@ export function registerWallpaperIpc(): void {
 
   // Open a wallpaper in the shared media viewer (reuses the gallery viewer,
   // including prev/next navigation and video playback).
-  ipcMain.handle('wallpaper:viewer', async (_e, appId: string, index: number) => {
+  handleIpc('wallpaper:viewer', async (_e, appId: string, index: number) => {
     const store = await AppStore.load()
     const entry = store.apps.find((a) => a.id === appId)
     if (!entry || entry.wallpapers.length === 0) return
@@ -114,7 +115,7 @@ export function registerWallpaperIpc(): void {
     openViewer(paths, index)
   })
 
-  ipcMain.handle('wallpaper:reorder', async (_e, appId: string, ids: string[]) => {
+  handleIpc('wallpaper:reorder', async (_e, appId: string, ids: string[]) => {
     const store = await AppStore.load()
     const entry = requireApp(store, appId)
     const current = entry.wallpapers.find((w) => w.id === ids[entry.wallpaperIndex])
@@ -130,7 +131,7 @@ export function registerWallpaperIpc(): void {
     return entry
   })
 
-  ipcMain.handle(
+  handleIpc(
     'wallpaper:settings',
     async (_e, appId: string, patch: Partial<WallpaperSettings>) => {
       const store = await AppStore.load()
@@ -158,30 +159,31 @@ export function registerWallpaperIpc(): void {
     }
   )
 
-  ipcMain.handle('wallpaper:step', async (_e, appId: string, delta: number) => {
+  handleIpc('wallpaper:step', async (_e, appId: string, delta: number) => {
     const store = await AppStore.load()
     const entry = requireApp(store, appId)
     entry.wallpaperIndex = stepIndex(entry.wallpapers.length, entry.wallpaperIndex, delta || 1)
-    applyAutoTheme(entry)
+    await applyAutoTheme(entry)
     entry.updatedAt = new Date().toISOString()
     await AppStore.save()
     notifyAppsChanged()
     return entry
   })
 
-  ipcMain.handle('wallpaper:advance', async (_e, appId: string) => {
+  handleIpc('wallpaper:advance', async (_e, appId: string) => {
     const store = await AppStore.load()
     const entry = requireApp(store, appId)
+    if (entry.wallpapers.length < 2) return entry
     const strategy = entry.wallpaperSettings?.strategy ?? 'loop'
     entry.wallpaperIndex = advanceIndex(entry.wallpapers.length, entry.wallpaperIndex, strategy)
-    applyAutoTheme(entry)
+    await applyAutoTheme(entry)
     entry.updatedAt = new Date().toISOString()
     await AppStore.save()
     notifyAppsChanged()
     return entry
   })
 
-  ipcMain.handle('wallpaper:reset', async (_e, appId: string) => {
+  handleIpc('wallpaper:reset', async (_e, appId: string) => {
     const store = await AppStore.load()
     const entry = requireApp(store, appId)
     for (const w of entry.wallpapers) await BgStore.remove(w.file)
@@ -191,7 +193,7 @@ export function registerWallpaperIpc(): void {
       entry.wallpapers.push({ id: randomUUID(), file: await BgStore.import(wallpaper), name: basename(wallpaper) })
     }
     entry.wallpaperIndex = 0
-    applyAutoTheme(entry)
+    await applyAutoTheme(entry)
     entry.updatedAt = new Date().toISOString()
     await AppStore.save()
     notifyAppsChanged()

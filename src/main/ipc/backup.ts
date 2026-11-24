@@ -1,4 +1,5 @@
-import { app, dialog, ipcMain } from 'electron'
+import { app, dialog } from 'electron'
+import { handleIpc } from './access'
 import { promises as fs } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -6,8 +7,13 @@ import { applyLauncherIcon } from '../services/appIcon'
 import { AppStore } from '../services/appStore'
 import { log } from '../services/logger'
 import { psQuote, runPowerShell } from '../services/powershell'
-import { broadcast, gacha, playTime } from './context'
-import { restoreBackup, stageBackup } from './util'
+import {
+  restoreSettingsBackup,
+  SettingsImportRecoveryError,
+  stageSettingsBackup
+} from '../services/settingsBackup'
+import { appUpdate, broadcast, gacha, playTime } from './context'
+import { requireDataRecovery, withExclusiveDataAccess } from './dataAccess'
 
 /**
  * Full settings backup / restore (config + playtime + gacha + icons/bg) as a
@@ -15,7 +21,7 @@ import { restoreBackup, stageBackup } from './util'
  * the user to confirm first.
  */
 export function registerBackupIpc(): void {
-  ipcMain.handle('data:export', async () => {
+  handleIpc('data:export', async () => {
     const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')
     const picked = await dialog.showSaveDialog({
       title: '导出设置',
@@ -26,7 +32,10 @@ export function registerBackupIpc(): void {
 
     const stage = await fs.mkdtemp(join(tmpdir(), 'kl-export-'))
     try {
-      await stageBackup(app.getPath('userData'), stage)
+      await AppStore.load()
+      await AppStore.save()
+      await Promise.all([playTime.flush(), gacha.flush()])
+      await stageSettingsBackup(app.getPath('userData'), stage)
       await runPowerShell(
         `Compress-Archive -Path ${psQuote(join(stage, '*'))} -DestinationPath ${psQuote(picked.filePath)} -Force`
       )
@@ -37,7 +46,7 @@ export function registerBackupIpc(): void {
     }
   })
 
-  ipcMain.handle('data:import', async () => {
+  handleIpc('data:import', async () => {
     const picked = await dialog.showOpenDialog({
       title: '导入设置',
       properties: ['openFile'],
@@ -51,12 +60,22 @@ export function registerBackupIpc(): void {
       await fs.copyFile(picked.filePaths[0], zip)
       const out = join(work, 'out')
       await runPowerShell(
-        `Expand-Archive -Path ${psQuote(zip)} -DestinationPath ${psQuote(out)} -Force`
+        `Expand-Archive -LiteralPath ${psQuote(zip)} -DestinationPath ${psQuote(out)} -Force`
       )
-      await restoreBackup(out, app.getPath('userData'))
-      await AppStore.reload()
-      await playTime.reload()
-      gacha.reload()
+      await withExclusiveDataAccess(async () => {
+        if (appUpdate.isRunning()) throw new Error('启动器正在更新，请完成后再导入数据')
+        await Promise.all([playTime.flush(), gacha.flush()])
+        try {
+          await restoreSettingsBackup(out, app.getPath('userData'), async () => {
+            await AppStore.reload()
+            await playTime.reload()
+            await gacha.reload()
+          })
+        } catch (error) {
+          if (error instanceof SettingsImportRecoveryError) requireDataRecovery()
+          throw error
+        }
+      })
       await applyLauncherIcon()
       broadcast('apps:changed')
       broadcast('playtime:changed')

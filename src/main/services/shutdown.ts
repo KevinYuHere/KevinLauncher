@@ -6,10 +6,12 @@
  * `app.relaunch() + app.exit(0)` paths in the update / data-dir flows, which do
  * not go through `before-quit`.
  */
+import { log } from './logger'
+
 type FlushFn = () => Promise<void> | void
 
 let flushHandler: FlushFn | null = null
-let flushed = false
+let flush: Promise<void> | undefined
 
 /** Register the shutdown handler (called once, from `registerIpc`). */
 export function onBeforeShutdown(handler: FlushFn): void {
@@ -17,12 +19,9 @@ export function onBeforeShutdown(handler: FlushFn): void {
 }
 
 /** Run the handler exactly once. Safe to call from several exit paths. */
-export async function flushBeforeShutdown(): Promise<void> {
-  if (flushed) return
-  flushed = true
-  try {
-    await flushHandler?.()
-  } catch {
-    /* never block exit on a flush failure */
-  }
+export function flushBeforeShutdown(): Promise<void> {
+  flush ??= Promise.resolve()
+    .then(() => flushHandler?.())
+    .catch((error) => log(`shutdown: could not flush user data (${String(error)})`))
+  return flush
 }

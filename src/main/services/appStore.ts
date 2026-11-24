@@ -14,7 +14,7 @@ import {
   isSpecialAreaId,
   isSpecialThemeId
 } from '@shared/specialTheme'
-import { BACKUP_DIR_NAME } from './dataBackup'
+import { BACKUP_DIR_NAME, PREVIOUS_BACKUP_DIR_NAME } from './dataDir'
 import { openJsonStore } from './jsonStore'
 import { configureRateLimit } from './rateLimit'
 import { log } from './logger'
@@ -60,6 +60,7 @@ export class AppStore {
   }
 
   static async load(): Promise<LauncherConfig> {
+    if (loading) return loading
     if (cache) return cache
     loading ??= AppStore.readConfig().finally(() => {
       loading = null
@@ -96,7 +97,8 @@ export class AppStore {
     if (config.apps.length > 0) return
     const sources = [
       `${this.file()}.corrupt`,
-      join(dirname(this.file()), BACKUP_DIR_NAME, 'config.json')
+      join(dirname(this.file()), BACKUP_DIR_NAME, 'config.json'),
+      join(dirname(this.file()), PREVIOUS_BACKUP_DIR_NAME, 'config.json')
     ]
     for (const source of sources) {
       let salvaged: LauncherConfig | undefined
@@ -129,8 +131,8 @@ export class AppStore {
 
   /** Drop the in-memory copy and read from disk again. */
   static async reload(): Promise<void> {
+    await loading
     cache = null
-    loading = null
     await this.load()
   }
 

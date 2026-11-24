@@ -8,12 +8,20 @@ import type { GachaGame } from '@shared/types'
 export interface GachaTypeDef {
   type: string
   name: string
+  /** A second display pool may share the same API result. */
+  displayOnly?: boolean
+}
+
+export type MiHoYoGame = Exclude<GachaGame, 'arknights'>
+
+interface HistoryEndpoints {
+  main: string
+  aliases?: string[]
 }
 
 export interface MiHoYoMeta {
-  /** Full `getGachaLog` endpoint (the captured URL's query is appended to it). */
-  apiHost: string
-  gameBiz: string
+  gameCode: string
+  history: { cn: HistoryEndpoints; overseas: HistoryEndpoints }
   /** Highest rarity value as reported by the API. */
   topRank: number
   /** Second highest rarity value (shown by all these games). */
@@ -28,21 +36,29 @@ export interface MiHoYoMeta {
   urlPrefixes: string[]
 }
 
-export const MIHOYO: Record<'genshin' | 'starrail' | 'zzz', MiHoYoMeta> = {
+export const MIHOYO: Record<MiHoYoGame, MiHoYoMeta> = {
   genshin: {
-    apiHost: 'https://public-operation-hk4e.mihoyo.com/gacha_info/api/getGachaLog',
-    gameBiz: 'hk4e_cn',
+    gameCode: 'hk4e',
+    history: {
+      cn: {
+        main: 'https://public-operation-hk4e.mihoyo.com/gacha_info/api/getGachaLog',
+        aliases: ['https://hk4e-api.mihoyo.com/event/gacha_info/api/getGachaLog']
+      },
+      overseas: {
+        main: 'https://public-operation-hk4e-sg.hoyoverse.com/gacha_info/api/getGachaLog'
+      }
+    },
     topRank: 5,
     secondRank: 4,
     gachaTypes: [
       { type: '100', name: '新手祈愿' },
       { type: '200', name: '常驻祈愿' },
       { type: '301', name: '角色活动祈愿' },
-      { type: '400', name: '角色活动祈愿-2' },
+      // These two character banners share one history query.
+      { type: '400', name: '角色活动祈愿-2', displayOnly: true },
       { type: '302', name: '武器活动祈愿' },
       { type: '500', name: '集录祈愿' }
     ],
-    // Starward only queries these five (400 shares 301's pool in practice).
     webCacheDirs: ['YuanShen_Data/webCaches', 'GenshinImpact_Data/webCaches'],
     urlPrefixes: [
       'https://webstatic.mihoyo.com/hk4e/event/e20190909gacha',
@@ -50,8 +66,17 @@ export const MIHOYO: Record<'genshin' | 'starrail' | 'zzz', MiHoYoMeta> = {
     ]
   },
   starrail: {
-    apiHost: 'https://public-operation-hkrpg.mihoyo.com/common/hkrpg_gacha_record/api/getGachaLog',
-    gameBiz: 'hkrpg_cn',
+    gameCode: 'hkrpg',
+    history: {
+      cn: {
+        main: 'https://public-operation-hkrpg.mihoyo.com/common/hkrpg_gacha_record/api/getGachaLog',
+        aliases: ['https://public-operation-hkrpg.mihoyo.com/common/gacha_record/api/getGachaLog']
+      },
+      overseas: {
+        main: 'https://public-operation-hkrpg-sg.hoyoverse.com/common/gacha_record/api/getGachaLog',
+        aliases: ['https://public-operation-hkrpg-sg.hoyoverse.com/common/hkrpg_gacha_record/api/getGachaLog']
+      }
+    },
     topRank: 5,
     secondRank: 4,
     gachaTypes: [
@@ -69,8 +94,11 @@ export const MIHOYO: Record<'genshin' | 'starrail' | 'zzz', MiHoYoMeta> = {
     ]
   },
   zzz: {
-    apiHost: 'https://public-operation-nap.mihoyo.com/common/gacha_record/api/getGachaLog',
-    gameBiz: 'nap_cn',
+    gameCode: 'nap',
+    history: {
+      cn: { main: 'https://public-operation-nap.mihoyo.com/common/gacha_record/api/getGachaLog' },
+      overseas: { main: 'https://public-operation-common-sg.hoyoverse.com/common/gacha_record/api/getGachaLog' }
+    },
     // ZZZ reports S=4, A=3, B=2.
     topRank: 4,
     secondRank: 3,
@@ -89,13 +117,6 @@ export const MIHOYO: Record<'genshin' | 'starrail' | 'zzz', MiHoYoMeta> = {
       'https://gs.hoyoverse.com/nap/event/e20230424gacha'
     ]
   }
-}
-
-/** Banner types actually requested from the API (mirrors Starward). */
-export const MIHOYO_QUERY_TYPES: Record<'genshin' | 'starrail' | 'zzz', string[]> = {
-  genshin: ['100', '200', '301', '302', '500'],
-  starrail: ['1', '2', '11', '12', '21', '22'],
-  zzz: ['1', '2', '3', '5', '102', '103']
 }
 
 export interface HypergryphMeta {

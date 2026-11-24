@@ -25,7 +25,7 @@ function runSchtasks(args: string[]): Promise<number> {
  * UAC prompt at every logon, while the task starts it elevated silently.
  * (The task is therefore only writable while the launcher runs elevated.)
  */
-export async function applyAutoStart(mode: AutoStartMode): Promise<void> {
+export async function applyAutoStart(mode: AutoStartMode, executable = process.execPath): Promise<void> {
   if (!app.isPackaged) {
     log(`autoStart: dev build, nothing applied (${mode})`)
     return
@@ -39,7 +39,7 @@ export async function applyAutoStart(mode: AutoStartMode): Promise<void> {
     }
     // Always recreate: keeps the path correct after an update or a reinstall.
     const command =
-      mode === 'tray' ? `"${process.execPath}" ${TRAY_START_ARG}` : `"${process.execPath}"`
+      mode === 'tray' ? `"${executable}" ${TRAY_START_ARG}` : `"${executable}"`
     const code = await runSchtasks([
       '/Create',
       '/F',
@@ -61,7 +61,7 @@ export async function applyAutoStart(mode: AutoStartMode): Promise<void> {
     // Fallback: the Run key (shows a UAC prompt at logon).
     app.setLoginItemSettings({
       openAtLogin: true,
-      path: process.execPath,
+      path: executable,
       args: mode === 'tray' ? [TRAY_START_ARG] : []
     })
     log(`autoStart: ${mode} (Run key fallback, schtasks exit ${code})`)

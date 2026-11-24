@@ -1,11 +1,12 @@
-import { dialog, ipcMain, shell } from 'electron'
+import { dialog, shell } from 'electron'
+import { handleIpc } from './access'
 import { promises as fs } from 'fs'
 import { extname } from 'path'
 import { currentAppVersion } from '../services/appVersion'
 import { iconDataFromPath, imageDataUrl } from './util'
 
 export function registerMediaIpc(): void {
-  ipcMain.handle('image:read', async (_e, path: string) => {
+  handleIpc('image:read', async (_e, path: string) => {
     try {
       return imageDataUrl(await fs.readFile(path), extname(path))
     } catch {
@@ -13,11 +14,11 @@ export function registerMediaIpc(): void {
     }
   })
 
-  ipcMain.handle('image:iconFromPath', (_e, path: string) => iconDataFromPath(path))
+  handleIpc('image:iconFromPath', (_e, path: string) => iconDataFromPath(path))
 
-  ipcMain.handle('app:version', () => currentAppVersion())
+  handleIpc('app:version', () => currentAppVersion())
 
-  ipcMain.handle('dialog:pickExecutable', async () => {
+  handleIpc('dialog:pickExecutable', async () => {
     const result = await dialog.showOpenDialog({
       properties: ['openFile'],
       filters: [
@@ -28,7 +29,7 @@ export function registerMediaIpc(): void {
     return result.canceled ? null : result.filePaths[0]
   })
 
-  ipcMain.handle('dialog:pickBackground', async () => {
+  handleIpc('dialog:pickBackground', async () => {
     const result = await dialog.showOpenDialog({
       properties: ['openFile'],
       filters: [
@@ -38,7 +39,7 @@ export function registerMediaIpc(): void {
     return result.canceled ? null : result.filePaths[0]
   })
 
-  ipcMain.handle('dialog:pickImage', async () => {
+  handleIpc('dialog:pickImage', async () => {
     const result = await dialog.showOpenDialog({
       properties: ['openFile'],
       filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'ico'] }]
@@ -47,7 +48,7 @@ export function registerMediaIpc(): void {
   })
 
   // Icon source: an image, or an exe/bat/cmd/ps1/lnk whose icon we extract.
-  ipcMain.handle('dialog:pickIconSource', async () => {
+  handleIpc('dialog:pickIconSource', async () => {
     const result = await dialog.showOpenDialog({
       properties: ['openFile'],
       filters: [
@@ -64,17 +65,17 @@ export function registerMediaIpc(): void {
     return dataUrl ? { path, dataUrl } : null
   })
 
-  ipcMain.handle('dialog:pickDirectory', async () => {
+  handleIpc('dialog:pickDirectory', async () => {
     const result = await dialog.showOpenDialog({ properties: ['openDirectory'] })
     return result.canceled ? null : result.filePaths[0]
   })
 
-  ipcMain.handle('shell:openPath', async (_e, path: string) => {
+  handleIpc('shell:openPath', async (_e, path: string) => {
     await shell.openPath(path)
   })
 
   // Only http(s) links may be opened externally (never file:// or custom schemes).
-  ipcMain.handle('shell:openExternal', async (_e, url: string) => {
+  handleIpc('shell:openExternal', async (_e, url: string) => {
     if (/^https?:\/\//i.test(url)) await shell.openExternal(url)
   })
 }

@@ -22,7 +22,6 @@ export default function Installer(): ReactElement | null {
   const [step, setStep] = useState<Step>('location')
   const [progress, setProgress] = useState<InstallerProgress | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [elevating, setElevating] = useState(false)
 
   useEffect(() => {
     void window.api.installerInfo().then((data) => {
@@ -58,27 +57,12 @@ export default function Installer(): ReactElement | null {
     setError(null)
     setStep('progress')
     try {
-      const done = await window.api.installerRun(dir, dataDir)
-      // `false` means the installer restarted itself elevated (UAC) and this
-      // process is about to exit.
-      if (done) setStep('done')
-      else setElevating(true)
+      await window.api.installerRun(dir, dataDir)
+      setStep('done')
     } catch (e) {
       setError((e as Error).message)
       setStep('location')
     }
-  }
-
-  if (elevating) {
-    return (
-      <div className="setup">
-        <Aurora />
-        <div className="setup-center">
-          <div className="setup-title-lg">正在请求管理员权限…</div>
-          <div className="setup-sub">允许后安装将继续进行</div>
-        </div>
-      </div>
-    )
   }
 
   const percent =

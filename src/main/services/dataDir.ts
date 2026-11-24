@@ -1,9 +1,12 @@
 import { app } from 'electron'
-import { execFile, execFileSync } from 'child_process'
+import { execFile } from 'child_process'
 import { promises as fs } from 'fs'
-import { join } from 'path'
-import { flushBeforeShutdown } from './shutdown'
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'path'
+import { directoriesOverlap, GAME_FILE_CATALOG_NAME } from '@shared/paths'
+import { loadJsonSafe, writeFileAtomic } from './atomicFile'
+import { createSiblingWorkspace, isFileSystemRoot } from './directoryPath'
 import { log } from './logger'
+import { runPowerShellSync } from './powershell'
 
 /**
  * Where the launcher keeps its data (`config.json`, playtime, gacha, icons …).
@@ -17,6 +20,11 @@ import { log } from './logger'
  */
 
 const APP_KEY = 'HKCU\\Software\\KevinLauncher'
+export const BACKUP_DIR_NAME = 'update-backup'
+export const PREVIOUS_BACKUP_DIR_NAME = `${BACKUP_DIR_NAME}.previous`
+// The index is a regenerable cache, but can be kept when moving a quiescent
+// data directory. An update backup must not copy the database and WAL apart.
+const GAME_FILE_INDEX = new Set([GAME_FILE_CATALOG_NAME, `${GAME_FILE_CATALOG_NAME}-wal`])
 
 /** Default data directory (`%APPDATA%\kevin-launcher`). */
 export function defaultDataDir(): string {
@@ -31,12 +39,10 @@ export function currentDataDir(): string {
 /** Reads the configured directory from the registry (synchronous, pre-ready). */
 export function storedDataDir(): string | null {
   try {
-    const output = execFileSync('reg', ['query', APP_KEY, '/v', 'DataDir'], {
-      windowsHide: true,
-      encoding: 'utf8'
-    })
-    const value = /DataDir\s+REG_\w+\s+(.+)/i.exec(output)?.[1]?.trim()
-    return value && /^[a-zA-Z]:\\/.test(value) ? value : null
+    const value = runPowerShellSync(
+      `$key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\\KevinLauncher'); if ($key) { $key.GetValue('DataDir') }`
+    ).trim()
+    return isAbsolute(value) ? value : null
   } catch {
     return null
   }
@@ -107,6 +113,7 @@ const TRANSIENT_ENTRIES = new Set([
   'logs',
   'update-staging',
   'thumbs',
+  'hoyo-cache',
   'predownload'
 ])
 
@@ -118,9 +125,13 @@ export function isTransientEntry(name: string): boolean {
     lower.endsWith('.log') ||
     lower.startsWith('simulate.') ||
     lower.startsWith('singleton') ||
+    lower.startsWith('import-staging') ||
+    lower.startsWith('update-pkg-') ||
+    GAME_FILE_INDEX.has(lower) ||
+    lower === `${GAME_FILE_CATALOG_NAME}-shm` ||
     // The pre-update backup slot (and its in-progress `.new`) are never part of
     // the data being migrated / backed up.
-    lower.startsWith('update-backup')
+    lower.startsWith(BACKUP_DIR_NAME)
   )
 }
 
@@ -132,72 +143,203 @@ export function isTransientEntry(name: string): boolean {
 export async function migrateData(
   from: string,
   to: string,
-  onSkip?: (name: string) => void
-): Promise<{ copied: number; failed: number }> {
+  options: { includeSnapshots?: boolean; merge?: boolean } = {}
+): Promise<{ copied: number; failed: number; firstFailure?: string }> {
   if (from.toLowerCase() === to.toLowerCase()) return { copied: 0, failed: 0 }
   let copied = 0
   let failed = 0
+  let firstFailure: string | undefined
   const walk = async (dir: string, target: string, top: boolean): Promise<void> => {
     await fs.mkdir(target, { recursive: true })
     for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
-      if (top && isTransientEntry(entry.name)) continue
+      if (top && isTransientEntry(entry.name) &&
+        !(options.includeSnapshots && (
+          [BACKUP_DIR_NAME, PREVIOUS_BACKUP_DIR_NAME].includes(entry.name) ||
+          GAME_FILE_INDEX.has(entry.name.toLowerCase())
+        ))) continue
+      if (entry.isFile() && entry.name.endsWith('.tmp')) continue
       const source = join(dir, entry.name)
       const destination = join(target, entry.name)
       try {
+        if (options.merge) {
+          const existing = await fs.lstat(destination).catch((error: NodeJS.ErrnoException) => {
+            if (error.code !== 'ENOENT') throw error
+            return null
+          })
+          if (existing && (
+            (!entry.isDirectory() || !existing.isDirectory()) &&
+            (!entry.isFile() || !existing.isFile())
+          )) {
+            throw new Error(`目标已存在不同类型的同名项目：${relative(to, destination)}`)
+          }
+        }
         if (entry.isDirectory()) await walk(source, destination, false)
         else if (entry.isFile()) {
           await fs.copyFile(source, destination)
           copied++
-        }
+        } else throw new Error('unsupported file type')
       } catch (error) {
         failed++
-        onSkip?.(entry.name)
+        firstFailure ??= (error as Error).message
         log(`dataDir: could not copy ${entry.name} (${(error as Error).message})`)
       }
     }
   }
   await walk(from, to, true)
-  return { copied, failed }
+  return { copied, failed, firstFailure }
 }
 
-/** True when `dir` holds an existing launcher configuration. */
+/** A reachable config must also be readable and structurally usable. */
 export async function hasData(dir: string): Promise<boolean> {
+  const result = await loadJsonSafe<{ apps?: unknown } | null>(join(dir, 'config.json'))
+  return result.status === 'ok' && Array.isArray(result.value?.apps)
+}
+
+/** Resolve existing ancestors too, so junctions cannot disguise overlapping paths. */
+export async function realDirectoryPath(path: string): Promise<string> {
+  if (!isAbsolute(path)) throw new Error('请选择绝对路径')
+  const canonical = resolve(path)
   try {
-    await fs.access(join(dir, 'config.json'))
-    return true
-  } catch {
-    return false
+    return await fs.realpath(canonical)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    if (isFileSystemRoot(canonical)) throw error
+    const parent = dirname(canonical)
+    return join(await realDirectoryPath(parent), basename(canonical))
   }
 }
 
-/**
- * Seed a *fresh* data directory from the default one.
- *
- * A re-run of the installer points `target` at the directory the launcher is
- * already using; the default directory may still exist from an earlier install
- * (and hold older data). Migrating it over the target in that case would
- * silently destroy the newer data (this wiped play-time history once), so the
- * existing target is always kept as-is.
- */
+function assertMovableDataPath(path: string): void {
+  if (isFileSystemRoot(path)) throw new Error('不能将磁盘或共享目录的根目录用作数据目录')
+}
+
+async function movableDataPath(path: string): Promise<string> {
+  assertMovableDataPath(path)
+  const canonical = await realDirectoryPath(path)
+  assertMovableDataPath(canonical)
+  return canonical
+}
+
+type CommitDataDirectory = (directory: string) => Promise<void>
+
+/** Merge in a sibling workspace; the source stays authoritative until commit. */
+export async function migrateDataDirectory(
+  from: string,
+  to: string,
+  commit: CommitDataDirectory,
+  preparation: {
+    beforeCopy?: () => Promise<void>
+    beforePublish?: (stage: string) => Promise<void>
+  } = {}
+): Promise<number> {
+  const source = await movableDataPath(from)
+  const target = await movableDataPath(to)
+  if (directoriesOverlap(source, target)) throw new Error('新旧数据目录不能相同或互相包含')
+  const canCleanSource = resolve(from).toLowerCase() === source.toLowerCase()
+  const targetExists = await fs.stat(target).then((stat) => {
+    if (!stat.isDirectory()) throw new Error('目标路径不是目录')
+    return true
+  }).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== 'ENOENT') throw error
+    return false
+  })
+  await preparation.beforeCopy?.()
+  const work = await createSiblingWorkspace(target, '.kevin-data-move-')
+  const stage = join(work, 'next')
+  const previous = join(work, 'previous')
+  let originalSaved = false
+  let stagedPublished = false
+  let preserveWork = false
+  try {
+    if (!(await hasData(source))) {
+      throw new Error('源配置读取失败，已保留原数据目录')
+    }
+    if (targetExists) {
+      await fs.cp(target, stage, { recursive: true, verbatimSymlinks: true, preserveTimestamps: true })
+    }
+    const { copied, failed, firstFailure } = await migrateData(source, stage, {
+      includeSnapshots: true, merge: targetExists
+    })
+    if (failed) {
+      throw new Error(`复制失败，已保留原数据目录（${firstFailure}）`)
+    }
+    if (!copied || !(await hasData(stage))) {
+      throw new Error('数据复制不完整或配置读取失败，已保留原数据目录')
+    }
+    await preparation.beforePublish?.(stage)
+    if (targetExists) {
+      await fs.rename(target, previous)
+      originalSaved = true
+    }
+    await fs.rename(stage, target)
+    stagedPublished = true
+    await commit(target)
+    if (canCleanSource) {
+      await fs.rm(source, { recursive: true, force: true }).catch((error) => {
+        log(`dataDir: could not remove the old directory (${String(error)})`)
+      })
+    } else {
+      log('dataDir: retained the original data behind a reparse point')
+    }
+    return copied
+  } catch (error) {
+    try {
+      if (stagedPublished) await fs.rename(target, stage)
+      if (originalSaved) await fs.rename(previous, target)
+    } catch (rollback) {
+      preserveWork = true
+      log(`dataDir: could not roll back ${target} (${String(rollback)})`)
+      const retained = originalSaved ? previous : target
+      throw new Error(`无法立即恢复目标目录，已保留文件于 ${retained}。迁移失败原因：${String(error)}`)
+    }
+    throw error
+  } finally {
+    if (!preserveWork) await fs.rm(work, { recursive: true, force: true }).catch((error) => {
+      log(`dataDir: could not remove the migration workspace (${String(error)})`)
+    })
+  }
+}
+
+/** Seed a fresh installer-selected directory; retain an existing, usable config. */
 export async function seedDataDir(
   target: string,
-  fallback: string
+  fallback: string,
+  commit: CommitDataDirectory = async () => {}
 ): Promise<{ copied: number; failed: number; keptExisting: boolean }> {
-  if (target.toLowerCase() === fallback.toLowerCase()) {
+  const destination = await movableDataPath(target)
+  const source = await realDirectoryPath(fallback)
+  if (source.toLowerCase() === destination.toLowerCase()) {
+    await commit(destination)
     return { copied: 0, failed: 0, keptExisting: false }
   }
-  // The chosen directory already holds the user's data — never overwrite it.
-  if (await hasData(target)) return { copied: 0, failed: 0, keptExisting: true }
-  if (!(await hasData(fallback))) return { copied: 0, failed: 0, keptExisting: false }
-
-  const { copied, failed } = await migrateData(fallback, target)
-  // Only remove the old directory when everything arrived and the new one is
-  // verifiably usable.
-  if (failed === 0 && copied > 0 && (await hasData(target))) {
-    await fs.rm(fallback, { recursive: true, force: true }).catch(() => undefined)
-    log(`dataDir: removed the default data directory ${fallback}`)
+  if (directoriesOverlap(source, destination)) throw new Error('新旧数据目录不能互相包含')
+  if (await hasData(destination)) {
+    await commit(destination)
+    return { copied: 0, failed: 0, keptExisting: true }
   }
-  return { copied, failed, keptExisting: false }
+  const config = await fs.lstat(join(source, 'config.json')).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== 'ENOENT') throw error
+    return null
+  })
+  if (!config) {
+    const files = await fs.readdir(source).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== 'ENOENT') throw error
+      return []
+    })
+    if (files.some((name) => !isTransientEntry(name))) {
+      throw new Error('当前目录有数据但缺少配置，已保留原目录')
+    }
+    await fs.mkdir(destination, { recursive: true })
+    const incoming = await fs.lstat(join(destination, 'config.json')).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== 'ENOENT') throw error
+      return null
+    })
+    if (incoming) throw new Error('目标配置无法读取，已保留原目录')
+    await commit(destination)
+    return { copied: 0, failed: 0, keptExisting: false }
+  }
+  const copied = await migrateDataDirectory(fallback, destination, commit)
+  return { copied, failed: 0, keptExisting: false }
 }
 
 /**
@@ -207,25 +349,39 @@ export async function seedDataDir(
  */
 export async function switchDataDir(
   target: string,
+  checkpoint: () => Promise<void>,
   onProgress?: (step: string) => void
 ): Promise<void> {
   const from = currentDataDir()
-  await fs.mkdir(target, { recursive: true })
+  if (resolve(from).toLowerCase() === resolve(target).toLowerCase()) return
   onProgress?.(`正在迁移数据到 ${target}…`)
-  const { copied, failed } = await migrateData(from, target)
-  await writeDataDir(target)
-  log(`dataDir: switched to ${target} (${copied} copied, ${failed} failed)`)
-
-  if (failed === 0 && copied > 0 && (await hasData(target))) {
+  await migrateDataDirectory(from, target, async (destination) => {
+    await writeDataDir(destination)
+    log(`dataDir: switched to ${destination}`)
     onProgress?.('正在清理旧目录…')
-    await fs.rm(from, { recursive: true, force: true }).catch((error) => {
-      log(`dataDir: could not remove the old directory (${(error as Error).message})`)
-    })
-  } else if (failed > 0) {
-    log(`dataDir: keeping ${from} because ${failed} file(s) could not be copied`)
-  }
-
-  await flushBeforeShutdown()
+  }, {
+    beforeCopy: checkpoint,
+    beforePublish: async (stage) => {
+      // A large wallpaper copy can take time. Capture the last segment before
+      // publishing and carry the final playtime store into the staged directory.
+      await checkpoint()
+      const name = 'playtime.json'
+      const source = join(from, name)
+      const target = join(stage, name)
+      const saved = await fs.readFile(source).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== 'ENOENT') throw error
+        return null
+      })
+      if (saved) {
+        const previous = await fs.lstat(target).catch((error: NodeJS.ErrnoException) => {
+          if (error.code !== 'ENOENT') throw error
+          return null
+        })
+        if (previous && !previous.isFile()) throw new Error(`目标存在同名的目录或链接：${name}`)
+        await writeFileAtomic(target, saved)
+      }
+    }
+  })
   app.relaunch()
   app.exit(0)
 }
@@ -235,8 +391,10 @@ export async function switchDataDir(
  * that, so the data never lands directly in a drive root.
  */
 export function normalizeDataDir(dir: string): string {
-  const trimmed = dir.trim().replace(/[\\/]+$/, '')
+  const selected = dir.trim()
+  const trimmed = selected.replace(/[\\/]+$/, '')
   if (!trimmed) return join(app.getPath('appData'), 'KevinLauncherData')
+  if (isFileSystemRoot(selected)) return join(selected, 'KevinLauncherData')
   if (/^[a-zA-Z]:$/.test(trimmed)) return join(`${trimmed}\\`, 'KevinLauncherData')
   if (/(^|[\\/])KevinLauncherData$/i.test(trimmed)) return trimmed
   return join(trimmed, 'KevinLauncherData')

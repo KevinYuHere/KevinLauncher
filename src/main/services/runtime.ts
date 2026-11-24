@@ -16,6 +16,8 @@ interface TrackedEntry {
   createdAt: number
   /** When the app was actually observed running; the play session starts here. */
   startedAt: string
+  /** End of the last persisted segment while this process was still tracked. */
+  settledAt: string
   /** Pids we consider part of the running app (root + descendants + monitored). */
   pids: Set<number>
   /** Optional process names to watch (for shortcut / elevated / script launches). */
@@ -42,6 +44,7 @@ export class Runtime {
   private readonly running = new Map<string, TrackedEntry>()
   private readonly scanner = new ProcessScanner()
   private timer: NodeJS.Timeout | null = null
+  private pollingPaused = false
   private readonly listeners = new Set<() => void>()
   private sessionListener: ((record: PlaySessionRecord) => void) | null = null
 
@@ -62,12 +65,19 @@ export class Runtime {
   /** Stop tracking an entry, optionally recording its play session. */
   private endEntry(entry: TrackedEntry, record: boolean): void {
     this.running.delete(entry.appId)
-    if (!record || !entry.recordSession) return
-    const endUtc = new Date().toISOString()
-    const durationSec = Math.round((Date.now() - new Date(entry.startedAt).getTime()) / 1000)
-    if (this.sessionListener && durationSec > 0) {
-      this.sessionListener({ appId: entry.appId, startUtc: entry.startedAt, endUtc, durationSec })
-    }
+    if (!record) return
+    const segment = this.settleSession(entry, Date.now())
+    if (segment) this.sessionListener?.(segment)
+  }
+
+  private settleSession(entry: TrackedEntry, end: number): PlaySessionRecord | null {
+    if (!entry.armed || !entry.recordSession) return null
+    const durationSec = Math.round((end - new Date(entry.settledAt).getTime()) / 1000)
+    if (durationSec <= 0) return null
+    const startUtc = entry.settledAt
+    const endUtc = new Date(end).toISOString()
+    entry.settledAt = endUtc
+    return { appId: entry.appId, startUtc, endUtc, durationSec }
   }
 
   /**
@@ -82,12 +92,14 @@ export class Runtime {
     recordSession = true
   ): void {
     const now = Date.now()
+    const startedAt = new Date(now).toISOString()
     const entry: TrackedEntry = {
       appId,
       rootPid,
       elevated,
       createdAt: now,
-      startedAt: new Date(now).toISOString(),
+      startedAt,
+      settledAt: startedAt,
       pids: new Set(rootPid ? [rootPid] : []),
       monitor: new Set(monitorNames.map((n) => n.toLowerCase()).filter(Boolean)),
       armed: rootPid !== null,
@@ -137,21 +149,28 @@ export class Runtime {
   }
 
   /**
-   * Ends every tracked session and returns the records. Called on shutdown so a
-   * game still running when the launcher exits is not silently dropped.
+   * Record elapsed time without losing tracking when a data move is retried.
    */
-  endAll(): PlaySessionRecord[] {
+  checkpointSessions(): PlaySessionRecord[] {
     const records: PlaySessionRecord[] = []
-    for (const entry of [...this.running.values()]) {
-      this.running.delete(entry.appId)
-      if (!entry.armed || !entry.recordSession) continue
-      const endUtc = new Date().toISOString()
-      const durationSec = Math.round((Date.now() - new Date(entry.startedAt).getTime()) / 1000)
-      if (durationSec > 0) {
-        records.push({ appId: entry.appId, startUtc: entry.startedAt, endUtc, durationSec })
-      }
+    const end = Date.now()
+    for (const entry of this.running.values()) {
+      const segment = this.settleSession(entry, end)
+      if (segment) records.push(segment)
     }
     return records
+  }
+
+  /** Close running sessions at the shutdown boundary. */
+  endAll(): PlaySessionRecord[] {
+    const records = this.checkpointSessions()
+    this.running.clear()
+    return records
+  }
+
+  pausePolling(): () => void {
+    this.pollingPaused = true
+    return () => { this.pollingPaused = false }
   }
 
   dispose(): void {
@@ -168,6 +187,7 @@ export class Runtime {
   }
 
   private async tick(): Promise<void> {
+    if (this.pollingPaused) return
     if (this.running.size === 0) {
       if (this.timer) clearInterval(this.timer)
       this.timer = null
@@ -180,6 +200,7 @@ export class Runtime {
     } catch {
       return
     }
+    if (this.pollingPaused) return
 
     const alive = new Set(snapshot.map((p) => p.pid))
     const nameToPids = new Map<string, number[]>()
@@ -221,6 +242,7 @@ export class Runtime {
       if (!entry.armed && entry.pids.size > 0) {
         entry.armed = true
         entry.startedAt = new Date().toISOString()
+        entry.settledAt = entry.startedAt
         changed = true
       }
 

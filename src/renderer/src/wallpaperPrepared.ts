@@ -1,110 +1,42 @@
-/**
- * Display-resolution wallpaper cache.
- *
- * A wallpaper can be far larger than the window (an 8K illustration in a 2K
- * window). Decoding and downscaling it on the renderer thread froze the UI when
- * switching to that app, and every switch repeated the work. This module:
- *
- * - prepares the image **once** in a worker (`wallpaperPrepWorker.ts`), so the
- *   renderer never decodes the full-size image or blocks;
- * - caches the prepared `blob:` URL per source + target size, so switching back
- *   commits instantly (no decode at all).
- */
-
 import { perf } from './perfProbe'
 
 export interface PreparedWallpaper {
-  url: string
-  width: number
-  height: number
+  readonly url: string
+  readonly width: number
+  readonly height: number
+  retain(): void
+  release(): void
 }
 
-/** How many prepared wallpapers to keep (each is ~1 MB of WebP). */
+const FORMAT_VERSION = 3
 const CACHE_MAX = 6
-
-/**
- * Bump when the preparation algorithm changes (e.g. the crop semantics), so
- * persisted images from an older build are not reused.
- */
-const FORMAT_VERSION = 2
-
 const cache = new Map<string, PreparedWallpaper>()
-/** Keys known to need no work: the caller should use the original URL. */
-const rawKeys = new Set<string>()
 const pending = new Map<string, Promise<PreparedWallpaper | null>>()
-
-interface WorkerReply {
-  key: string
-  blob?: Blob
-  width?: number
-  height?: number
-  raw?: boolean
-  error?: string
-}
-
-interface WorkerScope {
-  postMessage: (message: unknown, transfer?: Transferable[]) => void
-  onmessage: ((event: MessageEvent) => void) | null
-  onerror: ((event: ErrorEvent) => void) | null
-}
-
+const requests = new Map<string, (value: StoredPrepared | null) => void>()
 let worker: Worker | null = null
-let workerBroken = false
-const resolvers = new Map<string, (value: PreparedWallpaper | null) => void>()
 
-function ensureWorker(): Worker | null {
-  if (worker || workerBroken) return worker
-  try {
+function prepareInWorker(key: string, url: string, cssWidth: number, cssHeight: number, dpr: number): Promise<StoredPrepared | null> {
+  if (!worker) {
     worker = new Worker(new URL('./wallpaperPrepWorker.ts', import.meta.url), { type: 'module' })
-    const scope = worker as unknown as WorkerScope
-    scope.onmessage = (event: MessageEvent): void => {
-      const reply = event.data as WorkerReply
-      const resolve = resolvers.get(reply.key)
-      resolvers.delete(reply.key)
-      if (!resolve) return
-      if (reply.error || !reply.blob) {
-        resolve(null)
-        return
-      }
-      const width = reply.width ?? 0
-      const height = reply.height ?? 0
-      const prepared: PreparedWallpaper = {
-        url: URL.createObjectURL(reply.blob),
-        width,
-        height
-      }
-      remember(reply.key, prepared)
-      void idbPut(reply.key, { t: Date.now(), blob: reply.blob, width, height })
-      resolve(prepared)
+    worker.onmessage = ({ data }) => {
+      const resolve = requests.get(data.key)
+      requests.delete(data.key)
+      resolve?.(data.blob ? { blob: data.blob, width: data.width, height: data.height, t: Date.now() } : null)
     }
-    scope.onerror = (): void => {
-      workerBroken = true
-      for (const resolve of resolvers.values()) resolve(null)
-      resolvers.clear()
-      pending.clear()
+    worker.onerror = () => {
+      worker?.terminate()
+      worker = null
+      for (const resolve of requests.values()) resolve(null)
+      requests.clear()
     }
-  } catch {
-    workerBroken = true
-    worker = null
   }
-  return worker
+  return new Promise(resolve => {
+    requests.set(key, resolve)
+    try { worker!.postMessage({ key, url, cssWidth, cssHeight, dpr }) }
+    catch { requests.delete(key); resolve(null) }
+  })
 }
 
-function remember(key: string, prepared: PreparedWallpaper): void {
-  cache.set(key, prepared)
-  // Bound memory; the URL of an evicted entry is left alive because it may still
-  // be the image on screen (blob URLs die with the page anyway).
-  while (cache.size > CACHE_MAX) {
-    const oldest = cache.keys().next().value
-    if (oldest === undefined) break
-    cache.delete(oldest)
-  }
-}
-
-// ---------------------------------------------------------------- IndexedDB
-// The prepared image is persisted so a launcher restart (or a window resize
-// that hits an already-rendered size) does not need to decode the huge source
-// again.
 interface StoredPrepared {
   t: number
   blob: Blob
@@ -129,8 +61,9 @@ function openDb(): Promise<IDBDatabase | null> {
         if (request.result.objectStoreNames.contains(STORE)) {
           request.result.deleteObjectStore(STORE)
         }
-        request.result.createObjectStore(STORE)
+        request.result.createObjectStore(STORE).createIndex('age', 't')
       }
+      request.onblocked = () => resolve(null)
       request.onsuccess = () => resolve(request.result)
       request.onerror = () => resolve(null)
     } catch {
@@ -157,121 +90,85 @@ async function idbGet(key: string): Promise<StoredPrepared | null> {
   })
 }
 
-async function idbPrune(db: IDBDatabase): Promise<void> {
-  try {
-    const store = db.transaction(STORE, 'readwrite').objectStore(STORE)
-    const keys = await new Promise<IDBValidKey[]>((resolve) => {
-      const request = store.getAllKeys()
-      request.onsuccess = () => resolve(request.result)
-      request.onerror = () => resolve([])
-    })
-    if (keys.length <= MAX_STORED) return
-    for (const key of keys.slice(0, keys.length - MAX_STORED)) store.delete(key)
-  } catch {
-    /* best effort */
-  }
-}
-
 async function idbPut(key: string, value: StoredPrepared): Promise<void> {
   const db = await openDb()
   if (!db) return
   try {
     const store = db.transaction(STORE, 'readwrite').objectStore(STORE)
     store.put(value, key)
-    void idbPrune(db)
+    const count = store.count()
+    count.onsuccess = () => {
+      let excess = count.result - MAX_STORED
+      if (excess <= 0) return
+      const oldest = store.index('age').openKeyCursor()
+      oldest.onsuccess = () => {
+        const cursor = oldest.result
+        if (!cursor || excess <= 0) return
+        store.delete(cursor.primaryKey)
+        excess--
+        cursor.continue()
+      }
+    }
   } catch {
     /* cache is best effort */
   }
 }
 
-function fromStored(key: string, value: StoredPrepared): PreparedWallpaper {
-  const prepared: PreparedWallpaper = {
-    url: URL.createObjectURL(value.blob),
-    width: value.width,
-    height: value.height
+export function wallpaperCacheKey(url: string, cssWidth: number, cssHeight: number, dpr: number): string {
+  return 'v' + FORMAT_VERSION + '|' + url + '|' + Math.round(cssWidth) + 'x' + Math.round(cssHeight) + '@' + Math.round(dpr * 100) / 100
+}
+
+function touch(key: string): PreparedWallpaper | undefined {
+  const value = cache.get(key)
+  if (value) { cache.delete(key); cache.set(key, value) }
+  return value
+}
+
+async function materialize(value: StoredPrepared): Promise<PreparedWallpaper> {
+  const url = URL.createObjectURL(value.blob)
+  // Keep the display-sized bitmap decoded on warm switches. Cache and visible
+  // consumers own separate references so eviction cannot invalidate a live image.
+  const image = new Image()
+  image.src = url
+  try { await image.decode() }
+  catch (error) { URL.revokeObjectURL(url); throw error }
+  let references = 1
+  return {
+    url, width: value.width, height: value.height,
+    retain() { references++ },
+    release() {
+      if (--references === 0) { image.removeAttribute('src'); URL.revokeObjectURL(url) }
+    }
   }
-  remember(key, prepared)
-  return prepared
 }
 
-export function wallpaperCacheKey(
-  url: string,
-  cssWidth: number,
-  cssHeight: number,
-  dpr: number
-): string {
-  return `v${FORMAT_VERSION}|${url}|${Math.round(cssWidth)}x${Math.round(cssHeight)}@${Math.round(dpr * 100) / 100}`
-}
-
-export interface PeekResult {
-  /** `true` when the answer is known synchronously (cached or no work needed). */
-  hit: boolean
-  /** Prepared image, or `null` meaning "use the original URL". */
-  value: PreparedWallpaper | null
-}
-
-/** Synchronous cache lookup; used to commit a cached wallpaper immediately. */
-export function peekPreparedWallpaper(
-  url: string,
-  cssWidth: number,
-  cssHeight: number,
-  dpr: number
-): PeekResult {
+export function prepareWallpaperForDisplay(url: string, cssWidth: number, cssHeight: number, dpr: number): Promise<PreparedWallpaper | null> {
   const key = wallpaperCacheKey(url, cssWidth, cssHeight, dpr)
-  const cached = cache.get(key)
-  if (cached) return { hit: true, value: cached }
-  if (rawKeys.has(key)) return { hit: true, value: null }
-  return { hit: false, value: null }
-}
-
-/**
- * Prepare a wallpaper for display. Resolves to the downscaled image, or `null`
- * when the source needs no downscale (or preparation failed) — the caller then
- * keeps using the original URL.
- */
-export function prepareWallpaperForDisplay(
-  url: string,
-  cssWidth: number,
-  cssHeight: number,
-  dpr: number
-): Promise<PreparedWallpaper | null> {
-  const key = wallpaperCacheKey(url, cssWidth, cssHeight, dpr)
-  const cached = cache.get(key)
+  const cached = touch(key)
   if (cached) return Promise.resolve(cached)
-  if (rawKeys.has(key)) return Promise.resolve(null)
-  const existing = pending.get(key)
-  if (existing) return existing
-
-  const job = (async (): Promise<PreparedWallpaper | null> => {
-    // Persisted prepared image first: no fetch, no decode of the huge source.
-    const stored = await idbGet(key)
-    if (stored) {
-      perf('wp-idb-hit')
-      return fromStored(key, stored)
+  const previous = pending.get(key)
+  if (previous) return previous
+  const job = (async () => {
+    // Imported backgrounds have immutable filenames. The system desktop image
+    // may be replaced in place between launches.
+    const persistent = !url.startsWith('kevin-media://file/')
+    const stored = persistent ? await idbGet(key) : null
+    let result = stored ? await materialize(stored).catch(() => null) : null
+    if (!result) {
+      const value = await prepareInWorker(key, url, cssWidth, cssHeight, dpr)
+      if (!value) return null
+      result = await materialize(value)
+      if (persistent) void idbPut(key, value)
     }
-    const instance = ensureWorker()
-    if (!instance) return null
-    try {
-      const started = performance.now()
-      const response = await fetch(url)
-      if (!response.ok) return null
-      const buffer = await response.arrayBuffer()
-      perf('wp-fetch', { ms: Math.round(performance.now() - started), bytes: buffer.byteLength })
-      const type = response.headers.get('content-type') ?? 'image/png'
-      return await new Promise<PreparedWallpaper | null>((resolve) => {
-        resolvers.set(key, (value) => {
-          perf('wp-prepared', { ok: !!value, ms: Math.round(performance.now() - started) })
-          if (value === null) rawKeys.add(key)
-          resolve(value)
-        })
-        instance.postMessage({ key, buffer, type, cssWidth, cssHeight, dpr }, [buffer])
-      })
-    } catch {
-      return null
+    perf(stored ? 'wp-idb-hit' : 'wp-prepared', { width: result.width, height: result.height })
+    cache.set(key, result)
+    while (cache.size > CACHE_MAX) {
+      const oldest = cache.entries().next().value!
+      cache.delete(oldest[0])
+      oldest[1].release()
     }
-  })()
+    return result
+  })().catch(() => null).finally(() => pending.delete(key))
   pending.set(key, job)
-  return job.finally(() => {
-    pending.delete(key)
-  })
+  return job
 }

@@ -1,4 +1,4 @@
-import { ipcMain } from 'electron'
+import { handleIpc } from './access'
 import { randomUUID } from 'crypto'
 import type { LinkedLaunch } from '@shared/types'
 import { AppStore } from '../services/appStore'
@@ -7,9 +7,9 @@ import { notifyAppsChanged } from './context'
 
 /** Launcher-wide "linked launches": one file that starts several apps. */
 export function registerLinkedLaunchIpc(): void {
-  ipcMain.handle('linked:list', () => AppStore.linkedLaunches())
+  handleIpc('linked:list', () => AppStore.linkedLaunches())
 
-  ipcMain.handle(
+  handleIpc(
     'linked:add',
     async (_e, input: Omit<LinkedLaunch, 'id'> & { id?: string; showInGamesRow?: boolean }) => {
       const list = await AppStore.linkedLaunches()
@@ -30,7 +30,7 @@ export function registerLinkedLaunchIpc(): void {
     }
   )
 
-  ipcMain.handle('linked:update', async (_e, input: LinkedLaunch) => {
+  handleIpc('linked:update', async (_e, input: LinkedLaunch) => {
     const list = await AppStore.linkedLaunches()
     const index = list.findIndex((item) => item.id === input.id)
     if (index < 0) throw new Error('关联启动不存在')
@@ -48,7 +48,7 @@ export function registerLinkedLaunchIpc(): void {
     return list[index]
   })
 
-  ipcMain.handle('linked:remove', async (_e, id: string) => {
+  handleIpc('linked:remove', async (_e, id: string) => {
     const list = await AppStore.linkedLaunches()
     await AppStore.setLinkedLaunches(list.filter((item) => item.id !== id))
     // Drop the association from every app and fix the defaults it may hold.
@@ -63,13 +63,13 @@ export function registerLinkedLaunchIpc(): void {
     notifyAppsChanged()
   })
 
-  ipcMain.handle('linked:reorder', async (_e, ids: string[]) => {
+  handleIpc('linked:reorder', async (_e, ids: string[]) => {
     const list = await AppStore.reorderLinkedLaunches(ids)
     notifyAppsChanged()
     return list
   })
 
-  ipcMain.handle(
+  handleIpc(
     'linked:setApp',
     async (_e, appId: string, ids: string[], defaultId: string | null) => {
       const store = await AppStore.load()

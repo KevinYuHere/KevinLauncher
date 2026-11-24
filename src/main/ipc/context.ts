@@ -4,6 +4,7 @@ import { UpdateManager } from '../update/updateManager'
 import { AppUpdateChecker } from '../services/appUpdate'
 import { PlayTimeStore } from '../services/playTimeStore'
 import { GachaStore } from '../gacha/gachaStore'
+import { pendingDataTransfer } from './dataAccess'
 
 /**
  * Process-wide singletons shared by the IPC modules. Keeping them here (rather
@@ -11,7 +12,7 @@ import { GachaStore } from '../gacha/gachaStore'
  */
 export const runtime = new Runtime()
 export const updates = new UpdateManager()
-export const appUpdate = new AppUpdateChecker()
+export const appUpdate = new AppUpdateChecker(pendingDataTransfer)
 export const playTime = PlayTimeStore.instance()
 export const gacha = new GachaStore()
 

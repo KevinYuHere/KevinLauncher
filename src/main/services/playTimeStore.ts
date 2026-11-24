@@ -3,6 +3,7 @@ import { join } from 'path'
 import type { PlayTimeDay, PlayTimeTotals } from '@shared/types'
 import { writeFileAtomic } from './atomicFile'
 import { openJsonStore } from './jsonStore'
+import { log } from './logger'
 
 export interface PlaySessionRecord {
   appId: string
@@ -36,6 +37,9 @@ function localDateKey(date: Date): string {
 export class PlayTimeStore {
   private sessions: PlaySessionRecord[] = []
   private loaded = false
+  private loading: Promise<void> | undefined
+  private revision = 0
+  private persisted = 0
   private saveTimer: NodeJS.Timeout | null = null
   /** Set when the store file could not be read — writes are refused. */
   private saveBlocked = false
@@ -51,12 +55,17 @@ export class PlayTimeStore {
 
   async load(): Promise<void> {
     if (this.loaded) return
+    this.loading ??= this.read().finally(() => { this.loading = undefined })
+    await this.loading
+  }
+
+  private async read(): Promise<void> {
     const { data, writable } = await openJsonStore<StoreShape>(
       this.file(),
       () => ({ version: CURRENT_VERSION, sessions: [] }),
       'playTime'
     )
-    this.sessions = Array.isArray(data.sessions) ? data.sessions : []
+    this.sessions = Array.isArray(data?.sessions) ? data.sessions : []
     this.saveBlocked = !writable
     this.loaded = true
   }
@@ -65,11 +74,14 @@ export class PlayTimeStore {
     await this.load()
     if (record.durationSec < 1) return
     this.sessions.push(record)
+    this.revision += 1
     this.scheduleSave()
   }
 
   /** Drop everything and read from disk again. */
   async reload(): Promise<void> {
+    await this.loading
+    await this.flush()
     this.loaded = false
     this.sessions = []
     await this.load()
@@ -135,13 +147,16 @@ export class PlayTimeStore {
     if (this.saveTimer) return
     this.saveTimer = setTimeout(() => {
       this.saveTimer = null
-      void this.save()
+      void this.save().catch((error) => log(`playTime: could not save sessions (${String(error)})`))
     }, 1000)
   }
 
   private async save(): Promise<void> {
-    if (this.saveBlocked) return
+    if (this.revision === this.persisted) return
+    if (this.saveBlocked) throw new Error('无法读取现有使用时长，已保留原文件')
+    const revision = this.revision
     const data: StoreShape = { version: CURRENT_VERSION, sessions: this.sessions }
-    await writeFileAtomic(this.file(), JSON.stringify(data)).catch(() => undefined)
+    await writeFileAtomic(this.file(), JSON.stringify(data))
+    this.persisted = Math.max(this.persisted, revision)
   }
 }

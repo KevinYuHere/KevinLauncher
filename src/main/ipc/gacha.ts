@@ -1,4 +1,5 @@
-import { BrowserWindow, dialog, ipcMain } from 'electron'
+import { BrowserWindow, dialog } from 'electron'
+import { handleIpc } from './access'
 import { promises as fs } from 'fs'
 import { dirname } from 'path'
 import { AppStore } from '../services/appStore'
@@ -12,11 +13,11 @@ import { defaultLaunchMethod } from '@shared/appEntry'
 import { broadcast, gacha } from './context'
 
 export function registerGachaIpc(): void {
-  ipcMain.handle('gacha:list', async (_e, appId: string) => gacha.list(appId))
-  ipcMain.handle('gacha:stats', async (_e, appId: string) => gacha.stats(appId))
-  ipcMain.handle('gacha:clear', async (_e, appId: string) => gacha.clear(appId))
+  handleIpc('gacha:list', async (_e, appId: string) => gacha.list(appId))
+  handleIpc('gacha:stats', async (_e, appId: string) => gacha.stats(appId))
+  handleIpc('gacha:clear', async (_e, appId: string) => gacha.clear(appId))
 
-  ipcMain.handle('gacha:updateMiHoYo', async (_e, appId: string, url: string) => {
+  handleIpc('gacha:updateMiHoYo', async (_e, appId: string, url: string) => {
     const store = await AppStore.load()
     const entry = store.apps.find((a) => a.id === appId)
     if (!entry?.addonId || entry.addonId === 'arknights') throw new Error('该应用不是米哈游游戏')
@@ -32,7 +33,7 @@ export function registerGachaIpc(): void {
     }
   })
 
-  ipcMain.handle('gacha:loginArknights', async (e, appId: string) => {
+  handleIpc('gacha:loginArknights', async (e, appId: string) => {
     const key = `arknights:${appId}`
     const store = new TokenStore()
 
@@ -74,7 +75,7 @@ export function registerGachaIpc(): void {
     return run(token)
   })
 
-  ipcMain.handle('gacha:scanUrl', async (_e, appId: string) => {
+  handleIpc('gacha:scanUrl', async (_e, appId: string) => {
     const store = await AppStore.load()
     const entry = store.apps.find((a) => a.id === appId)
     if (!entry?.addonId || entry.addonId === 'arknights') return null
@@ -84,7 +85,7 @@ export function registerGachaIpc(): void {
     return scanWebCache(gameDir, entry.addonId)
   })
 
-  ipcMain.handle('gacha:export', async (_e, appId: string) => {
+  handleIpc('gacha:export', async (_e, appId: string) => {
     const store = await AppStore.load()
     const entry = store.apps.find((a) => a.id === appId)
     const json = await gacha.exportUigf(appId, entry?.name ?? appId)
@@ -97,7 +98,7 @@ export function registerGachaIpc(): void {
     return result.filePath
   })
 
-  ipcMain.handle('gacha:import', async (_e, appId: string) => {
+  handleIpc('gacha:import', async (_e, appId: string) => {
     const result = await dialog.showOpenDialog({
       properties: ['openFile'],
       filters: [{ name: 'JSON', extensions: ['json'] }]

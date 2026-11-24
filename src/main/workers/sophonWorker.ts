@@ -1,162 +1,74 @@
 import { parentPort } from 'worker_threads'
 import { join } from 'path'
-import { getSophonBuild, downloadSophonBuild, BuildNotFound } from '../update/sophon'
-import { getPatchBuild, applySophonPatch, preparePatchCache, PatchBuildNotFound } from '../update/sophonPatch'
+import { promises as fs } from 'fs'
+import { HardLinkService } from '../services/hardLinkService'
+import { withHoYoNetwork } from '../update/hoyoNetwork'
+import { prepareChunkFiles, downloadSophonBuild, type PreparedChunkFiles } from '../update/sophon'
+import { collectPatchFiles, runSophonPatch } from '../update/sophonPatch'
+import type { SophonCommand, SophonSetup } from '../update/hoyoWorker'
 
-interface StartMessage {
-  type: 'start'
-  branch: { branch: string; packageId: string; password: string }
-  destDir: string
-  /** Installed game dir: patch/chunk originals + delta comparison. */
-  originDir?: string
-  mode: 'update' | 'preDownload'
-  localVersion?: string
-  hpatchzPath?: string
-  audioLanguages?: string[]
-  ignoreFields?: string[]
-  /** Install versions a patch build can update from (`branch.diff_tags`). */
-  diffTags?: string[]
-  /** Files listed in the game's resource blacklist. */
-  blacklist?: string[]
-}
+let task: SophonSetup | undefined
+let links: HardLinkService | undefined
+let prepared: PreparedChunkFiles | undefined, verification: PreparedChunkFiles | undefined
+let patch: Awaited<ReturnType<typeof collectPatchFiles>> | undefined
+const applied = new Set<string>(), verified = new Set<string>()
+let controller: AbortController | undefined
 
-let controller: AbortController | null = null
-
-parentPort?.on('message', async (message: unknown) => {
-  const msg = message as StartMessage | { type: 'cancel' }
-  if (msg.type === 'cancel') {
-    controller?.abort()
+async function execute(message: SophonCommand, signal: AbortSignal): Promise<void> {
+  if (message.type === 'dispose') { await links?.close(); return }
+  if (message.type === 'prepare') {
+    task = message.setup
+    links = new HardLinkService(task.userData, task.gameId)
+  }
+  if (!task || !links) throw new Error('游戏更新上下文缺失')
+  const { dir, plan, version, predownload, hpatchz, blacklist } = task
+  const opts = { links, categoriesSelected: true, blacklist, skipUnchanged: true }
+  const target = plan.kind === 'chunk' ? plan.build : plan.mainBuild
+  const report = (done: number, total: number) => parentPort?.postMessage({ type: 'progress', done, total })
+  const notify = (p: { downloaded: number; total: number }) => report(p.downloaded, p.total)
+  if (message.type === 'prepare') {
+    const preparations = [
+      plan.kind === 'patch'
+        ? collectPatchFiles(plan.patch, version, blacklist, signal).then(result => { patch = result })
+        : prepareChunkFiles(target, { ...opts, localBuild: plan.localBuild }, signal).then(result => { prepared = result })
+    ]
+    if (!predownload) preparations.push(prepareChunkFiles(target, opts, signal).then(result => { verification = result }))
+    const results = await Promise.allSettled(preparations)
+    for (const result of results) if (result.status === 'rejected') throw result.reason
     return
   }
-  if (msg.type !== 'start') return
+  if (message.type === 'verify') {
+    await downloadSophonBuild(target, dir, notify, signal, { ...opts, prepared: verification, repair: true, finished: verified })
+    return
+  }
+  if (plan.kind === 'patch') {
+    await runSophonPatch(plan.patch, version, dir, predownload, hpatchz, blacklist, report, signal, links, patch, applied)
+  } else {
+    await downloadSophonBuild(target, dir, notify, signal, { ...opts, prepared, originDir: dir, localBuild: plan.localBuild,
+      cacheDir: join(dir, 'chunk'), cacheOnly: predownload, finished: applied })
+  }
+  if (!predownload) for (const name of ['chunk', 'ldiff']) {
+    const folder = join(dir, name)
+    try {
+      if ((await fs.stat(folder)).isDirectory()) {
+        await fs.rm(folder, { recursive: true })
+        links.deleteFolder(folder)
+      }
+    } catch { /* best-effort post-update cleanup */ }
+  }
+}
 
+parentPort?.on('message', async (msg: SophonCommand | { type: 'cancel' }) => {
+  if (msg.type === 'cancel') { controller?.abort(); return }
   controller = new AbortController()
-  const emitProgress = (downloaded: number, total: number): void => {
-    parentPort?.postMessage({ type: 'progress', downloaded, total })
-  }
-  const post = (payload: Record<string, unknown>): void => {
-    parentPort?.postMessage(payload)
-  }
-
+  const signal = controller.signal
   try {
-    const build = await getSophonBuild(msg.branch)
-    post({ type: 'meta', tag: build.tag })
-
-    // Pre-download only fills the caches (`chunk/`, `ldiff/`); the formal update
-    // assembles/applies them. `destDir` is always the install dir.
-    const installDir = msg.destDir
-    const cacheOnly = msg.mode === 'preDownload'
-    let patched = false
-
-    // Patch mode (diff from the installed version) is used for pre-download too.
-    // `diff_tags` from the branch API is only a hint: a stale or empty list must
-    // not push the task into a full chunk download (tens of GB). We therefore try
-    // the patch build whenever the local version is known and only fall back when
-    // the server really has no patch for it.
-    let patchBuild: Awaited<ReturnType<typeof getPatchBuild>> | null = null
-    if (msg.localVersion && msg.hpatchzPath) {
-      try {
-        patchBuild = await getPatchBuild(msg.branch)
-      } catch (error) {
-        // Only a missing patch build falls back to chunk mode.
-        if (error instanceof PatchBuildNotFound) patchBuild = null
-        else throw error
-      }
-      if (patchBuild && !patchBuild.categories.some((c) => c.versions[msg.localVersion as string])) {
-        patchBuild = null
-      }
-    }
-    post({
-      type: 'phase',
-      message: patchBuild
-        ? '正在准备增量补丁…'
-        : '未找到可用增量补丁，将按分块更新（下载量会明显增大）…'
-    })
-    if (patchBuild && msg.localVersion && msg.hpatchzPath) {
-      // Starward downloads and verifies every unique patch file first, then
-      // applies them (a pre-download runs only the download step).
-      post({
-        type: 'phase',
-        message: cacheOnly ? '正在下载预下载补丁…' : '正在下载更新补丁…'
-      })
-      await preparePatchCache(
-        patchBuild,
-        msg.localVersion,
-        installDir,
-        msg.audioLanguages ?? [],
-        msg.ignoreFields ?? [],
-        emitProgress,
-        controller.signal
-      )
-      if (!cacheOnly) {
-        post({ type: 'phase', message: '正在应用增量补丁…' })
-        await applySophonPatch(
-          patchBuild,
-          build,
-          msg.localVersion,
-          installDir,
-          installDir,
-          msg.hpatchzPath,
-          emitProgress,
-          controller.signal,
-          msg.audioLanguages ?? [],
-          msg.ignoreFields ?? [],
-          join(installDir, 'ldiff'),
-          false,
-          msg.blacklist ?? [],
-          true
-        )
-      }
-      patched = true
-    }
-    if (!patched) {
-      // The installed version's manifests let unchanged chunks be copied from
-      // the local game files instead of being downloaded again.
-      post({
-        type: 'phase',
-        message: cacheOnly ? '正在获取预下载文件清单…' : '正在获取更新文件清单…'
-      })
-      let localBuild: Awaited<ReturnType<typeof getSophonBuild>> | undefined
-      if (msg.localVersion) {
-        try {
-          localBuild = await getSophonBuild(msg.branch, msg.localVersion)
-        } catch (error) {
-          // Only a missing local build means no reuse; network errors abort.
-          if (error instanceof BuildNotFound) localBuild = undefined
-          else throw error
-        }
-      }
-      if (!localBuild) {
-        // Without the installed build's manifests no chunk can be reused, so the
-        // update turns into a full download — say so instead of silently doing it.
-        post({
-          type: 'phase',
-          message: '本地构建清单不可用，将下载完整文件（无法复用已安装内容）…'
-        })
-      }
-      await downloadSophonBuild(
-        build,
-        installDir,
-        (progress) => emitProgress(progress.downloaded, progress.total),
-        controller.signal,
-        {
-          skipUnchanged: true,
-          originDir: installDir,
-          audioLanguages: msg.audioLanguages,
-          ignoreFields: msg.ignoreFields,
-          localBuild,
-          cacheDir: join(installDir, 'chunk'),
-          cacheOnly,
-          blacklist: msg.blacklist ?? []
-        }
-      )
-    }
-
-    post({ type: 'done' })
+    const userData = msg.type === 'prepare' ? msg.setup.userData : task?.userData
+    const version = msg.type === 'prepare' ? msg.setup.launcherVersion : task?.launcherVersion
+    if (userData) await withHoYoNetwork(userData, 'runner', () => execute(msg, signal), version)
+    else await execute(msg, signal)
+    parentPort?.postMessage({ type: 'done' })
   } catch (error) {
-    const message = (error as Error).message
-    post({ type: 'error', message: message === 'cancelled' ? '已取消' : message })
-  } finally {
-    controller = null
-  }
+    parentPort?.postMessage({ type: 'error', message: (error as Error).message })
+  } finally { controller = undefined }
 })

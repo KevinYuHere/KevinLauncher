@@ -11,7 +11,7 @@ asar: false
 files:
   - from: shell
     to: .
-# Writes resources/app-version.txt (and validates the layout below).
+# Writes resources/app-version.txt, verifies layout, and edits Windows resources offline.
 afterPack: scripts/afterPack.js
 extraResources:
   - from: resources/hpatchz.exe
@@ -27,16 +27,13 @@ extraResources:
     to: app-${version}/package.json
 win:
   icon: resources/icon.ico
-  # Signing/resource-editing needs the winCodeSign tool (network download).
-  # scripts/release.ps1 sets the exe icon with the locally cached rcedit instead.
+  # afterPack edits the app icon and manifest without downloading winCodeSign.
   signAndEditExecutable: false
   # A single installer: the portable self-extracting package, which always runs
   # in install mode (the self-drawn UI) and never as a portable app.
   target:
     - portable
-  # No requireAdministrator in the manifest: it would break the portable
-  # launcher (CreateProcess returns ERROR_ELEVATION_REQUIRED). The installer and
-  # the launcher request elevation themselves.
-  requestedExecutionLevel: asInvoker
 portable:
   artifactName: ${productName}-Installer-${version}.${ext}
+  # The NSIS wrapper elevates before extracting and starting the app.
+  requestExecutionLevel: admin

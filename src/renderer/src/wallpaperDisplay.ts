@@ -56,7 +56,7 @@ export function wallpaperCoverCrop(
   if (!Number.isFinite(scale) || scale <= 0) return null
   // Scale >= 1 means the source is smaller than the display: showing it as is
   // (browser upscale) is equivalent and needs no prepared copy.
-  if (scale >= 0.999) return null
+  if (scale >= 0.999 && Math.max(iw, ih) <= Math.max(width, height) * 1.5) return null
   const sw = Math.min(iw, width / scale)
   const sh = Math.min(ih, height / scale)
   if (!(sw > 0) || !(sh > 0)) return null

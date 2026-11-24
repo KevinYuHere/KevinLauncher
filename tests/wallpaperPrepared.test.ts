@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
-import { peekPreparedWallpaper, wallpaperCacheKey } from '../src/renderer/src/wallpaperPrepared'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { prepareWallpaperForDisplay, wallpaperCacheKey } from '../src/renderer/src/wallpaperPrepared'
 
 describe('wallpaperCacheKey', () => {
   it('keys by source and rounded display size', () => {
@@ -18,11 +18,34 @@ describe('wallpaperCacheKey', () => {
   })
 })
 
-describe('peekPreparedWallpaper', () => {
-  it('misses for a wallpaper that was never prepared', () => {
-    expect(peekPreparedWallpaper('kevin-media://bg/unknown.png', 800, 600, 1)).toEqual({
-      hit: false,
-      value: null
-    })
+
+afterEach(() => vi.unstubAllGlobals())
+
+it('retries failed preparations, shares in-flight work, and revokes evicted URLs after release', async () => {
+  let loads = 0
+  const revoked: string[] = []
+  vi.stubGlobal('Image', class { decode() { return Promise.resolve() }; removeAttribute() {} })
+  vi.stubGlobal('URL', class extends URL {
+    static createObjectURL() { return 'blob:' + loads }
+    static revokeObjectURL(url: string) { revoked.push(url) }
   })
+  vi.stubGlobal('Worker', class {
+    onmessage!: (e: { data: object }) => void
+    postMessage({ key }: { key: string }) {
+      loads++
+      queueMicrotask(() => this.onmessage({ data: loads === 1 ? { key, error: 'decode' } : { key, blob: new Blob(), width: 80, height: 60 } }))
+    }
+  })
+  const get = (name: string) => prepareWallpaperForDisplay(name, 80, 60, 1)
+  expect(await get('A')).toBeNull()
+  const second = get('A')
+  expect(get('A')).toBe(second)
+  const image = (await second)!
+  image.retain()
+  expect(await get('A')).toBe(image)
+  expect(loads).toBe(2)
+  for (let i = 0; i < 6; i++) await get('B' + i)
+  expect(revoked).not.toContain(image.url)
+  image.release()
+  expect(revoked).toContain(image.url)
 })

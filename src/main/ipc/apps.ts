@@ -1,4 +1,5 @@
-import { app, dialog, ipcMain } from 'electron'
+import { app, dialog } from 'electron'
+import { handleIpc } from './access'
 import { randomUUID } from 'crypto'
 import { copyFile } from 'fs/promises'
 import { basename, join } from 'path'
@@ -41,7 +42,7 @@ function requireApp(store: Awaited<ReturnType<typeof AppStore.load>>, appId: str
 
 export function registerAppsIpc(): void {
   // Export the launcher logs to a user-chosen directory (for support).
-  ipcMain.handle('logs:export', async () => {
+  handleIpc('logs:export', async () => {
     const { canceled, filePaths } = await dialog.showOpenDialog({
       title: '选择导出日志的目录',
       properties: ['openDirectory', 'createDirectory']
@@ -61,11 +62,11 @@ export function registerAppsIpc(): void {
     return copied > 0 ? target : null
   })
 
-  ipcMain.handle('addons:list', () => ADDONS)
+  handleIpc('addons:list', () => ADDONS)
 
-  ipcMain.handle('apps:list', async () => (await AppStore.load()).apps)
+  handleIpc('apps:list', async () => (await AppStore.load()).apps)
 
-  ipcMain.handle('apps:add', async (_e, input: NewAppEntry) => {
+  handleIpc('apps:add', async (_e, input: NewAppEntry) => {
     const store = await AppStore.load()
     const now = new Date().toISOString()
 
@@ -141,7 +142,7 @@ export function registerAppsIpc(): void {
     } catch {
       /* ignore */
     }
-    applyAutoTheme(entry)
+    await applyAutoTheme(entry)
 
     await AppStore.save()
     log(`apps: added "${entry.name}" (${methods[0].targetPath})`)
@@ -149,7 +150,7 @@ export function registerAppsIpc(): void {
     return entry
   })
 
-  ipcMain.handle('apps:update', async (_e, appEntry: AppEntry) => {
+  handleIpc('apps:update', async (_e, appEntry: AppEntry) => {
     const store = await AppStore.load()
     const index = store.apps.findIndex((a) => a.id === appEntry.id)
     if (index < 0) throw new Error('应用不存在')
@@ -160,7 +161,7 @@ export function registerAppsIpc(): void {
     return updated
   })
 
-  ipcMain.handle('apps:remove', async (_e, id: string) => {
+  handleIpc('apps:remove', async (_e, id: string) => {
     const store = await AppStore.load()
     const entry = store.apps.find((a) => a.id === id)
     if (entry) for (const wallpaper of entry.wallpapers ?? []) await BgStore.remove(wallpaper.file)
@@ -170,23 +171,23 @@ export function registerAppsIpc(): void {
     notifyAppsChanged()
   })
 
-  ipcMain.handle('apps:reorder', async (_e, ids: string[]) => {
+  handleIpc('apps:reorder', async (_e, ids: string[]) => {
     const apps = await AppStore.reorder(ids)
     notifyAppsChanged()
     return apps
   })
 
-  ipcMain.handle('ui:getPrefs', () => AppStore.uiPrefs())
+  handleIpc('ui:getPrefs', () => AppStore.uiPrefs())
 
-  ipcMain.handle('ui:setGamesRowHidden', async (_e, hidden: boolean) => {
+  handleIpc('ui:setGamesRowHidden', async (_e, hidden: boolean) => {
     await AppStore.setGamesRowHidden(hidden)
     return AppStore.uiPrefs()
   })
 
   // ---------------------------------------------------------------- launcher
-  ipcMain.handle('launcher:getSettings', () => AppStore.launcherSettings())
+  handleIpc('launcher:getSettings', () => AppStore.launcherSettings())
 
-  ipcMain.handle('launcher:setIcon', async (_e, dataUrl: string | null) => {
+  handleIpc('launcher:setIcon', async (_e, dataUrl: string | null) => {
     const current = await AppStore.launcherSettings()
     if (current.iconFile) await BrandStore.remove(current.iconFile)
     let iconFile: string | null = null
@@ -203,13 +204,13 @@ export function registerAppsIpc(): void {
     return AppStore.launcherSettings()
   })
 
-  ipcMain.handle('launcher:setFont', async (_e, family: string | null) => {
+  handleIpc('launcher:setFont', async (_e, family: string | null) => {
     await AppStore.setLauncher({ fontFamily: family })
     broadcast('launcher:changed')
     return AppStore.launcherSettings()
   })
 
-  ipcMain.handle(
+  handleIpc(
     'launcher:setBehavior',
     async (
       _e,
@@ -232,7 +233,7 @@ export function registerAppsIpc(): void {
   )
 
   // -------------------------------------------------------------- appearance
-  ipcMain.handle('apps:setIcon', async (_e, appId: string, sourcePath: string | null) => {
+  handleIpc('apps:setIcon', async (_e, appId: string, sourcePath: string | null) => {
     const store = await AppStore.load()
     const entry = requireApp(store, appId)
     if (entry.iconFile) {
@@ -246,7 +247,7 @@ export function registerAppsIpc(): void {
     return entry
   })
 
-  ipcMain.handle('apps:setIconData', async (_e, appId: string, dataUrl: string | null) => {
+  handleIpc('apps:setIconData', async (_e, appId: string, dataUrl: string | null) => {
     const store = await AppStore.load()
     const entry = requireApp(store, appId)
     if (entry.iconFile) {
@@ -260,7 +261,7 @@ export function registerAppsIpc(): void {
     return entry
   })
 
-  ipcMain.handle('apps:resetIcon', async (_e, appId: string) => {
+  handleIpc('apps:resetIcon', async (_e, appId: string) => {
     const store = await AppStore.load()
     const entry = requireApp(store, appId)
     if (entry.iconFile) {
@@ -282,18 +283,18 @@ export function registerAppsIpc(): void {
     return entry
   })
 
-  ipcMain.handle('apps:setAutoTheme', async (_e, appId: string, on: boolean) => {
+  handleIpc('apps:setAutoTheme', async (_e, appId: string, on: boolean) => {
     const store = await AppStore.load()
     const entry = requireApp(store, appId)
     entry.autoTheme = on
-    applyAutoTheme(entry)
+    await applyAutoTheme(entry)
     entry.updatedAt = new Date().toISOString()
     await AppStore.save()
     notifyAppsChanged()
     return entry
   })
 
-  ipcMain.handle('apps:setThemeColor', async (_e, appId: string, color: string | null) => {
+  handleIpc('apps:setThemeColor', async (_e, appId: string, color: string | null) => {
     const store = await AppStore.load()
     const entry = requireApp(store, appId)
     entry.themeColor = color
@@ -303,7 +304,7 @@ export function registerAppsIpc(): void {
     return entry
   })
 
-  ipcMain.handle('apps:setGlass', async (_e, appId: string, patch: GlassPatch) => {
+  handleIpc('apps:setGlass', async (_e, appId: string, patch: GlassPatch) => {
     const store = await AppStore.load()
     const entry = requireApp(store, appId)
     entry.glass = mergeGlass(entry.glass, patch)
@@ -313,7 +314,7 @@ export function registerAppsIpc(): void {
     return entry
   })
 
-  ipcMain.handle(
+  handleIpc(
     'apps:setBgTuning',
     async (_e, appId: string, tuning: { blur: number; dim: number }) => {
       const store = await AppStore.load()
@@ -327,7 +328,7 @@ export function registerAppsIpc(): void {
     }
   )
 
-  ipcMain.handle('apps:setGachaShowSecond', async (_e, appId: string, value: boolean) => {
+  handleIpc('apps:setGachaShowSecond', async (_e, appId: string, value: boolean) => {
     const store = await AppStore.load()
     const entry = requireApp(store, appId)
     entry.gachaShowSecond = !!value
@@ -337,7 +338,7 @@ export function registerAppsIpc(): void {
     return entry
   })
 
-  ipcMain.handle(
+  handleIpc(
     'apps:setHomeModule',
     async (_e, appId: string, moduleId: HomeModuleId, patch: Partial<HomeModuleState>) => {
       const store = await AppStore.load()
@@ -362,7 +363,7 @@ export function registerAppsIpc(): void {
     }
   )
 
-  ipcMain.handle('apps:setLaunchEffect', async (_e, appId: string, effect: LaunchEffect) => {
+  handleIpc('apps:setLaunchEffect', async (_e, appId: string, effect: LaunchEffect) => {
     const store = await AppStore.load()
     const entry = requireApp(store, appId)
     entry.launchEffect = LAUNCH_EFFECTS.some((e) => e.id === effect) ? effect : 'none'
@@ -372,7 +373,7 @@ export function registerAppsIpc(): void {
     return entry
   })
 
-  ipcMain.handle('apps:setModuleLabel', async (_e, appId: string, label: string | null) => {
+  handleIpc('apps:setModuleLabel', async (_e, appId: string, label: string | null) => {
     const store = await AppStore.load()
     const entry = requireApp(store, appId)
     entry.moduleLabel = label?.trim() ? label.trim() : null
@@ -382,13 +383,13 @@ export function registerAppsIpc(): void {
     return entry
   })
 
-  ipcMain.handle('apps:extractThemeColor', async (_e, appId: string) => {
+  handleIpc('apps:extractThemeColor', async (_e, appId: string) => {
     const store = await AppStore.load()
     const entry = store.apps.find((a) => a.id === appId)
     const wallpaper = entry ? currentWallpaper(entry) : null
     if (!entry || !wallpaper || isVideoFile(wallpaper.file)) return null
-    const color = extractAccent(join(BgStore.bgDir(), wallpaper.file))
-    if (!color) return null
+    const color = await extractAccent(join(BgStore.bgDir(), wallpaper.file))
+    if (!color || currentWallpaper(entry)?.file !== wallpaper.file) return null
     entry.themeColor = color
     entry.updatedAt = new Date().toISOString()
     await AppStore.save()
@@ -396,7 +397,7 @@ export function registerAppsIpc(): void {
     return entry
   })
 
-  ipcMain.handle(
+  handleIpc(
     'apps:setLaunchMethods',
     async (_e, appId: string, methods: LaunchMethod[], defaultId: string) => {
       const store = await AppStore.load()

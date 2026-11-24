@@ -1,5 +1,5 @@
 import { app } from 'electron'
-import { dirname, join } from 'path'
+import { join, resolve } from 'path'
 import { promises as fs, createReadStream, createWriteStream } from 'fs'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
@@ -7,19 +7,12 @@ import { pipeline } from 'stream/promises'
 import type { GachaGame, UpdateMode, UpdateStatus } from '@shared/types'
 import { compareVersions } from '@shared/version'
 import { downloadFile } from '../services/downloader'
-import { writeFileAtomic } from '../services/atomicFile'
-import {
-  audioEnumNames,
-  compareVersion,
-  detectAudioLanguages,
-  getGameBranches,
-  getGameChannelSDK,
-  getGameConfig,
-  getGameDeprecatedFiles,
-  getHoYoPackages,
-  getWPFPackageVersion,
-  readGameVersion
-} from './hoyoplay'
+import type { HoYoGame } from './hoyoplay'
+import { prepareHoYoJob } from './hoyoJob'
+import { HoYoWorkerStopped } from './hoyoWorker'
+import type { HoYoSteps } from './hoyoSchedule'
+import { withHoYoNetwork } from './hoyoNetwork'
+import { currentAppVersion } from '../services/appVersion'
 import {
   akPredownloadDir,
   clearAkPredownload,
@@ -31,7 +24,7 @@ import {
 } from './arknightsUpdate'
 import sophonWorkerPath from '../workers/sophonWorker?modulePath'
 import arknightsWorkerPath from '../workers/arknightsWorker?modulePath'
-import { Worker } from 'worker_threads'
+import { createDownloadWorker } from '../services/rateLimit'
 import { log } from '../services/logger'
 
 const exec = promisify(execFile)
@@ -39,6 +32,7 @@ const exec = promisify(execFile)
 interface Job {
   controller: AbortController
   status: UpdateStatus
+  installation?: { game: HoYoGame; directory: string }
   simulated?: boolean
   simulatedStopAt?: number
   /** Timestamp of the last progress broadcast (download throttling). */
@@ -61,6 +55,8 @@ const IDLE = (appId: string): UpdateStatus => ({
 /** Orchestrates game update / pre-download (miHoYo + Arknights). */
 export class UpdateManager {
   private readonly jobs = new Map<string, Job>()
+  private readonly activeHoYo = new Map<HoYoGame, { job: Job; directory: string; finished: Promise<void> }>()
+  private stoppingHoYo = false
   private readonly listeners = new Set<(status: UpdateStatus) => void>()
 
   onProgress(callback: (status: UpdateStatus) => void): () => void {
@@ -69,7 +65,11 @@ export class UpdateManager {
   }
 
   private emit(status: UpdateStatus): void {
-    for (const listener of this.listeners) listener({ ...status })
+    // Multiple launcher entries can refer to the same game installation.
+    for (const [appId, job] of this.jobs) {
+      if (job.status !== status) continue
+      for (const listener of this.listeners) listener({ ...status, appId })
+    }
   }
 
   /**
@@ -103,19 +103,45 @@ export class UpdateManager {
   }
 
   status(appId: string): UpdateStatus {
-    return this.jobs.get(appId)?.status ?? IDLE(appId)
+    const job = this.jobs.get(appId)
+    return job ? { ...job.status, appId } : IDLE(appId)
   }
 
   cancel(appId: string): void {
     this.jobs.get(appId)?.controller.abort()
   }
 
+  async stopHoYoTasks(): Promise<void> {
+    this.stoppingHoYo = true
+    const runs = [...this.activeHoYo.values()]
+    for (const run of runs) run.job.controller.abort()
+    await Promise.all(runs.map(run => run.finished))
+    await this.clearHoYoContexts()
+  }
+
   async start(appId: string, mode: UpdateMode, game: GachaGame, gameDir: string): Promise<void> {
-    const existing = this.jobs.get(appId)
+    let existing = this.jobs.get(appId)
     // Resuming a simulated preview keeps simulating.
     if (existing?.simulated) {
       this.simulate(appId, mode, existing.simulatedStopAt)
       return
+    }
+    const directory = resolve(gameDir).toLowerCase()
+    if (game !== 'arknights') {
+      while (!this.stoppingHoYo) {
+        const run = this.activeHoYo.get(game)
+        if (!run) break
+        if (run.directory === directory && run.job.status.mode === mode && !run.job.controller.signal.aborted) {
+          this.jobs.set(appId, run.job)
+          this.emit(run.job.status)
+          return run.finished
+        }
+        // A different path or operation supersedes the game context upstream.
+        run.job.controller.abort()
+        await run.finished
+      }
+      if (this.stoppingHoYo) throw new Error('启动器正在退出')
+      existing = this.jobs.get(appId)
     }
     if (existing && (existing.status.phase === 'downloading' || existing.status.phase === 'extracting')) {
       throw new Error('已有更新任务在进行中')
@@ -132,11 +158,21 @@ export class UpdateManager {
       message: mode === 'preDownload' ? '正在预下载…' : '正在下载更新…'
     }
     const job: Job = { controller, status, lastProgressEmit: 0 }
+    let release: (() => void) | undefined
+    if (game !== 'arknights') {
+      job.installation = { game, directory }
+      for (const [otherId, previous] of this.jobs) {
+        if (previous.installation?.game === game && previous.installation.directory === directory) {
+          this.jobs.set(otherId, job)
+        }
+      }
+      const finished = new Promise<void>(done => { release = done })
+      this.activeHoYo.set(game, { job, directory, finished })
+    }
     this.jobs.set(appId, job)
-    this.emit(status)
-    log(`update: start ${mode} for ${appId} (${this.jobs.size} job(s) running)`)
-
     try {
+      this.emit(status)
+      log(`update: start ${mode} for ${appId} (${this.jobs.size} job(s) running)`)
       if (game === 'arknights') {
         await this.runArknights(mode, gameDir, controller, status)
       } else {
@@ -160,6 +196,9 @@ export class UpdateManager {
         this.emit(status)
         log(`update: ${mode} failed for ${appId}: ${(error as Error).message}`)
       }
+    } finally {
+      if (game !== 'arknights') this.activeHoYo.delete(game)
+      release?.()
     }
   }
 
@@ -248,206 +287,65 @@ export class UpdateManager {
     }
   }
 
-  private async runHoYo(
-    appId: string,
-    mode: UpdateMode,
-    game: 'genshin' | 'starrail' | 'zzz',
-    gameDir: string,
-    controller: AbortController,
-    status: UpdateStatus
-  ): Promise<void> {
-    const gameConfig = await getGameConfig(game)
-    // Only the installed voice languages are downloaded (size differs per player).
-    const audioLanguages = await detectAudioLanguages(game, gameDir)
-    // Non-chunk games use the compressed-package flow (Starward: DefaultDownloadMode).
-    const defaultMode = gameConfig?.defaultDownloadMode ?? ''
-    if (
-      defaultMode &&
-      defaultMode !== 'DOWNLOAD_MODE_CHUNK' &&
-      defaultMode !== 'DOWNLOAD_MODE_LDIFF'
-    ) {
-      await this.runHoYoPackage(appId, mode, game, gameDir, controller, status, audioLanguages)
-      return
-    }
+  private readonly hoyoContexts = new Map<HoYoGame, { directory: string; mode: UpdateMode; steps: HoYoSteps }>()
 
-    const branches = await getGameBranches(game)
-    const target = mode === 'preDownload' ? branches.preDownload : branches.main
-    if (!target) {
-      throw new Error(mode === 'preDownload' ? '当前没有可预下载的版本' : '未找到更新分支')
-    }
-
-    const localVersion = await readGameVersion(gameDir)
-    const hpatchzPath = app.isPackaged
-      ? join(process.resourcesPath, 'hpatchz.exe')
-      : join(app.getAppPath(), 'resources', 'hpatchz.exe')
-    // Resource categories the game config marks as deleted are skipped (Starward
-    // reads `res_category_launcher`; a missing file simply means "none").
-    const ignoreFields = gameConfig?.resCategoryDir
-      ? await readIgnoreFields(gameDir, gameConfig.resCategoryDir)
-      : []
-    const blacklist =
-      gameConfig?.enableBlacklist && gameConfig.blacklistDir
-        ? await readBlacklist(gameDir, gameConfig.blacklistDir)
-        : []
-    // Chunk/patch caches live inside the install dir (`chunk/`, `ldiff/`) so a run
-    // interrupted mid-way resumes from them. Pre-download only fills the cache;
-    // the formal update assembles the files from the local game + cache.
-    // Starward fetches these during preparation, before any download; a failure
-    // aborts instead of silently degrading later.
-    let deprecatedFiles: string[] = []
-    let channelSdk: string | null = null
-    let wpfVersion: string | null = null
-    if (mode === 'update') {
-      deprecatedFiles = await getGameDeprecatedFiles(game)
-      channelSdk = await getGameChannelSDK(game)
-      wpfVersion = await getWPFPackageVersion(game)
-    }
-    status.phase = 'downloading'
-    status.progress = 0
-    status.message = mode === 'preDownload' ? '正在预下载…' : '正在下载更新…'
-    this.emit(status)
-
-    await this.runWorker(
-      sophonWorkerPath,
-      {
-        type: 'start',
-        branch: target,
-        destDir: gameDir,
-        originDir: gameDir,
-        mode,
-        localVersion,
-        hpatchzPath,
-        audioLanguages,
-        ignoreFields,
-        blacklist,
-        diffTags: target.diffTags
-      },
-      controller,
-      status
-    )
-
-    if (mode === 'preDownload') {
-      // Completion is recorded in the game's config.ini (`predownload=`); the
-      // game_version stays unchanged until the formal update is applied.
-      await writeConfigIni(gameDir, {
-        predownload: `${localVersion},${target.tag},${audioEnumNames(audioLanguages)}`
-      })
-      status.message = '预下载完成'
-    } else {
-      // F29: delete files the official config marks as deprecated.
-      for (const name of deprecatedFiles) {
-        await fs.rm(join(gameDir, ...name.split('/')), { force: true }).catch(() => undefined)
-      }
-      // F32: hard-link audio from the cache dir into the resource dir.
-      if (gameConfig?.enableAudioPkgMgmt && gameConfig.audioCacheDir && gameConfig.audioResDir) {
-        await linkAudioFiles(gameDir, gameConfig.audioCacheDir, gameConfig.audioResDir).catch(
-          () => undefined
-        )
-      }
-      // F30: write the SDK / WPF versions the game expects.
-      await writeConfigIni(gameDir, {
-        gameVersion: target.tag,
-        predownload: null,
-        sdkVersion: channelSdk,
-        wpfVersion
-      })
-      // Post-update verification: the game's config.ini must now report the target.
-      const installed = await readGameVersion(gameDir)
-      if (installed && compareVersion(installed, target.tag) !== 0) {
-        log(`update: verification failed (config.ini ${installed} != ${target.tag})`)
-      }
-      status.message = '更新完成'
-    }
-  }
-  /**
-   * Compressed-package flow (games whose `DefaultDownloadMode` is not chunk).
-   * Downloads the listed zips (game + installed voice languages), then extracts
-   * them into the game dir; a pre-download stages the zips and the formal update
-   * extracts them.
-   */
-  private async runHoYoPackage(
-    appId: string,
-    mode: UpdateMode,
-    game: 'genshin' | 'starrail' | 'zzz',
-    gameDir: string,
-    controller: AbortController,
-    status: UpdateStatus,
-    audioLanguages: string[]
-  ): Promise<void> {
-    const pkgs = await getHoYoPackages(game)
-    const target = mode === 'preDownload' ? pkgs.preDownload : pkgs.main
-    if (!target) throw new Error(mode === 'preDownload' ? '当前没有可预下载的版本' : '未找到更新包')
-    const files = target.files.filter(
-      (file) => !file.language || audioLanguages.includes(file.language)
-    )
-    if (files.length === 0) throw new Error('没有可下载的安装包')
-    const staging = join(app.getPath('userData'), 'predownload', appId, target.version)
-
-    if (mode === 'update') {
-      const state = await readPredownloadState(staging)
-      if (state?.ready && state.mode === 'package' && state.version === target.version) {
-        status.phase = 'extracting'
-        status.progress = 0
-        status.message = '正在应用预下载…'
-        this.emit(status)
-        await extractPackages(staging, gameDir)
-        await fs.rm(staging, { recursive: true, force: true }).catch(() => undefined)
-        await writeConfigIni(gameDir, { gameVersion: target.version, predownload: null })
-        status.message = '更新完成'
-        return
-      }
-    }
-
-    const work =
-      mode === 'preDownload'
-        ? staging
-        : await fs.mkdtemp(join(app.getPath('userData'), 'update-pkg-'))
-    await fs.mkdir(work, { recursive: true })
-    status.phase = 'downloading'
-    status.progress = 0
-    status.message = mode === 'preDownload' ? '正在预下载…' : '正在下载更新…'
-    this.emit(status)
-    await this.downloadList(
-      files.map((file) => ({
-        url: file.url,
-        name: file.name,
-        size: file.size,
-        md5: file.md5,
-        dest: join(work, file.name)
-      })),
-      controller,
-      status
-    )
-    if (mode === 'preDownload') {
-      await writeFileAtomic(
-        join(staging, 'state.json'),
-        JSON.stringify({ version: target.version, ready: true, deletes: [], mode: 'package' }, null, 2)
-      )
-      status.message = '预下载完成'
-      return
-    }
-    status.phase = 'extracting'
-    status.progress = 0
-    status.message = '正在应用更新（解压）…'
-    this.emit(status)
-    await extractPackages(work, gameDir)
-    await fs.rm(work, { recursive: true, force: true }).catch(() => undefined)
-    await writeConfigIni(gameDir, { gameVersion: target.version, predownload: null })
-    status.message = '更新完成'
+  async clearHoYoContexts(): Promise<void> {
+    const contexts = [...this.hoyoContexts.values()]
+    this.hoyoContexts.clear()
+    await Promise.all(contexts.map(context => context.steps.close()))
   }
 
-  /**
-   * Run a download/apply job in a worker thread, translating its messages into
-   * `UpdateStatus` updates. Progress is throttled (see `emitProgress`) so the
-   * UI updates about once per second instead of on every chunk.
-   */
+  private async runHoYo(_appId: string, mode: UpdateMode, game: HoYoGame, gameDir: string,
+    controller: AbortController, status: UpdateStatus): Promise<void> {
+    const directory = resolve(gameDir).toLowerCase()
+    const userData = app.getPath('userData')
+    const launcherVersion = currentAppVersion()
+    const { signal } = controller
+    const progress = (done: number, total: number): void => {
+      status.downloadedBytes = done
+      status.totalBytes = total
+      status.progress = total > 0 ? Math.min(1, done / total) : 0
+      this.emitProgress(status)
+    }
+    const phase = (message: string, extracting = false): void => {
+      status.phase = extracting ? 'extracting' : 'downloading'
+      status.message = message
+      this.emit(status)
+    }
+    await withHoYoNetwork(userData, 'runner', async () => {
+      let context = this.hoyoContexts.get(game)
+      if (context && (context.directory !== directory || context.mode !== mode)) {
+        this.hoyoContexts.delete(game)
+        await context.steps.close()
+        context = undefined
+      }
+      if (!context) {
+        const hpatchz = app.isPackaged ? join(process.resourcesPath, 'hpatchz.exe') : join(app.getAppPath(), 'resources', 'hpatchz.exe')
+        const steps = await prepareHoYoJob(game, gameDir, mode, { userData, launcherVersion, hpatchz, worker: sophonWorkerPath }, signal)
+        context = { directory, mode, steps }
+        this.hoyoContexts.set(game, context)
+      }
+      try {
+        await context.steps.run({ signal, progress, phase })
+      } catch (error) {
+        if (error instanceof HoYoWorkerStopped) {
+          this.hoyoContexts.delete(game)
+          await context.steps.close()
+        }
+        throw error
+      }
+      this.hoyoContexts.delete(game)
+      await context.steps.close()
+      status.message = mode === 'update' ? '更新完成' : '预下载完成'
+    }, launcherVersion)
+  }
   private async runWorker(
     workerPath: string,
     startMessage: Record<string, unknown>,
     controller: AbortController,
     status: UpdateStatus
   ): Promise<void> {
-    const worker = new Worker(workerPath)
+    const worker = createDownloadWorker(workerPath)
     const onAbort = (): void => worker.postMessage({ type: 'cancel' })
     controller.signal.addEventListener('abort', onAbort)
 
@@ -627,148 +525,8 @@ export class UpdateManager {
   }
 }
 
-/** Read `<res_category_dir>` lines (`{"category":"…","is_delete":true}`). */
-async function readIgnoreFields(gameDir: string, relative: string): Promise<string[]> {
-  try {
-    const text = await fs.readFile(join(gameDir, ...relative.split('/')), 'utf-8')
-    const fields: string[] = []
-    for (const line of text.split(/\r?\n/)) {
-      if (!line.trim()) continue
-      try {
-        const obj = JSON.parse(line) as { category?: string; is_delete?: boolean }
-        if (obj?.is_delete && obj.category) fields.push(String(obj.category))
-      } catch {
-        /* ignore malformed lines */
-      }
-    }
-    return fields
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
-    throw error
-  }
-}
 
-async function readBlacklist(gameDir: string, relative: string): Promise<string[]> {
-  try {
-    const text = await fs.readFile(join(gameDir, ...relative.split('/')), 'utf-8')
-    const files: string[] = []
-    for (const line of text.split(/\r?\n/)) {
-      if (!line.trim()) continue
-      try {
-        const obj = JSON.parse(line) as Record<string, unknown>
-        const name = obj.fileName ?? obj.file_name ?? obj.filename ?? obj.name
-        if (typeof name === 'string' && name) files.push(name)
-      } catch {
-        /* ignore malformed lines */
-      }
-    }
-    return files
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
-    throw error
-  }
-}
-/** Hard-link audio files from the cache dir into the resource dir (Starward F32). */
-async function linkAudioFiles(installDir: string, cacheDir: string, resDir: string): Promise<void> {
-  if (cacheDir.toLowerCase() === resDir.toLowerCase()) return
-  const from = join(installDir, ...cacheDir.split('/'))
-  const to = join(installDir, ...resDir.split('/'))
-  const walk = async (dir: string, rel: string): Promise<void> => {
-    let entries
-    try {
-      entries = await fs.readdir(dir, { withFileTypes: true })
-    } catch {
-      return
-    }
-    for (const entry of entries) {
-      const nextRel = rel ? `${rel}/${entry.name}` : entry.name
-      const src = join(dir, entry.name)
-      if (entry.isDirectory()) {
-        await walk(src, nextRel)
-        continue
-      }
-      if (!entry.isFile()) continue
-      const dst = join(to, ...nextRel.split('/'))
-      try {
-        await fs.access(dst)
-        continue
-      } catch {
-        /* target missing */
-      }
-      await fs.mkdir(dirname(dst), { recursive: true })
-      try {
-        await fs.link(src, dst)
-      } catch {
-        await fs.copyFile(src, dst).catch(() => undefined)
-      }
-    }
-  }
-  await walk(from, '')
-}
-interface PredownloadState {
-  version?: string
-  ready?: boolean
-  deletes?: string[]
-  /** `chunk` (patch/chunk staging) or `package` (compressed-package zips). */
-  mode?: string
-}
 
-async function readPredownloadState(dir: string): Promise<PredownloadState | null> {
-  try {
-    return JSON.parse(await fs.readFile(join(dir, 'state.json'), 'utf-8')) as PredownloadState
-  } catch {
-    return null
-  }
-}
-
-/** Edit the game's `config.ini` the way Starward does (last `game_version=`). */
-async function writeConfigIni(
-  gameDir: string,
-  opts: {
-    gameVersion?: string
-    predownload?: string | null
-    sdkVersion?: string | null
-    wpfVersion?: string | null
-  }
-): Promise<void> {
-  const file = join(gameDir, 'config.ini')
-  let text: string
-  try {
-    text = await fs.readFile(file, 'utf-8')
-  } catch {
-    return
-  }
-  // Starward drops the legacy [General] header line before rewriting keys.
-  const lines = text.split(/\r?\n/).filter((line) => !/\[General\]/i.test(line))
-  const setLine = (key: string, value: string | null): void => {
-    const re = new RegExp(`^\\s*${key}\\s*=`)
-    let index = -1
-    for (let i = 0; i < lines.length; i++) if (re.test(lines[i])) index = i
-    if (value == null) {
-      if (index >= 0) lines.splice(index, 1)
-      return
-    }
-    const next = `${key}=${value}`
-    if (index >= 0) lines[index] = next
-    else lines.push(next)
-  }
-  if (opts.gameVersion !== undefined) setLine('game_version', opts.gameVersion)
-  if (opts.predownload !== undefined) setLine('predownload', opts.predownload)
-  if (opts.sdkVersion) setLine('sdk_version', opts.sdkVersion)
-  if (opts.wpfVersion) setLine('wpf_version', opts.wpfVersion)
-  // CN launcher channel fields (Starward writes these on every update).
-  setLine('channel', '1')
-  setLine('sub_channel', '1')
-  setLine('cps', 'hyp_mihoyo')
-  await writeFileAtomic(file, lines.join('\r\n'))
-}
-
-/** Extract every `.zip` in `dir` into the game dir (compressed-package flow). */
-async function extractPackages(dir: string, gameDir: string): Promise<void> {
-  for (const name of await fs.readdir(dir)) {
-    if (name.toLowerCase().endsWith('.zip')) await extractZip(join(dir, name), gameDir)
-  }
-}
 
 /** Extract a single zip archive into `dest` using Windows' bundled bsdtar. */
 async function extractZip(zipPath: string, dest: string): Promise<void> {

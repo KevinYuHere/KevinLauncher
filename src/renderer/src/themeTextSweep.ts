@@ -1,5 +1,5 @@
 /**
- * 霆骇列律 page-switch text effect.
+ * Page-switch text effect shared by both special themes.
  *
  * Every line of text on the new page gets a translucent white rectangle that
  * grows from the start of that text line to its end at a fixed speed, then
@@ -26,6 +26,26 @@ function visibleInAncestors(el: HTMLElement, rect: DOMRect): boolean {
   return true
 }
 
+/** Only the entering stage's animation may start this navigation's sweep. */
+export function sweepAfterPageSlide(root: HTMLElement): () => void {
+  const clear = (): void => {
+    document.querySelectorAll('.theme-text-sweep, .theme-input-sweep').forEach(el => el.remove())
+  }
+  clear()
+  const stage = root.querySelector('.stage')
+  const finish = (event: AnimationEvent): void => {
+    if (event.target !== stage || event.pseudoElement ||
+        !['sn-page-in', 'mt-page-in'].includes(event.animationName)) return
+    root.removeEventListener('animationend', finish)
+    sweepPageText()
+  }
+  root.addEventListener('animationend', finish)
+  return () => {
+    root.removeEventListener('animationend', finish)
+    clear()
+  }
+}
+
 export function sweepPageText(): void {
   if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
   document.querySelectorAll('.theme-text-sweep').forEach((el) => el.remove())
@@ -33,9 +53,8 @@ export function sweepPageText(): void {
   if (!root) return
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
   let node = walker.nextNode()
-  let lineIndex = 0
-  let created = 0
-  while (node && created < 24) {
+  const lines: { rect: DOMRect; label: string }[] = []
+  while (node && lines.length < 24) {
     const raw = node.textContent ?? ''
     const first = raw.search(/\S/)
     const end = raw.replace(/\s+$/, '').length
@@ -70,7 +89,7 @@ export function sweepPageText(): void {
           rect.top < window.innerHeight
       )
       for (const rect of rects) {
-        if (created >= 24) break
+        if (lines.length >= 24) break
         if (!visibleInAncestors(parent, rect)) continue
         // Also verify the rendered point belongs to this text line; this catches
         // text covered by another surface even when its layout rect exists.
@@ -79,42 +98,44 @@ export function sweepPageText(): void {
           Math.min(window.innerHeight - 1, rect.top + rect.height / 2)
         )
         if (!hit || !(hit === parent || parent.contains(hit))) continue
-        created += 1
-        const fill = document.createElement('span')
-        fill.className = 'theme-text-sweep'
-        fill.style.left = `${rect.left}px`
-        fill.style.top = `${rect.top}px`
-        fill.style.width = `${rect.width}px`
-        fill.style.height = `${rect.height}px`
-        fill.dataset.sweepText = raw.slice(first, end).trim().slice(0, 60)
-        // Start collapsed; without this the browser paints one full-width frame
-        // before the WAAPI animation starts (the "max rectangle" flash).
-        fill.style.transform = 'scaleX(0)'
-        const line = document.createElement('span')
-        line.className = 'theme-text-sweep-line'
-        fill.appendChild(line)
-        document.body.appendChild(fill)
-        const duration = Math.min(1000, Math.max(220, rect.width / 1.05))
-        const delay = Math.min(260, lineIndex * 26)
-        lineIndex += 1
-        const anim = fill.animate([{ transform: 'scaleX(0)' }, { transform: 'scaleX(1)' }], {
-          duration,
-          delay,
-          easing: 'linear',
-          fill: 'forwards'
-        })
-        anim.finished
-          .then(() => {
-            fill.animate([{ opacity: 1 }, { opacity: 0 }], {
-              duration: 170,
-              easing: 'ease-out',
-              fill: 'forwards'
-            })
-            window.setTimeout(() => fill.remove(), 190)
-          })
-          .catch(() => fill.remove())
+        lines.push({ rect, label: raw.slice(first, end).trim().slice(0, 60) })
       }
     }
     node = walker.nextNode()
   }
+  // Finish measuring before inserting overlays so reads never force their layout.
+  lines.forEach(({ rect, label }, lineIndex) => {
+    const fill = document.createElement('span')
+    fill.className = 'theme-text-sweep'
+    fill.style.left = `${rect.left}px`
+    fill.style.top = `${rect.top}px`
+    fill.style.width = `${rect.width}px`
+    fill.style.height = `${rect.height}px`
+    fill.dataset.sweepText = label
+    // Start collapsed; without this the browser paints one full-width frame
+    // before the WAAPI animation starts (the "max rectangle" flash).
+    fill.style.transform = 'scaleX(0)'
+    const line = document.createElement('span')
+    line.className = 'theme-text-sweep-line'
+    fill.appendChild(line)
+    document.body.appendChild(fill)
+    const duration = Math.min(1000, Math.max(220, rect.width / 1.05))
+    const delay = Math.min(260, lineIndex * 26)
+    const anim = fill.animate([{ transform: 'scaleX(0)' }, { transform: 'scaleX(1)' }], {
+      duration,
+      delay,
+      easing: 'linear',
+      fill: 'forwards'
+    })
+    anim.finished
+      .then(() => {
+        fill.animate([{ opacity: 1 }, { opacity: 0 }], {
+          duration: 170,
+          easing: 'ease-out',
+          fill: 'forwards'
+        })
+        window.setTimeout(() => fill.remove(), 190)
+      })
+      .catch(() => fill.remove())
+  })
 }

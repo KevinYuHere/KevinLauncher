@@ -1,28 +1,29 @@
-import { BrowserWindow, ipcMain } from 'electron'
+import { BrowserWindow } from 'electron'
+import { handleIpc } from './access'
 import { ensureTray } from '../services/behavior'
 
 /** Frameless-window controls used by the custom title bar. */
 export function registerWindowIpc(): void {
-  ipcMain.handle('window:minimize', (e) => {
+  handleIpc('window:minimize', (e) => {
     BrowserWindow.fromWebContents(e.sender)?.minimize()
   })
-  ipcMain.handle('window:toggleMaximize', (e) => {
+  handleIpc('window:toggleMaximize', (e) => {
     const win = BrowserWindow.fromWebContents(e.sender)
     if (!win) return false
     if (win.isMaximized()) win.unmaximize()
     else win.maximize()
     return win.isMaximized()
   })
-  ipcMain.handle('window:close', (e) => {
+  handleIpc('window:close', (e) => {
     BrowserWindow.fromWebContents(e.sender)?.close()
   })
-  ipcMain.handle('window:hideToTray', (e) => {
+  handleIpc('window:hideToTray', (e) => {
     const win = BrowserWindow.fromWebContents(e.sender)
     if (!win) return
     win.hide()
     void ensureTray()
   })
-  ipcMain.handle('window:isMaximized', (e) => {
+  handleIpc('window:isMaximized', (e) => {
     return BrowserWindow.fromWebContents(e.sender)?.isMaximized() ?? false
   })
 }

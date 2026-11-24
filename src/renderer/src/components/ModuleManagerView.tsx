@@ -12,6 +12,7 @@ import {
   type WallpaperSettings
 } from '@shared/types'
 import { isVideoFile } from '@shared/appEntry'
+import { usePreparedWallpaper } from '../usePreparedWallpaper'
 import { backgroundUrl } from '../media'
 import Switch from './Switch'
 import Segmented from './Segmented'
@@ -73,6 +74,12 @@ function Row({
       <div className="settings-action">{children}</div>
     </div>
   )
+}
+
+function WallpaperThumbnail({ file }: { file: string }): ReactElement {
+  const source = backgroundUrl(file)
+  const prepared = usePreparedWallpaper(source, 46, 30, window.devicePixelRatio || 1)
+  return <img className="wl-thumb" src={prepared?.source === source ? prepared?.image.url : undefined} alt="" />
 }
 
 /** Wallpaper list + rotation + shared blur/dim. */
@@ -141,7 +148,7 @@ function WallpaperPanel({
                     preload="metadata"
                   />
                 ) : (
-                  <img className="wl-thumb" src={backgroundUrl(wallpaper.file) ?? ''} alt="" />
+                  <WallpaperThumbnail file={wallpaper.file} />
                 )}
               </button>
               <button

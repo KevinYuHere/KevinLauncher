@@ -1,9 +1,12 @@
-import { ipcMain } from 'electron'
+import { handleIpc } from './access'
 import { dirname } from 'path'
 import type { AppEntry } from '@shared/types'
 import { defaultLaunchMethod } from '@shared/appEntry'
 import { AppStore } from '../services/appStore'
+import { currentAppVersion } from '../services/appVersion'
 import { getHoYoUpdateInfo } from '../update/hoyoplay'
+import { withHoYoNetwork } from '../update/hoyoNetwork'
+import { app } from 'electron'
 import { getArknightsUpdateInfo } from '../update/arknightsUpdate'
 import { getUpdatePreview, updates } from './context'
 
@@ -13,7 +16,7 @@ function gameDirOf(entry: AppEntry): string {
 }
 
 export function registerUpdateIpc(): void {
-  ipcMain.handle('update:info', async (_e, appId: string) => {
+  handleIpc('update:info', async (_e, appId: string) => {
     const store = await AppStore.load()
     const entry = store.apps.find((a) => a.id === appId)
     if (!entry) throw new Error('应用不存在')
@@ -32,10 +35,12 @@ export function registerUpdateIpc(): void {
       }
     }
     const gameDir = gameDirOf(entry)
+    const game = entry.addonId
     const info =
-      entry.addonId === 'arknights'
+      game === 'arknights'
         ? await getArknightsUpdateInfo(gameDir)
-        : await getHoYoUpdateInfo(entry.addonId, gameDir)
+        : await withHoYoNetwork(app.getPath('userData'), 'desktop',
+            () => getHoYoUpdateInfo(game, gameDir), currentAppVersion())
     const preview = getUpdatePreview(appId)
     if (preview) {
       info.supported = true
@@ -54,7 +59,7 @@ export function registerUpdateIpc(): void {
     return info
   })
 
-  ipcMain.handle('update:start', async (_e, appId: string, mode: 'update' | 'preDownload') => {
+  handleIpc('update:start', async (_e, appId: string, mode: 'update' | 'preDownload') => {
     // Preview mode: fake the download instead of hitting the real servers.
     const preview = getUpdatePreview(appId)
     if (preview) {
@@ -67,9 +72,9 @@ export function registerUpdateIpc(): void {
     await updates.start(appId, mode, entry.addonId, gameDirOf(entry))
   })
 
-  ipcMain.handle('update:cancel', (_e, appId: string) => updates.cancel(appId))
-  ipcMain.handle('update:status', (_e, appId: string) => updates.status(appId))
-  ipcMain.handle('update:simulate', (_e, appId: string, mode: 'update' | 'preDownload') =>
+  handleIpc('update:cancel', (_e, appId: string) => updates.cancel(appId))
+  handleIpc('update:status', (_e, appId: string) => updates.status(appId))
+  handleIpc('update:simulate', (_e, appId: string, mode: 'update' | 'preDownload') =>
     updates.simulate(appId, mode)
   )
 }

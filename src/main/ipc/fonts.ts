@@ -1,4 +1,5 @@
-import { app, ipcMain } from 'electron'
+import { app } from 'electron'
+import { handleIpc } from './access'
 import { promises as fs } from 'fs'
 import { join } from 'path'
 import { writeFileAtomic } from '../services/atomicFile'
@@ -61,5 +62,5 @@ export function warmUpFonts(): void {
 }
 
 export function registerFontsIpc(): void {
-  ipcMain.handle('fonts:list', () => listSystemFonts())
+  handleIpc('fonts:list', () => listSystemFonts())
 }

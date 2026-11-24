@@ -1,10 +1,12 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { createServer, type Server } from 'node:http'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { directorySize, downloadPayload, PARALLEL } from '../src/main/services/updateDownload'
+import {
+  directorySize, downloadPayload, PARALLEL, verifyPayloadDownload
+} from '../src/main/services/updateDownload'
 
 let server: Server
 let baseUrl = ''
@@ -13,6 +15,8 @@ let requests: string[] = []
 let inFlight = 0
 let maxInFlight = 0
 let failFirst: Record<string, number> = {}
+let rangeMode: 'correct' | 'ignore' | 'wrong' = 'correct'
+const temporaryDirs = new Set<string>()
 
 beforeAll(async () => {
   server = createServer((req, res) => {
@@ -33,7 +37,21 @@ beforeAll(async () => {
         res.end('boom')
         return
       }
-      res.writeHead(206, { 'content-length': body.length })
+      if (req.url === '/broken.zip') {
+        res.writeHead(200, { 'content-length': payload.length - 1 })
+        res.end(payload.subarray(1))
+        return
+      }
+      if (!match || rangeMode === 'ignore') {
+        res.writeHead(200, { 'content-length': payload.length })
+        res.end(payload)
+        return
+      }
+      const reportedStart = rangeMode === 'wrong' ? start + 1 : start
+      res.writeHead(206, {
+        'content-length': body.length,
+        'content-range': `bytes ${reportedStart}-${end - 1}/${payload.length}`
+      })
       res.end(body)
     }, 5)
   })
@@ -51,9 +69,19 @@ beforeEach(() => {
   inFlight = 0
   maxInFlight = 0
   failFirst = {}
+  rangeMode = 'correct'
 })
 
-const tmp = (): Promise<string> => fs.mkdtemp(join(tmpdir(), 'payload-test-'))
+afterEach(async () => {
+  await Promise.all([...temporaryDirs].map(dir => fs.rm(dir, { recursive: true, force: true })))
+  temporaryDirs.clear()
+})
+
+async function tmp(): Promise<string> {
+  const dir = await fs.mkdtemp(join(tmpdir(), 'payload-test-'))
+  temporaryDirs.add(dir)
+  return dir
+}
 
 describe('downloadPayload', () => {
   it('downloads over several connections', async () => {
@@ -117,6 +145,70 @@ describe('downloadPayload', () => {
     expect(await fs.readFile(dest)).toEqual(payload)
     // The kept bytes are reused (a Range starting at 10 000) instead of restarting.
     expect(requests).toContain(`bytes=10000-${chunk - 1}`)
+  })
+
+  it('uses one full response when the server ignores Range', async () => {
+    payload = randomBytes(80_000)
+    rangeMode = 'ignore'
+    const dir = await tmp()
+    const dest = join(dir, 'payload.zip')
+    await downloadPayload([baseUrl], dest, payload.length)
+    expect(await fs.readFile(dest)).toEqual(payload)
+    expect(requests).toHaveLength(1)
+    expect(await fs.readdir(dir)).toEqual(['payload.zip'])
+  })
+
+  it('retries a bad full response without requesting another range', async () => {
+    payload = randomBytes(80_000)
+    const dir = await tmp()
+    const dest = join(dir, 'payload.zip')
+    const brokenUrl = new URL('/broken.zip', baseUrl).toString()
+    await downloadPayload([brokenUrl, baseUrl], dest, payload.length)
+    expect(await fs.readFile(dest)).toEqual(payload)
+    expect(requests).toEqual([`bytes=0-${Math.ceil(payload.length / PARALLEL) - 1}`, ''])
+  })
+
+  it('rejects an incorrect Content-Range without extending a saved part', async () => {
+    payload = randomBytes(80_000)
+    rangeMode = 'wrong'
+    const dir = await tmp()
+    const dest = join(dir, 'payload.zip')
+    const partial = payload.subarray(0, 1024)
+    await fs.writeFile(`${dest}.part0`, partial)
+    await expect(downloadPayload([baseUrl], dest, payload.length, undefined, undefined, 1))
+      .rejects.toThrow(/Content-Range/)
+    expect(await fs.readFile(`${dest}.part0`)).toEqual(partial)
+    expect(await fs.readdir(dir)).toEqual(['payload.zip.part0'])
+  })
+
+  it('keeps parts when promotion of the assembled download fails', async () => {
+    payload = randomBytes(80_000)
+    const dir = await tmp()
+    const dest = join(dir, 'payload.zip')
+    await fs.mkdir(dest)
+    await expect(downloadPayload([baseUrl], dest, payload.length)).rejects.toThrow()
+    expect((await fs.readdir(dir)).filter(name => name.includes('.part'))).toHaveLength(PARALLEL)
+    await fs.rmdir(dest)
+    requests = []
+    await downloadPayload([baseUrl], dest, payload.length)
+    expect(requests).toHaveLength(0)
+    expect(await fs.readFile(dest)).toEqual(payload)
+    expect(await fs.readdir(dir)).toEqual(['payload.zip'])
+  })
+})
+
+describe('verifyPayloadDownload', () => {
+  it('drops an equal-size corrupt asset and its parts, then accepts the correct download', async () => {
+    payload = randomBytes(80_000)
+    const sha = createHash('sha256').update(payload).digest('hex')
+    const dir = await tmp()
+    const dest = join(dir, 'payload.zip')
+    await fs.writeFile(dest, Buffer.alloc(payload.length))
+    await fs.writeFile(`${dest}.part0`, Buffer.alloc(10))
+    expect(await verifyPayloadDownload(dest, payload.length, sha)).toBe(false)
+    expect(await fs.readdir(dir)).toEqual([])
+    await downloadPayload([baseUrl], dest, payload.length)
+    expect(await verifyPayloadDownload(dest, payload.length, sha)).toBe(true)
   })
 })
 

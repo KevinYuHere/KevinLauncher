@@ -30,8 +30,8 @@ export function writeFileAtomic(file: string, data: string | Uint8Array): Promis
     const tmp = `${file}.${process.pid.toString(36)}-${Date.now().toString(36)}-${Math.random()
       .toString(36)
       .slice(2, 8)}.tmp`
-    await fs.writeFile(tmp, data)
     try {
+      await fs.writeFile(tmp, data)
       await fs.rename(tmp, file)
     } catch (error) {
       await fs.rm(tmp, { force: true }).catch(() => undefined)

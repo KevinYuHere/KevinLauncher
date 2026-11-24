@@ -1,7 +1,11 @@
 import { createWriteStream, createReadStream, promises as fs } from 'fs'
 import { spawn } from 'child_process'
 import { dirname, join } from 'path'
+import { pipeline } from 'stream/promises'
+import { setTimeout as wait } from 'timers/promises'
 import { throttle } from './rateLimit'
+import { sha256File } from './hash'
+import { isPositiveFileSize, isSha256 } from './appUpdateManifest'
 
 /**
  * Downloading / unpacking the update payload of a new launcher version.
@@ -23,8 +27,8 @@ const ATTEMPTS = 8
 /** Base backoff between attempts (ms); grows linearly with the attempt number. */
 const RETRY_DELAY = 700
 /**
- * Per-attempt timeout. A stalled connection must not hang the whole download:
- * whatever arrived is kept and the attempt is retried with a `Range` request.
+ * Idle timeout while obtaining headers or waiting for the next body chunk.
+ * Waiting for the global bandwidth queue does not count as a network stall.
  */
 const ATTEMPT_TIMEOUT = 45_000
 
@@ -33,8 +37,6 @@ export interface TransferProgress {
   total: number
   bytesPerSecond: number
 }
-
-const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
 async function fileSize(path: string): Promise<number> {
   try {
@@ -61,120 +63,258 @@ export async function directorySize(dir: string): Promise<number> {
   return total
 }
 
+
+const headers = { accept: 'application/octet-stream', 'user-agent': USER_AGENT }
+type Part = { path: string; start: number; end: number; bytes: number }
+type ReadWithTimeout = <T>(operation: () => Promise<T>) => Promise<T>
+
+class RangeIgnored extends Error {}
+
+async function cancelBody(response: Response): Promise<void> {
+  await response.body?.cancel().catch(() => undefined)
+}
+
+/** Only the exact requested range is eligible to extend a saved part. */
+async function checkResponse(
+  response: Response,
+  expectedBytes: number,
+  range?: { start: number; end: number; size: number }
+): Promise<void> {
+  const type = range ? 206 : 200
+  const length = response.headers.get('content-length')
+  const declared = response.headers.get('content-range')
+  const expected = range ? `bytes ${range.start}-${range.end - 1}/${range.size}` : null
+  if (response.status !== type || !response.body || declared !== expected ||
+      (length !== null && Number(length) !== expectedBytes)) {
+    await cancelBody(response)
+    throw new Error(`下载响应无效（HTTP ${response.status} / Content-Range: ${declared ?? '无'}）`)
+  }
+}
+
+async function appendResponse(
+  response: Response,
+  part: Part,
+  read: ReadWithTimeout,
+  signal: AbortSignal
+): Promise<void> {
+  const offset = part.bytes
+  const reader = response.body!.getReader()
+  try {
+    const file = await fs.open(part.path, offset === 0 ? 'w' : 'a')
+    try {
+      for (;;) {
+        const { value, done } = await read(() => reader.read())
+        if (done) break
+        if (part.start + part.bytes + value.length > part.end) {
+          await file.truncate(offset)
+          throw new Error('下载响应超过请求范围')
+        }
+        await throttle(value.length, signal)
+        await file.writeFile(value)
+        part.bytes += value.length
+      }
+    } finally {
+      await file.close()
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined)
+    part.bytes = await fileSize(part.path)
+  }
+  if (part.bytes !== part.end - part.start) throw new Error('下载不完整')
+}
+
+async function attemptRequest<T>(
+  urls: string[],
+  attempts: number,
+  signal: AbortSignal,
+  range: (() => string | undefined) | undefined,
+  consume: (
+    response: Response,
+    read: ReadWithTimeout,
+    attemptSignal: AbortSignal
+  ) => Promise<T>
+): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    signal.throwIfAborted()
+    const timeout = new AbortController()
+    const attemptSignal = AbortSignal.any([signal, timeout.signal])
+    const read = async <R>(operation: () => Promise<R>): Promise<R> => {
+      const timer = setTimeout(() => timeout.abort(new Error('下载连接超时')), ATTEMPT_TIMEOUT)
+      try {
+        return await operation()
+      } finally {
+        clearTimeout(timer)
+      }
+    }
+    let response: Response | undefined
+    try {
+      const url = urls[Math.min(attempt, urls.length - 1)]
+      const requestedRange = range?.()
+      response = await read(() => fetch(url, {
+        headers: requestedRange ? { ...headers, range: requestedRange } : headers,
+        signal: attemptSignal
+      }))
+      return await consume(response, read, attemptSignal)
+    } catch (error) {
+      if (response && !response.bodyUsed) await cancelBody(response)
+      if (error instanceof RangeIgnored || signal.aborted || attempt >= attempts - 1) throw error
+      await wait(RETRY_DELAY * (attempt + 1), undefined, { signal })
+    }
+  }
+}
+
+async function assembleParts(parts: Part[], dest: string, signal: AbortSignal): Promise<void> {
+  const temporary = `${dest}.joining`
+  async function* contents(): AsyncGenerator<Buffer> {
+    for (const part of parts) {
+      for await (const chunk of createReadStream(part.path)) yield chunk as Buffer
+    }
+  }
+  try {
+    await pipeline(contents(), createWriteStream(temporary), { signal })
+    await fs.rename(temporary, dest)
+  } finally {
+    await fs.rm(temporary, { force: true }).catch(() => undefined)
+  }
+}
+
+async function removePayloadDownload(dest: string): Promise<void> {
+  const names = [dest, `${dest}.joining`, `${dest}.full`,
+    ...Array.from({ length: PARALLEL }, (_, index) => `${dest}.part${index}`)]
+  await Promise.all(names.map(path => fs.rm(path, { force: true })))
+}
+
+/** Reuse only a verified complete asset, including after a pause or restart. */
+export async function verifyPayloadDownload(
+  dest: string,
+  size: number,
+  sha256: string
+): Promise<boolean> {
+  if (!isPositiveFileSize(size) || !isSha256(sha256)) throw new Error('下载校验信息无效')
+  const stat = await fs.stat(dest).catch(error => {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw error
+  })
+  if (!stat) return false
+  if (stat.isFile() && stat.size === size && (await sha256File(dest)) === sha256.toLowerCase()) {
+    return true
+  }
+  await removePayloadDownload(dest)
+  return false
+}
+
 /**
- * Downloads `urls[0]` into `dest` using `PARALLEL` connections. Each connection
- * has its own `.partN` file, so pausing (aborting `signal`) and resuming later
- * only transfers what is still missing. Every connection retries with a backoff
- * (moving on to the next URL, if any, when one is unreachable).
+ * Probes range support with one request before opening parallel connections.
+ * Completed, bounded parts survive pause, retry and output assembly failures.
  */
 export async function downloadPayload(
   urls: string[],
   dest: string,
   size: number,
   onProgress?: (progress: TransferProgress) => void,
-  signal?: AbortSignal,
+  signal: AbortSignal = new AbortController().signal,
   attempts = ATTEMPTS
 ): Promise<void> {
+  signal.throwIfAborted()
+  if (!Number.isSafeInteger(size) || size <= 0 || !urls.length) throw new Error('下载地址或大小无效')
+
   await fs.mkdir(dirname(dest), { recursive: true })
   const chunk = Math.ceil(size / PARALLEL)
-  const parts: { path: string; start: number; end: number }[] = []
-  for (let i = 0; i < PARALLEL; i++) {
-    const start = i * chunk
+  const parts: Part[] = []
+  for (let start = 0; start < size; start += chunk) {
+    const path = `${dest}.part${parts.length}`
     const end = Math.min(size, start + chunk)
-    if (start >= end) break
-    parts.push({ path: `${dest}.part${i}`, start, end })
+    let bytes = await fileSize(path)
+    if (bytes > end - start) {
+      await fs.rm(path)
+      bytes = 0
+    }
+    parts.push({ path, start, end, bytes })
   }
-
-  const have = new Map<string, number>()
-  for (const part of parts) have.set(part.path, await fileSize(part.path))
-  const current = (): number => parts.reduce((sum, part) => sum + (have.get(part.path) ?? 0), 0)
-
+  const whole = { path: `${dest}.full`, start: 0, end: size, bytes: 0 }
+  let singleConnection = false
+  const current = (): number => singleConnection ? whole.bytes : parts.reduce((sum, part) => sum + part.bytes, 0)
   let previous = current()
   let previousTime = Date.now()
-  const timer = onProgress
-    ? setInterval(() => {
-        const now = Date.now()
-        const value = current()
-        onProgress({
-          transferred: value,
-          total: size,
-          bytesPerSecond: (value - previous) / Math.max(0.001, (now - previousTime) / 1000)
-        })
-        previous = value
-        previousTime = now
-      }, 400)
-    : null
+  const timer = onProgress && setInterval(() => {
+    const now = Date.now()
+    const value = current()
+    onProgress({
+      transferred: value,
+      total: size,
+      bytesPerSecond: Math.max(0, value - previous) / Math.max(0.001, (now - previousTime) / 1000)
+    })
+    previous = value
+    previousTime = now
+  }, 400)
+
+  const attemptWhole = async (
+    response: Response,
+    read: ReadWithTimeout,
+    requestSignal: AbortSignal
+  ): Promise<void> => {
+    singleConnection = true
+    whole.bytes = 0
+    await checkResponse(response, size)
+    await appendResponse(response, whole, read, requestSignal)
+  }
+
+  const batch = new AbortController()
+  const batchSignal = AbortSignal.any([signal, batch.signal])
+  let rangesAccepted = false
+  const transfer = (part: Part, ready?: () => void): Promise<void> =>
+    attemptRequest(
+      urls,
+      attempts,
+      batchSignal,
+      () => singleConnection ? undefined : `bytes=${part.start + part.bytes}-${part.end - 1}`,
+      async (response, read, requestSignal) => {
+        // Before starting other parts, reuse the already-open full response.
+        if (singleConnection || (response.status === 200 && ready && !rangesAccepted)) {
+          await attemptWhole(response, read, requestSignal)
+          return
+        }
+        if (response.status === 200) throw new RangeIgnored()
+        const start = part.start + part.bytes
+        await checkResponse(response, part.end - start, { start, end: part.end, size })
+        rangesAccepted = true
+        ready?.()
+        await appendResponse(response, part, read, requestSignal)
+      }
+    )
 
   try {
-    await Promise.all(
-      parts.map(async (part) => {
-        let bytes = have.get(part.path) ?? 0
-        for (let attempt = 0; ; attempt++) {
-          try {
-            if (bytes >= part.end - part.start) return
-            // Abort a stalled connection after ATTEMPT_TIMEOUT (or on pause).
-            const timed = AbortSignal.timeout(ATTEMPT_TIMEOUT)
-            const attemptSignal = signal ? AbortSignal.any([signal, timed]) : timed
-            const response = await fetch(urls[Math.min(attempt, urls.length - 1)], {
-              headers: {
-                Range: `bytes=${part.start + bytes}-${part.end - 1}`,
-                accept: 'application/octet-stream',
-                'user-agent': USER_AGENT
-              },
-              signal: attemptSignal
-            })
-            if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`)
-            const handle = await fs.open(part.path, 'a')
-            try {
-              const reader = response.body.getReader()
-              for (;;) {
-                const { done, value } = await reader.read()
-                if (done) break
-                if (value.length) await throttle(value.length)
-                await handle.write(value)
-                bytes += value.length
-                have.set(part.path, bytes)
-              }
-            } finally {
-              await handle.close()
-            }
-            if (bytes < part.end - part.start) throw new Error('下载不完整')
-            return
-          } catch (error) {
-            if (signal?.aborted) throw error
-            if (attempt >= attempts - 1) throw error
-            await delay(RETRY_DELAY * (attempt + 1))
-            bytes = await fileSize(part.path)
-            have.set(part.path, bytes)
-          }
-        }
+    const missing = parts.filter(part => part.bytes < part.end - part.start)
+    if (missing.length) {
+      const [first, ...rest] = missing
+      let others: Promise<void>[] = []
+      // Capture the first error and drain every aborted stream before retrying
+      // or letting another invocation continue the same files.
+      let failed: unknown
+      const track = (work: Promise<void>): Promise<void> => work.catch(error => {
+        failed ??= error
+        batch.abort()
       })
-    )
+      const firstWork = track(transfer(first, () => {
+        if (!others.length) others = rest.map(part => track(transfer(part)))
+      }))
+      await firstWork
+      await Promise.all(others)
+      if (failed instanceof RangeIgnored) {
+        await attemptRequest(urls, attempts, signal, undefined, attemptWhole)
+      } else if (failed) {
+        throw failed
+      }
+    }
+    signal.throwIfAborted()
+    if (singleConnection) await fs.rename(whole.path, dest)
+    else await assembleParts(parts, dest, signal)
+    await Promise.all(parts.map(part => fs.rm(part.path, { force: true }).catch(() => undefined)))
+    onProgress?.({ transferred: size, total: size, bytesPerSecond: 0 })
   } finally {
     if (timer) clearInterval(timer)
+    await fs.rm(whole.path, { force: true }).catch(() => undefined)
   }
-
-  // Join the parts into the final archive.
-  const output = createWriteStream(dest)
-  try {
-    for (const part of parts) {
-      await new Promise<void>((resolve, reject) => {
-        const input = createReadStream(part.path)
-        input.on('data', (chunkData) => output.write(chunkData))
-        input.on('end', resolve)
-        input.on('error', reject)
-      })
-    }
-    await new Promise<void>((resolve, reject) => {
-      output.on('finish', resolve)
-      output.on('error', reject)
-      output.end()
-    })
-  } finally {
-    for (const part of parts) await fs.rm(part.path, { force: true }).catch(() => {})
-  }
-  // Final tick so the UI always reaches 100 %.
-  onProgress?.({ transferred: size, total: size, bytesPerSecond: 0 })
 }
 
 /**
@@ -187,14 +327,17 @@ export async function extractPayload(
   expectedBytes: number,
   onProgress?: (transferred: number, total: number) => void
 ): Promise<void> {
-  await fs.rm(destDir, { recursive: true, force: true }).catch(() => {})
+  await fs.rm(destDir, { recursive: true, force: true })
   await fs.mkdir(destDir, { recursive: true })
 
-  let previous = 0
+  let scanning = false
+  let finished = false
   const timer = setInterval(() => {
+    if (scanning) return
+    scanning = true
     void directorySize(destDir).then((size) => {
-      previous = size
-      onProgress?.(size, expectedBytes)
+      if (!finished) onProgress?.(size, expectedBytes)
+      scanning = false
     })
   }, 500)
 
@@ -211,7 +354,7 @@ export async function extractPayload(
     })
     onProgress?.(expectedBytes, expectedBytes)
   } finally {
+    finished = true
     clearInterval(timer)
-    void previous
   }
 }
