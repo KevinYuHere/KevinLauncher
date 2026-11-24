@@ -21,6 +21,10 @@ describe('splitArgs', () => {
     expect(splitArgs('   ')).toEqual([])
   })
 
+  it('separates unquoted tabs and preserves quoted tabs', () => {
+    expect(splitArgs('--name\t"hello\tworld"\t-x')).toEqual(['--name', 'hello\tworld', '-x'])
+  })
+
   it('supports empty quoted strings', () => {
     expect(splitArgs('--flag ""')).toEqual(['--flag', ''])
   })
