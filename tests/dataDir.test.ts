@@ -6,7 +6,9 @@ import { isTransientEntry, migrateDataDirectory, normalizeDataDir, seedDataDir }
 
 const roots: string[] = []
 async function makeDir(prefix: string): Promise<string> {
-  const dir = await fs.mkdtemp(join(tmpdir(), prefix))
+  // Migration intentionally retains sources reached through an alias. These
+  // fixtures exercise direct paths even when Windows TEMP itself is aliased.
+  const dir = await fs.mkdtemp(join(await fs.realpath(tmpdir()), prefix))
   roots.push(dir)
   return dir
 }
@@ -17,7 +19,7 @@ afterEach(async () => {
 
 describe('seedDataDir', () => {
   it('seeds and commits when mkdir rejects the existing parent like a Windows root', async () => {
-    const root = await fs.realpath(await makeDir('kl-seed-root-'))
+    const root = await makeDir('kl-seed-root-')
     const fallback = join(root, 'default')
     const target = join(root, 'KevinLauncherData')
     await fs.mkdir(join(fallback, 'update-backup'), { recursive: true })
