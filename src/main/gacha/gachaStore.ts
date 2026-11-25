@@ -21,8 +21,12 @@ const DATASET_LIMIT = 6
 
 function enrichRecord(previous: GachaRecord, incoming: GachaRecord): GachaRecord | undefined {
   const patch: Partial<GachaRecord> = {}
-  for (const key of ['timezone', 'lang', 'gachaId', 'timestampMs', 'uigfGachaType', 'seq'] as const) {
+  for (const key of ['lang', 'gachaId', 'timestampMs', 'uigfGachaType', 'seq'] as const) {
     if (previous[key] === undefined && incoming[key] !== undefined) Object.assign(patch, { [key]: incoming[key] })
+  }
+  if (previous.timezone === undefined && incoming.timezone !== undefined && previous.time === incoming.time &&
+      (previous.timestampMs === undefined || previous.timestampMs === incoming.timestampMs)) {
+    patch.timezone = incoming.timezone
   }
   if (previous.rankType === 0 && previous.game !== 'arknights' && incoming.rankType > 0) patch.rankType = incoming.rankType
   if (Object.keys(patch).length) return { ...previous, ...patch }

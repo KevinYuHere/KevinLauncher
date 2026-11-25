@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { decodeGachaArchive, exportGachaArchive } from '../src/main/gacha/gachaFormats'
 import { GachaIndex } from '../src/main/gacha/gachaIndex'
 
@@ -27,6 +27,10 @@ describe('抽卡格式适配', () => {
     expect(file.hkrpg[0].list[0].gacha_id).toBe('1041')
     expect(decodeGachaArchive(archive.text, 'test')).toEqual(records)
     expect(decodeGachaArchive(archive.text, 'target', 'zzz')).toHaveLength(1)
+    const inconsistent = { ...records[0], timezone: 0 }
+    const native = exportGachaArchive([inconsistent], '2.0.5')
+    expect(native.format).toBe('native')
+    expect(decodeGachaArchive(native.text, 'test')).toEqual([inconsistent])
   })
 
   it('supports v4.0 and v4.1 without accepting a future layout or a banner outside the declared version', () => {
@@ -58,4 +62,37 @@ describe('抽卡格式适配', () => {
     expect(new GachaIndex(records).stats('arknights').pools[0].pityKnown).toBe(false)
     expect(exportGachaArchive(records, '2.0.5').format).toBe('native')
   })
+
+  it.each([['UTC', 0], ['Asia/Shanghai', -480], ['America/New_York', 300]])(
+    'uses the source time basis when merging historical pulls on a %s host',
+    (hostZone, hostOffset) => {
+      vi.stubEnv('TZ', hostZone)
+      try {
+        const first = Date.parse('2026-01-08T00:00:00Z')
+        expect(new Date(first).getTimezoneOffset()).toBe(hostOffset)
+        const imported = {
+          ...data,
+          hk4e: [{ uid: '1000', timezone: -5, list: [{
+            ...base, id: '2', time: '2026-01-07 19:01:00', gacha_type: '301', uigf_gacha_type: '301', rank_type: '4'
+          }] }]
+        }
+        const [known] = decodeGachaArchive(JSON.stringify(imported), 'test', 'genshin')
+        const historical = { ...known, id: '1', time: '2026-01-08 08:00:00', rankType: 5,
+          timezone: undefined, timestampMs: undefined }
+
+        const mixed = new GachaIndex([historical, known])
+        expect(mixed.stats().pools[0]).toMatchObject({ pityKnown: false, count: 2 })
+        expect(mixed.records).toMatchObject([
+          { id: 'genshin:1000:2', time: '2026-01-07 19:01:00', pityAtPull: undefined },
+          { id: '1', time: historical.time, timestampMs: undefined, timezone: undefined, pityAtPull: undefined }
+        ])
+        const resolved = new GachaIndex([{ ...historical, timezone: 8 }, known])
+        expect(resolved.stats().pools[0]).toMatchObject({ pityKnown: true, topPity: 1 })
+        expect(resolved.records.map(({ id }) => id)).toEqual(['genshin:1000:2', '1'])
+        expect(resolved.records[1].timestampMs).toBeUndefined()
+      } finally {
+        vi.unstubAllEnvs()
+      }
+    }
+  )
 })

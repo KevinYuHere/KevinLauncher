@@ -177,13 +177,20 @@ async function diagnoseUnpackedSetup() {
   }
 }
 
-async function startInstalled(target, version) {
+async function checkProfile(data, fixture, history) {
+  const config = JSON.parse(await readFile(join(data, 'config.json'), 'utf8'))
+  assert.ok(config.apps.some(app => app.id === fixture.id && app.name === fixture.name))
+  assert.deepEqual(JSON.parse(await readFile(join(data, 'playtime.json'), 'utf8')), history)
+}
+
+async function startInstalled(target, version, fixture) {
   windowsExecutable.assertExecutionLevel(join(target, windowsLayout.entry), 'requireAdministrator')
   windowsExecutable.assertExecutionLevel(join(target, windowsLayout.runtime), 'asInvoker')
   const ui = await launch(join(target, windowsLayout.entry))
   assert.equal(await ui.run('window.api.appVersion()'), version)
   assert.ok((await ui.run('navigator.userAgent')).includes('Electron/' + source.electron))
-  assert.ok(Array.isArray(await ui.run('window.api.listApps()')))
+  assert.ok((await ui.run('window.api.listApps()')).some(app => app.id === fixture.id && app.name === fixture.name))
+  assert.equal((await ui.run('window.api.playTimeTotals()'))[fixture.id], 60)
   await until(async () => {
     const health = JSON.parse(await readFile(join(target, 'resources', 'app-activation.json'), 'utf8'))
     return health.healthy === version
@@ -214,8 +221,6 @@ async function verifyUninstall(target, data) {
     await assert.rejects(access(join(target, name)), { code: 'ENOENT' })
   }
   assert.equal(await readFile(ownFile, 'utf8'), 'preserve')
-  const config = JSON.parse(await readFile(join(data, 'config.json'), 'utf8'))
-  assert.ok(Array.isArray(config.apps))
 }
 
 async function comparePayload(installed) {
@@ -248,15 +253,24 @@ try {
   const previousFile = join(root, previous.manifest.installerName)
   await downloadInstaller(previous, previousFile)
   const existing = await install(previousFile, 'upgrade', previous.manifest.version)
-  const sentinel = join(sandboxData('upgrade'), 'playtime.json')
-  const history = JSON.stringify({ version: 1, sessions: [{
-    appId: 'windows-fixture', startUtc: '2026-01-01T00:00:00Z',
-    endUtc: '2026-01-01T00:01:00Z', durationSec: 60
-  }] })
-  await writeFile(sentinel, history)
-  const previousUi = await launch(join(existing, 'KevinLauncher.exe'))
+  const oldEntry = join(existing, windowsLayout.entry)
+  const seeded = await launch(oldEntry)
+  assert.equal(await seeded.run('window.api.appVersion()'), previous.manifest.version)
+  const fixture = await seeded.run('window.api.addApp({ name: "Windows 验收夹具", launchMethods: [] })')
+  assert.equal(typeof fixture.id, 'string')
+  await seeded.close()
+  const data = sandboxData('upgrade')
+  const end = new Date()
+  const history = { version: 1, sessions: [{
+    appId: fixture.id, startUtc: new Date(end.getTime() - 60_000).toISOString(),
+    endUtc: end.toISOString(), durationSec: 60
+  }] }
+  await writeFile(join(data, 'playtime.json'), JSON.stringify(history))
+  await checkProfile(data, fixture, history)
+  const previousUi = await launch(oldEntry)
   assert.equal(await previousUi.run('window.api.appVersion()'), previous.manifest.version)
-  assert.ok(Array.isArray(await previousUi.run('window.api.listApps()')))
+  assert.ok((await previousUi.run('window.api.listApps()')).some(app => app.id === fixture.id))
+  assert.equal((await previousUi.run('window.api.playTimeTotals()'))[fixture.id], 60)
   console.log('Verified and started the published setup and launcher, v' + previous.manifest.version)
   const covering = await install(installer, 'upgrade', source.version, previous.manifest.version).catch(async error => {
     const launcherLog = (await readFile(join(sandboxData('upgrade'), 'launcher.log'), 'utf8').catch(() => ''))
@@ -267,12 +281,15 @@ try {
   })
   await previousUi.waitForExit()
   assert.equal(existing, covering)
-  assert.equal(await readFile(sentinel, 'utf8'), history)
-  await startInstalled(covering, source.version)
+  await checkProfile(data, fixture, history)
+  await checkProfile(join(data, 'update-backup'), fixture, history)
+  await startInstalled(covering, source.version, fixture)
   const fresh = await install(installer, 'fresh', source.version)
-  await startInstalled(fresh, source.version)
+  await startInstalled(fresh, source.version, fixture)
   await comparePayload(fresh)
-  await verifyUninstall(fresh, sandboxData('fresh'))
+  const freshData = sandboxData('fresh')
+  await verifyUninstall(fresh, freshData)
+  await checkProfile(freshData, fixture, history)
   assert.deepEqual(await verifyLocalAssets(dir, source.version, source.electron), assets)
   await writeFile(join(dir, 'windows-verification.json'), JSON.stringify({
     sha: source.sha,
@@ -286,6 +303,7 @@ try {
     launched: true,
     overwriteUpgrade: true,
     historyPreserved: true,
+    backupVerified: true,
     payloadMatchesInstalled: true,
     uninstalled: true,
     entryMode: 'requireAdministrator',
@@ -300,7 +318,7 @@ try {
       'Version: ' + source.version + ' / Electron ' + source.electron,
       'Previous verified release: ' + previous.manifest.version,
       'Previous installer SHA-256: ' + previous.manifest.installerSha256,
-      'Fresh install, launch, overwrite upgrade, saved history, and managed uninstall verified.',
+      'Verified fresh install, launch, overwrite upgrade, backup, saved history, and managed uninstall.',
       '',
       ...Object.entries(assets).map(([file, asset]) => '- ' + file + ': ' + asset.sha256)
     ].join('\n') + '\n'

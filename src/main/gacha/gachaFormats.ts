@@ -2,12 +2,12 @@ import type { GachaGame, GachaRecord } from '@shared/types'
 import { isObject } from '../services/configValidation'
 import { sourceRecordId } from './gachaIndex'
 import { MIHOYO, topRankFor, type MiHoYoGame } from './metadata'
+import { gachaTimeWithOffset, gachaTimezoneOffset, gachaWallTime, isGachaInstant } from './gachaTime'
 
 const NATIVE_FORMAT = 'kevinlauncher-gacha'
 const GAMES = ['genshin', 'starrail', 'zzz', 'arknights'] as const
 const UID_PATTERN = /^\d+$/
 const UPLINK_ID = /^\d{1,19}$/
-const TIMESTAMP = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/
 const MAX_RECORDS = 500_000
 const LOCALES = new Set(['de-de', 'en-us', 'es-es', 'fr-fr', 'id-id', 'it-it', 'ja-jp', 'ko-kr',
   'pt-pt', 'ru-ru', 'th-th', 'tr-tr', 'vi-vn', 'zh-cn', 'zh-tw'])
@@ -22,22 +22,6 @@ function invalid(message: string): never {
 function decimal(value: unknown): string | undefined {
   const text = typeof value === 'number' && Number.isSafeInteger(value) ? String(value) : value
   return typeof text === 'string' && UID_PATTERN.test(text) ? text : undefined
-}
-
-function localTimestamp(value: unknown): number | undefined {
-  if (typeof value !== 'string' || !TIMESTAMP.test(value)) return undefined
-  const date = new Date(`${value.replace(' ', 'T')}Z`)
-  if (!Number.isFinite(date.getTime()) || date.toISOString().slice(0, 19).replace('T', ' ') !== value) return undefined
-  return date.getTime()
-}
-
-export function gachaTimeWithOffset(time: string, timezone?: number): number | undefined {
-  const local = localTimestamp(time)
-  return local !== undefined && timezone !== undefined ? local - timezone * 3600000 : undefined
-}
-
-function offset(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isInteger(value) && value >= -12 && value <= 14 ? value : undefined
 }
 
 function isGame(value: unknown): value is GachaGame {
@@ -74,7 +58,7 @@ function readUigf(
     for (const account of accounts) {
       if (!isObject(account) || !Array.isArray(account.list)) return invalid(`${key} 账号结构`)
       const uid = decimal(account.uid)
-      const timezone = offset(account.timezone)
+      const timezone = gachaTimezoneOffset(account.timezone)
       const lang = typeof account.lang === 'string' && LOCALES.has(account.lang) ? account.lang : undefined
       if (!uid || timezone === undefined || (account.lang !== undefined && lang === undefined)) {
         return invalid(`${key} 账号 UID、时区或语言`)
@@ -83,7 +67,7 @@ function readUigf(
       for (const row of account.list) {
         if (!isObject(row) || typeof row.id !== 'string' || !UPLINK_ID.test(row.id) ||
             typeof row.item_id !== 'string' || !row.item_id ||
-            typeof row.time !== 'string' || localTimestamp(row.time) === undefined ||
+            typeof row.time !== 'string' || gachaWallTime(row.time) === undefined ||
             typeof row.gacha_type !== 'string' ||
             !(version === 'v4.0' ? UIGF_4_0 : UIGF_LATEST)[game].includes(row.gacha_type) ||
             (row.rank_type !== undefined && typeof row.rank_type !== 'string')) return invalid(`${key} 抽卡记录字段`)
@@ -124,7 +108,7 @@ function readNative(
     const gachaType = row.gachaType ?? row.gacha_type
     if (!isGame(game) || (expectedGame && game !== expectedGame) || typeof id !== 'string' ||
         !id.trim() || id.length > 512 || uid === undefined || uid.length > 128 ||
-        typeof time !== 'string' || (!knownSource && localTimestamp(time) === undefined) ||
+        typeof time !== 'string' || (!knownSource && gachaWallTime(time) === undefined) ||
         typeof gachaType !== 'string' || !gachaType.trim() ||
         (!knownSource && game !== 'arknights' && !MIHOYO[game].gachaTypes.some(({ type }) => type === gachaType))) {
       return invalid(`第 ${index + 1} 条记录的游戏、UID、ID、时间或卡池`)
@@ -132,9 +116,8 @@ function readNative(
     const poolId = row.poolId ?? row.pool_id
     const itemId = row.itemId ?? row.item_id
     const itemName = row.itemName ?? row.name
-    const timezone = offset(row.timezone)
-    const timestampMs = typeof row.timestampMs === 'number' && Number.isSafeInteger(row.timestampMs) &&
-      Number.isFinite(new Date(row.timestampMs).getTime()) ? row.timestampMs : gachaTimeWithOffset(time, timezone)
+    const timezone = gachaTimezoneOffset(row.timezone)
+    const timestampMs = isGachaInstant(row.timestampMs) ? row.timestampMs : gachaTimeWithOffset(time, timezone)
     return {
       id, appId, game, uid, gachaType, time, timezone, timestampMs,
       poolId: typeof poolId === 'string' ? poolId : undefined,
@@ -198,9 +181,11 @@ export function exportGachaArchive(records: readonly GachaRecord[], version: str
     if (record.game === 'arknights') return native()
     const game = record.game
     const id = sourceRecordId(record)
-    const timezone = offset(record.timezone)
+    const timezone = gachaTimezoneOffset(record.timezone)
+    const instant = gachaTimeWithOffset(record.time, timezone)
     if (!UID_PATTERN.test(record.uid) || timezone === undefined || !UPLINK_ID.test(id) || !record.itemId ||
-        !UIGF_LATEST[game].includes(record.gachaType) || localTimestamp(record.time) === undefined ||
+        !UIGF_LATEST[game].includes(record.gachaType) || instant === undefined ||
+        (isGachaInstant(record.timestampMs) && record.timestampMs !== instant) ||
         (game === 'starrail' && !record.gachaId)) return native()
     const gameAccounts = games[UIGF_KEYS[game]] ??= new Map()
     const account = gameAccounts.get(record.uid) ?? {

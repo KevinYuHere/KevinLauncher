@@ -74,7 +74,7 @@ if (command === 'new') {
   if (verification.runId !== runId || verification.sha !== source.sha || verification.tree !== source.tree ||
       verification.version !== source.version || verification.electron !== source.electron ||
       verification.entryMode !== 'requireAdministrator' || verification.runtimeMode !== 'asInvoker' ||
-      !['freshInstall', 'launched', 'overwriteUpgrade', 'historyPreserved', 'payloadMatchesInstalled', 'uninstalled']
+      !['freshInstall', 'launched', 'overwriteUpgrade', 'historyPreserved', 'backupVerified', 'payloadMatchesInstalled', 'uninstalled']
         .every(key => verification[key] === true) ||
       !assetNames(source.version).every(name => verification.assets?.[name]?.size === assets[name].size &&
         verification.assets[name].sha256 === assets[name].sha256)) {

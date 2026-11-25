@@ -1,4 +1,5 @@
 import type { GachaGame, GachaPoolStat, GachaRecord, GachaRecordPage, GachaStats } from '@shared/types'
+import { gachaTimeWithOffset, gachaWallTime, isGachaInstant } from './gachaTime'
 import { poolGroup, poolName, secondRankFor, topRankFor } from './metadata'
 
 export function sourceRecordId(record: GachaRecord): string {
@@ -19,14 +20,32 @@ function compareDigits(left: string, right: string): number {
   return left.length - right.length || (left < right ? -1 : left > right ? 1 : 0)
 }
 
+function sourceInstant(record: GachaRecord): number | undefined {
+  if (isGachaInstant(record.timestampMs)) return record.timestampMs
+  if (record.game === 'arknights' && record.uid) {
+    // Older native records embedded the service's millisecond timestamp in their ID.
+    const prefix = `arknights:${record.uid}:`
+    const suffix = `:${record.seq}:${record.itemId}`
+    if (record.seq && record.id.startsWith(prefix) && record.id.endsWith(suffix)) {
+      const source = record.id.slice(prefix.length, -suffix.length)
+      const millis = Number(source)
+      if (/^\d+$/.test(source) && millis > 0 && isGachaInstant(millis)) return millis
+    }
+  }
+  return gachaTimeWithOffset(record.time, record.timezone)
+}
+
 interface KeyedRecord {
   record: GachaRecord
   order?: string
   time?: number
+  absolute: boolean
   identifier: string
 }
 
 function compareTime(left: KeyedRecord, right: KeyedRecord): number {
+  // Display unplaced wall-clock records separately from records on the UTC timeline.
+  if (left.absolute !== right.absolute) return left.absolute ? 1 : -1
   if (left.time !== undefined && right.time !== undefined) return left.time - right.time
   if (left.time !== right.time) return left.time === undefined ? -1 : 1
   return left.record.time < right.record.time ? -1 : left.record.time > right.record.time ? 1 : 0
@@ -62,10 +81,10 @@ export class GachaIndex {
       const pool = poolGroup(record.game, record.gachaType, record.poolId, record.uigfGachaType)
       const group = JSON.stringify([record.game, record.uid, pool])
       const current = grouped.get(group) ?? { pool, list: [] }
-      const time = record.timestampMs ?? Date.parse(record.time.replace(' ', 'T'))
+      const when = sourceInstant(record)
       current.list.push({
         record, order: orderKey(record), identifier: recordIdentity(record),
-        time: Number.isFinite(time) ? time : undefined
+        time: when ?? gachaWallTime(record.time), absolute: when !== undefined
       })
       grouped.set(group, current)
     }
@@ -73,13 +92,17 @@ export class GachaIndex {
     const all: KeyedRecord[] = []
     for (const [group, { pool, list }] of grouped) {
       list.sort(compare)
-      const { game, uid } = list[0].record
+      const first = list[0]
+      const { game, uid } = first.record
       const stats = this.statsByGame.get(game) ?? emptyStats(game)
       this.statsByGame.set(game, stats)
       const { topRank, secondRank } = stats
       const pityKnown = Boolean(uid) && list.every((item, index) => {
-        const { record, order, time } = item
-        if (time === undefined || !Number.isSafeInteger(record.rankType) ||
+        const { record, order, time, absolute } = item
+        // Unplaced clocks have no provable cross-second order. A single recorded
+        // wall-clock second can still use source positions to order its pulls.
+        if (time === undefined || absolute !== first.absolute || (!absolute && time !== first.time) ||
+            !Number.isSafeInteger(record.rankType) ||
             record.rankType < (game === 'arknights' ? 0 : 1)) return false
         const prior = list[index - 1]
         return !prior || compareTime(prior, item) !== 0 ||
@@ -94,7 +117,8 @@ export class GachaIndex {
       const topAndSecond: GachaRecord[] = []
       const lastPosition = new Map<number, number>()
       let latestBanner: string | undefined
-      list.forEach(({ record, order, identifier, time }, index) => {
+      list.forEach((keyed, index) => {
+        const { record } = keyed
         latestBanner = record.bannerName || latestBanner
         stats.rankCounts[String(record.rankType)] = (stats.rankCounts[String(record.rankType)] ?? 0) + 1
         if (stats.lastUpdated === null || record.time > stats.lastUpdated) stats.lastUpdated = record.time
@@ -105,7 +129,7 @@ export class GachaIndex {
           ? { ...record, group, pityAtPull: pityKnown ? position - prior : undefined }
           : undefined
         lastPosition.set(record.rankType, position)
-        if (includeAllRecords && row) all.push({ record: row, order, identifier, time })
+        if (includeAllRecords && row) all.push({ ...keyed, record: row })
         if (record.rankType >= topRank) {
           stat.lastTopName = record.itemName
           stat.lastTopTime = record.time

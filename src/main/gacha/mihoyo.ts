@@ -2,7 +2,7 @@ import { setTimeout as wait } from 'node:timers/promises'
 import type { GachaRecord } from '@shared/types'
 import { MIHOYO, type GachaTypeDef, type MiHoYoGame } from './metadata'
 import { parseMiHoYoLink } from './mihoyoLink'
-import { gachaTimeWithOffset } from './gachaFormats'
+import { gachaTimeWithOffset, gachaTimezoneOffset } from './gachaTime'
 
 const PAGE_SIZE = 20
 const PAGE_DELAY = 250
@@ -48,7 +48,7 @@ function readDraw(input: unknown, pageTimezone: unknown): ParsedDraw {
     ? Number(timeOffset) : NaN
   return {
     id, uid, item, rank: Number(rank), name: row.name, time: row.time,
-    timezone: Number.isInteger(offset) && offset >= -12 && offset <= 14 ? offset : undefined,
+    timezone: gachaTimezoneOffset(offset),
     lang: typeof row.lang === 'string' ? row.lang : undefined,
     gachaId: decimal(row.gacha_id) ?? undefined,
     gachaType: decimal(row.gacha_type) ?? undefined
