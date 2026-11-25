@@ -438,17 +438,13 @@ async function startInstalled(target, version, fixture, savedSession) {
     return health.healthy === version
   }, '渲染器报告启动健康')
   if (scenario === 'legacy-tray') {
-    // The upgrade preserved close-to-tray. Close this verified test runtime
-    // through the modern setup message so the fixture needs no setting change.
-    const runtime = join(target, windowsLayout.runtime)
-    const { processes } = await windows('processes', '-Target', target)
-    const main = processes.find(process => process.parentId === ui.pid && samePath(process.path, runtime) && !process.renderer)
-    assert.ok(main, '无法确认升级后的运行库进程')
-    await windows('close', '-Target', runtime, '-ProcessId', String(main.id))
-    await ui.waitForExit()
-  } else {
-    await ui.close()
+    const preserved = await ui.run('window.api.getLauncherSettings()')
+    assert.equal(preserved.closeAction, 'tray', '覆盖安装应保留关闭到托盘的设置')
+    // Only change this disposable profile after verifying the retained preference.
+    const cleanup = await ui.run('window.api.setLauncherBehavior({ closeAction: "close" })')
+    assert.equal(cleanup.closeAction, 'close')
   }
+  await ui.close()
 }
 
 async function verifyBetaIntegration(target, data, selections) {
