@@ -27,6 +27,10 @@ if (process.platform !== 'win32' || process.env.GITHUB_ACTIONS !== 'true' ||
 }
 const dir = resolve(process.argv[2])
 const beta = process.argv[3] === '--beta-from-worktree'
+const scenario = beta ? process.argv[5] : 'release'
+if (!['fresh', 'legacy-tray', 'release'].includes(scenario) || (beta && scenario === 'release')) {
+  throw new Error('Beta 安装验证须在独立运行器请选择 fresh 或 legacy-tray')
+}
 const git = (...args) => execFileSync('git', args, { encoding: 'utf8', windowsHide: true }).trim()
 const betaRecord = beta ? JSON.parse(await readFile(join(dir, 'beta-verification.json'), 'utf8')) : null
 if (beta && !/^\d+\.\d+\.\d+-beta\.[1-9]\d*$/.test(betaRecord.version)) throw new Error('预期本地 Beta 版本')
@@ -543,7 +547,7 @@ async function uninstallFresh(target, data, fixture, history) {
 }
 
 async function verifyFreshBeta() {
-  console.log('Checking the fresh Beta before downloading the historical installer')
+  console.log('Checking a fresh Beta on its own disposable Windows runner')
   const { target, selections } = await install(installer, 'fresh', source.version)
   const data = sandboxData('fresh')
   console.log('Installed the selected Beta paths: ' + JSON.stringify({ ...selections, program: target, data }))
@@ -551,18 +555,14 @@ async function verifyFreshBeta() {
   await startInstalled(target, source.version, fixture)
   await comparePayload(target)
   const integration = await verifyBetaIntegration(target, data, selections)
+  console.log('Installed Windows Beta integration: ' + JSON.stringify(integration))
   await uninstallFresh(target, data, fixture, history)
-  // The uninstall must keep this data. Only unlink the private fixture from
-  // the disposable account before seeding the historical installation.
-  await windows('clear-fixture-data-dir', '-FixtureRoot', root, '-Target', data)
-  await checkProfile(data, fixture, history)
   const proof = { ...integration, installedPayloadMatched: true, uninstalledWithDataPreserved: true }
   console.log('Fresh Windows Beta verification: ' + JSON.stringify(proof))
   return proof
 }
 
-try {
-  const betaIntegration = beta ? await verifyFreshBeta() : null
+async function verifyPublishedOverlay() {
   const previous = await releasedAssets(process.argv[4] ?? 'latest')
   assert.ok(isNewerVersion(source.version, previous.manifest.version), '候选版本必须高于已发布正式版本')
   const previousFile = join(root, previous.manifest.installerName)
@@ -596,12 +596,18 @@ try {
   }
   await startInstalled(covering, source.version, fixture)
   console.log('Verified overwrite upgrade, startup, saved history and previous profile backup')
+  return { previousVersion: previous.manifest.version, previousInstallerSha256: previous.manifest.installerSha256, fixture, history }
+}
+
+try {
+  const betaIntegration = scenario === 'fresh' ? await verifyFreshBeta() : null
+  const overlay = scenario === 'fresh' ? null : await verifyPublishedOverlay()
   if (!beta) {
     const { target: fresh } = await install(installer, 'fresh', source.version)
-    await startInstalled(fresh, source.version, fixture)
+    await startInstalled(fresh, source.version, overlay.fixture)
     await comparePayload(fresh)
     console.log('Verified fresh install, startup and byte-for-byte app payload')
-    await uninstallFresh(fresh, sandboxData('fresh'), fixture, history)
+    await uninstallFresh(fresh, sandboxData('fresh'), overlay.fixture, overlay.history)
   }
   assert.deepEqual(beta ? await verifyBetaInstaller() : await verifyLocalAssets(dir, source.version, source.electron), assets)
   const verification = {
@@ -610,18 +616,15 @@ try {
     runId: process.env.GITHUB_RUN_ID,
     version: source.version,
     electron: source.electron,
-    previous: previous.manifest.version,
-    previousInstallerSha256: previous.manifest.installerSha256,
-    freshInstall: true,
     launched: true,
-    overwriteUpgrade: true,
-    historyPreserved: true,
-    backupVerified: true,
-    payloadMatchesInstalled: true,
-    uninstalled: true,
+    ...(overlay ? { previous: overlay.previousVersion, previousInstallerSha256: overlay.previousInstallerSha256,
+      overwriteUpgrade: true, historyPreserved: true, backupVerified: true } : {}),
+    ...(!beta || betaIntegration ? { freshInstall: true, payloadMatchesInstalled: true, uninstalled: true } : {}),
     entryMode: 'requireAdministrator',
     runtimeMode: 'asInvoker',
-    ...(beta ? { betaIntegration, legacyTrayOverlay: { hiddenBeforeUpgrade: true, foregroundInstaller: true, exitedNormally: true,
+    ...(beta ? { scenario } : {}),
+    ...(betaIntegration ? { betaIntegration } : {}),
+    ...(scenario === 'legacy-tray' ? { legacyTrayOverlay: { hiddenBeforeUpgrade: true, foregroundInstaller: true, exitedNormally: true,
       simultaneousActivityFlushed: true, activeApplicationContinued: true, unrelatedSameNamedProcessPreserved: true } } : {}),
     assets
   }
@@ -633,10 +636,10 @@ try {
       '',
       'Source: ' + source.sha + ' (tree ' + source.tree + ')',
       'Version: ' + source.version + ' / Electron ' + source.electron,
-      'Previous verified release: ' + previous.manifest.version,
-      'Previous installer SHA-256: ' + previous.manifest.installerSha256,
-      'Verified fresh install, launch, overwrite upgrade, backup, saved history, and managed uninstall.',
-      ...(beta ? ['Beta production integration: ' + JSON.stringify(betaIntegration)] : []),
+      ...(overlay ? ['Previous verified release: ' + overlay.previousVersion, 'Previous installer SHA-256: ' + overlay.previousInstallerSha256,
+        'Verified overwrite upgrade, startup, backup and application history.'] : []),
+      ...(!beta || betaIntegration ? ['Verified fresh install, launch and managed uninstall.'] : []),
+      ...(betaIntegration ? ['Beta production integration: ' + JSON.stringify(betaIntegration)] : []),
       '',
       ...Object.entries(assets).map(([file, asset]) => '- ' + file + ': ' + asset.sha256)
     ].join('\n') + '\n'

@@ -1,6 +1,6 @@
 param(
   [Parameter(Mandatory)][ValidateSet('choose-folder', 'links', 'integration', 'launch', 'processes', 'close', 'volumes',
-    'activate-installer', 'clear-fixture-data-dir', 'activity-process', 'stop-activity-process')]
+    'activate-installer', 'activity-process', 'stop-activity-process')]
   [string]$Action,
   [string]$Target,
   [string]$FixtureRoot,
@@ -250,25 +250,6 @@ if ($Action -eq 'integration') {
     $taskInfo = [ordered]@{ target = $task.Actions.Execute; arguments = $task.Actions.Arguments; level = $task.Principal.RunLevel.ToString() }
   }
   [ordered]@{ uninstall = $uninstallInfo; program = $program; data = $dataPath; task = $taskInfo } | ConvertTo-Json -Compress -Depth 5
-  return
-}
-
-if ($Action -eq 'clear-fixture-data-dir') {
-  $rootPath = [IO.Path]::GetFullPath($FixtureRoot)
-  $dataPath = [IO.Path]::GetFullPath($Target)
-  if ([IO.Path]::GetFileName($rootPath) -cnotmatch '^kl-beta-check-[A-Za-z0-9]{6}$' -or
-      [IO.Path]::GetFileName($dataPath) -cne 'KevinLauncherData' -or
-      -not $dataPath.StartsWith($rootPath + '\', [StringComparison]::OrdinalIgnoreCase)) {
-    throw 'Refused to reset a data registration outside this Beta fixture'
-  }
-  $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\KevinLauncher', $true)
-  if (-not $key) { throw 'Expected the verified fresh installation data registration' }
-  try {
-    if ($key.GetValue('DataDir') -ine $dataPath -or $key.GetValue('InstallLocation')) {
-      throw 'Refused to reset a different or still installed product registration'
-    }
-    $key.DeleteValue('DataDir')
-  } finally { $key.Dispose() }
   return
 }
 
