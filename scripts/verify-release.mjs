@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
+import { setTimeout as delay } from 'node:timers/promises'
 import { pathToFileURL } from 'node:url'
 import { matchesUpdateTransfer, parseUpdateManifest, payloadAssetName, STABLE_VERSION } from '../src/main/services/appUpdateManifest.ts'
 import { identifyFile } from './release-assets.mjs'
@@ -12,17 +13,23 @@ const repo = 'KevinYuHere/KevinLauncher'
 const parallel = 8
 
 /** @param {string} url @param {Record<string, string>} [headers] @param {AbortSignal} [signal] */
-async function download(url, headers = {}, signal) {
+async function download(url, headers = {}, signal, { attempts = 1, request = fetch } = {}) {
   const token = process.env.GH_TOKEN
   const authentication = token && new URL(url).hostname === 'api.github.com'
     ? { authorization: 'Bearer ' + token }
     : {}
-  const response = await fetch(url, {
-    headers: { accept: 'application/octet-stream', 'user-agent': 'KevinLauncher', ...authentication, ...headers },
-    signal: AbortSignal.any([AbortSignal.timeout(90_000), ...(signal ? [signal] : [])])
-  })
-  if (!response.ok) throw new Error('HTTP ' + response.status + ' 下载失败')
-  return response
+  for (let attempt = 1; ; attempt++) {
+    const response = await request(url, {
+      headers: { accept: 'application/octet-stream', 'user-agent': 'KevinLauncher', ...authentication, ...headers },
+      signal: AbortSignal.any([AbortSignal.timeout(90_000), ...(signal ? [signal] : [])])
+    })
+    if (response.ok) return response
+    if (attempt >= attempts || ![429, 500, 502, 503, 504].includes(response.status)) {
+      throw new Error('HTTP ' + response.status + ' 下载失败')
+    }
+    await response.body?.cancel()
+    await delay(250 * 2 ** (attempt - 1), undefined, { signal })
+  }
 }
 
 export async function releasedAssets(tag = 'latest') {
@@ -68,9 +75,10 @@ export async function downloadInstaller(release, file) {
     release.manifest.installerSha256, '历史正式安装包', download)
 }
 
-export async function downloadPayload(release, file, fetchFile = download) {
+export async function downloadPayload(release, file, request = fetch) {
+  const fetchFixture = url => download(url, {}, undefined, { attempts: 3, request })
   await downloadVerifiedAsset(release.payload, file, release.manifest.payloadSize,
-    release.manifest.payloadSha256, '历史正式应用载荷', fetchFile)
+    release.manifest.payloadSha256, '历史正式应用载荷', fetchFixture)
 }
 
 export async function verifyRemotePayload(asset, manifest, dir, fetchRange = download) {

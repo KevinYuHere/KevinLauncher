@@ -74,8 +74,39 @@ test('historical Windows fixtures verify the published application payload befor
   await downloadPayload(release, file, async () => new Response(content))
   expect(await fs.readFile(file, 'utf8')).toBe(content)
   for (const [index, invalid] of [content.slice(1), 'x' + content.slice(1)].entries()) {
-    await expect(downloadPayload(release, join(dir, 'invalid-' + index), async () => new Response(invalid)))
-      .rejects.toThrow('历史正式应用载荷校验失败')
+    let requests = 0
+    await expect(downloadPayload(release, join(dir, 'invalid-' + index), async () => {
+      requests++
+      return new Response(invalid)
+    })).rejects.toThrow('历史正式应用载荷校验失败')
+    expect(requests).toBe(1)
+  }
+})
+
+test('historical Windows payloads retry temporary HTTP errors at most twice', async () => {
+  const dir = await temp()
+  const content = 'published archive'
+  const release = {
+    payload: { url: 'https://example.test/asset' },
+    manifest: { payloadSize: Buffer.byteLength(content), payloadSha256: createHash('sha256').update(content).digest('hex') }
+  }
+  const file = join(dir, 'recovered.zip')
+  let attempts = 0
+  await downloadPayload(release, file, async () => {
+    attempts++
+    return attempts < 3 ? new Response('temporarily unavailable', { status: 503 }) : new Response(content)
+  })
+  expect(attempts).toBe(3)
+  expect(await fs.readFile(file, 'utf8')).toBe(content)
+  for (const [status, expected] of [[503, 3], [404, 1]]) {
+    const missing = join(dir, 'missing-' + status + '.zip')
+    attempts = 0
+    await expect(downloadPayload(release, missing, async () => {
+      attempts++
+      return new Response('not available', { status })
+    })).rejects.toThrow('HTTP ' + status)
+    expect(attempts).toBe(expected)
+    await expect(fs.access(missing)).rejects.toMatchObject({ code: 'ENOENT' })
   }
 })
 
