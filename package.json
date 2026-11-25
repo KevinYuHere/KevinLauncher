@@ -1,0 +1,50 @@
+{
+  "name": "kevin-launcher",
+  "version": "2.0.5",
+  "description": "KevinLauncher - a multi-application launcher with game add-ons",
+  "main": "./out/main/index.js",
+  "author": "Kevin",
+  "license": "MIT",
+  "private": true,
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "predev": "node scripts/build-windows-archive.mjs",
+    "prebuild": "node scripts/build-windows-archive.mjs",
+    "prebuild:win": "node scripts/build-windows-archive.mjs",
+    "pretest": "node scripts/build-windows-archive.mjs",
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "test": "vitest run",
+    "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
+    "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
+    "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "build:win": "electron-vite build && electron-builder --win",
+    "bundle": "node scripts/build-update-payload.mjs",
+    "release": "powershell -ExecutionPolicy Bypass -File scripts/release.ps1"
+  },
+  "dependencies": {
+    "@electron-toolkit/preload": "^3.0.1",
+    "@electron-toolkit/utils": "^3.0.0",
+    "fzstd": "^0.1.1",
+    "react-colorful": "^5.8.1"
+  },
+  "devDependencies": {
+    "@electron-toolkit/tsconfig": "^1.0.1",
+    "@types/node": "^22.10.2",
+    "@types/react": "^18.3.17",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^44.7.0",
+    "electron-builder": "^25.1.8",
+    "electron-vite": "^2.3.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "resedit": "1.7.2",
+    "typescript": "^5.7.2",
+    "vite": "^5.4.11",
+    "vitest": "^2.1.8"
+  }
+}

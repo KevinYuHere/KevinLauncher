@@ -1,0 +1,39 @@
+appId: com.kevin.kevinlauncher
+productName: KevinLauncher
+directories:
+  output: release
+# The packaged app is a tiny, version-independent entry point (shell/) plus a
+# versioned application directory (resources/app-<version>/, provided as
+# extraResources below). An update writes a new version directory while the app
+# is running and only flips resources/app-version.txt — see docs/INSTALLER.md.
+# asar is disabled so the entry point is plain files under resources/app/.
+asar: false
+files:
+  - from: shell
+    to: .
+# Writes resources/app-version.txt, verifies layout, and edits Windows resources offline.
+afterPack: scripts/afterPack.js
+extraResources:
+  - from: resources/hpatchz.exe
+    to: hpatchz.exe
+  - from: resources/icon.png
+    to: icon.png
+  - from: resources/icon.ico
+    to: icon.ico
+  # The actual application code, one directory per version.
+  - from: out
+    to: app-${version}/out
+  - from: package.json
+    to: app-${version}/package.json
+win:
+  icon: resources/icon.ico
+  # afterPack edits the app icon and manifest without downloading winCodeSign.
+  signAndEditExecutable: false
+  # A single installer: the portable self-extracting package, which always runs
+  # in install mode (the self-drawn UI) and never as a portable app.
+  target:
+    - portable
+portable:
+  artifactName: ${productName}-Installer-${version}.${ext}
+  # The NSIS wrapper elevates before extracting and starting the app.
+  requestExecutionLevel: admin
