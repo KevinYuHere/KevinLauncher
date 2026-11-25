@@ -13,9 +13,10 @@ export async function requestLauncherClose(processes: readonly ProcessIdentity[]
   let sent = 0
   for (const process of processes) {
     try {
-      const { stdout } = await exec(entry, [
+      const { stdout, stderr } = await exec(entry, [
         '--kevin-close-launcher-window', String(process.pid), String(process.createdAt), process.executable
       ], { timeout: 5000, windowsHide: true })
+      if (stderr.trim()) log(`install: close request for PID ${process.pid} (${stderr.trim()})`)
       const count = stdout.trim()
       const matched = Number(count)
       if (!/^\d+$/.test(count) || !Number.isSafeInteger(matched)) throw new Error('启动器退出请求状态无效')

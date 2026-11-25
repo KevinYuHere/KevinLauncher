@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawn, execFile, execFileSync } from 'node:child_process'
 import { once } from 'node:events'
-import { access, cp, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
+import { access, copyFile, cp, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { basename, dirname, isAbsolute, join, parse, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -39,6 +39,7 @@ const assets = beta ? await verifyBetaInstaller() : await verifyLocalAssets(dir,
 const root = beta ? await betaFixtureRoot() : await mkdtemp(join(process.env.RUNNER_TEMP, 'kl-release-check-'))
 const children = new Set()
 let startupSequence = 0
+let activity
 const sandboxData = name => join(root, beta && name === 'fresh' ? '中文 数据位置' : name, 'KevinLauncherData')
 const sandboxInstall = name => join(root, beta && name === 'fresh' ? '中文 安装位置' : name, 'KevinLauncher')
 
@@ -231,10 +232,19 @@ async function installThroughSetup(ui, info, target, data) {
   await setupPath(ui, '用户数据目录', info.dataDir)
   const programMethod = await pickSetupPath(ui, '安装位置', info.prefillDir, target)
   const dataMethod = await pickSetupPath(ui, '用户数据目录', info.dataDir, data)
+  await confirmSetupInstall(ui, target, data)
+  return { programMethod, dataMethod }
+}
+
+async function confirmSetupInstall(ui, target, data, requireForeground = false) {
   await clickPrimary(ui, '下一步')
   const locations = await ui.run(`[...document.querySelectorAll('.setup-list em')].map(element => element.textContent)`)
   assert(locations.some(path => samePath(path, target)), '确认页显示选中的程序目录')
   assert(locations.some(path => samePath(path, data)), '确认页显示选中的数据目录')
+  if (requireForeground) {
+    await ui.command('Page.bringToFront', {})
+    await until(() => windows('activate-installer', '-ProcessId', String(ui.pid)), '实际覆盖安装器处于 Windows 前台', 10_000)
+  }
   await clickPrimary(ui, '开始安装')
   await until(() => ui.run(`(() => {
     const failure = document.querySelector('.setup-warn-block')?.textContent
@@ -242,7 +252,6 @@ async function installThroughSetup(ui, info, target, data) {
     return document.querySelector('.setup-title-lg')?.textContent === '安装完成'
   })()`), 'Beta 安装完成')
   assert(samePath(await ui.run(`document.querySelector('.setup-panel .setup-sub b')?.textContent`), target))
-  return { programMethod, dataMethod }
 }
 
 async function install(file, name, version, previousVersion) {
@@ -259,6 +268,10 @@ async function install(file, name, version, previousVersion) {
   }
   if (beta && name === 'fresh') {
     selections = await installThroughSetup(ui, info, target, data)
+  } else if (beta && previousVersion) {
+    await setupPath(ui, '安装位置', target)
+    await setupPath(ui, '用户数据目录', data)
+    await confirmSetupInstall(ui, target, data, true)
   } else {
     const call = 'window.api.installerRun(' + JSON.stringify(target) + ',' + JSON.stringify(data) + ')'
     assert.equal(await ui.run(call), true)
@@ -311,6 +324,71 @@ async function seedProfile(target, data, version) {
   return { fixture, history }
 }
 
+async function unrelatedLauncherWindow() {
+  const outside = join(root, '另一个同名进程', windowsLayout.entry)
+  await mkdir(dirname(outside), { recursive: true })
+  const csc = join(process.env.SystemRoot, 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe')
+  const fixture = fileURLToPath(new URL('../tests/fixtures/windows-entry-close.cs', import.meta.url))
+  execFileSync(csc, ['/nologo', '/target:exe', '/out:' + outside, fixture], { windowsHide: true, stdio: 'inherit' })
+  let messages = ''
+  const child = spawn(outside, [], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] })
+  children.add(child)
+  child.stdout.setEncoding('utf8').on('data', chunk => { messages += chunk })
+  await once(child, 'spawn')
+  const exited = once(child, 'exit')
+  await until(() => /^ready:\d+\r?\n/.test(messages), '不同目录的同名 Windows 窗口就绪', 10_000)
+  return async () => {
+    assert.equal(child.exitCode, null, '覆盖安装不能关闭不同目录的同名进程')
+    assert.match(messages, /^ready:\d+\r?\n$/, '覆盖安装不能给不同目录的同名窗口发退出通知')
+    child.kill() // Owned test subprocess only.
+    await exited
+    children.delete(child)
+  }
+}
+
+async function activityProcess(action) {
+  return windows(action, '-FixtureRoot', root, '-Target', activity.file, '-ProcessId', String(activity.pid))
+}
+
+async function placeLegacyInTray(ui, installed, data) {
+  const preferences = await ui.run('window.api.setLauncherBehavior({ closeAction: "tray", autoStart: "tray" })')
+  assert.equal(preferences.closeAction, 'tray')
+  assert.equal(preferences.autoStart, 'tray')
+  const file = join(root, 'playtime-fixture.exe')
+  await copyFile(join(process.env.SystemRoot, 'System32', 'PING.EXE'), file)
+  const fixture = await ui.run('window.api.addApp(' + JSON.stringify({ name: 'Windows 覆盖验收运行会话',
+    launchMethods: [{ targetPath: file, arguments: '-n 45 127.0.0.1', workingDirectory: root }] }) + ')')
+  const launched = await ui.run('window.api.launchApp(' + JSON.stringify(fixture.id) + ')')
+  assert.equal(launched.ok, true, launched.error)
+  assert(Number.isSafeInteger(launched.pid) && launched.pid > 0, '预期运行验收进程的真实 PID')
+  activity = { file, pid: launched.pid, appId: fixture.id }
+  await until(async () => (await ui.run('window.api.listRunning()')).some(
+    app => app.appId === fixture.id && app.pids.includes(launched.pid)), '旧模式已记录运行中的应用')
+  assert.equal(await activityProcess('activity-process'), true)
+  const browserWindow = async () => (await windows('processes', '-Target', installed)).processes.find(process => process.id === ui.pid)
+  await until(async () => (await browserWindow())?.window, '旧版启动器升级前已显示实际窗口')
+  await ui.run('window.api.windowClose()')
+  await until(async () => (await browserWindow())?.window === false, '旧版关闭窗口后保持在托盘中', 15_000)
+  assert.equal(await activityProcess('activity-process'), true)
+  const persisted = JSON.parse(await readFile(join(data, 'playtime.json'), 'utf8'))
+  assert(!persisted.sessions.some(session => session.appId === activity.appId), '旧版退出前活动会话应尚未保存')
+  await delay(1200)
+  return unrelatedLauncherWindow()
+}
+
+async function expectedOverlayHistory(data, previous) {
+  if (!activity) return previous
+  assert.equal(await activityProcess('activity-process'), true, '覆盖安装应让运行中的应用继续运行')
+  const after = JSON.parse(await readFile(join(data, 'playtime.json'), 'utf8'))
+  assert.equal(after.version, previous.version)
+  assert.deepEqual(after.sessions.slice(0, previous.sessions.length), previous.sessions)
+  const added = after.sessions.slice(previous.sessions.length)
+  assert.equal(added.length, 1, '托盘旧实例退出时应保存正在运行的会话')
+  assert.equal(added[0].appId, activity.appId)
+  assert(added[0].durationSec >= 1, '退出时刷新的会话应有实际使用时长')
+  return after
+}
+
 async function startInstalled(target, version, fixture) {
   windowsExecutable.assertExecutionLevel(join(target, windowsLayout.entry), 'requireAdministrator')
   windowsExecutable.assertExecutionLevel(join(target, windowsLayout.runtime), 'asInvoker')
@@ -343,10 +421,28 @@ async function verifyBetaIntegration(target, data, selections) {
   const links = await windows('links')
   assert.equal(links?.length, 2)
   for (const link of links) {
-    assert(samePath(link.target, entry) && samePath(link.workingDirectory, target))
+    assert(link.target && link.workingDirectory, 'Shortcut missing a launch path: ' + JSON.stringify(link))
+    assert(samePath(await realpath(link.target), entry), 'Wrong shortcut target: ' + JSON.stringify(link))
+    assert(samePath(await realpath(link.workingDirectory), target), 'Wrong shortcut working directory: ' + JSON.stringify(link))
     assert.equal(link.arguments, '')
   }
-  await windows('launch', '-Target', links[0].path)
+  const launchedFrom = []
+  for (const link of links) launchedFrom.push(await launchBetaShortcut(link.path, target, entry, runtime))
+  const [launched] = launchedFrom
+  await assert.rejects(access(join(process.env.LOCALAPPDATA, 'Programs', 'KevinLauncher')), { code: 'ENOENT' })
+  return {
+    nativeFolderDialogs: 2, ...selections, program: target, data,
+    differentSystemVolume: !samePath(parse(target).root, parse(process.env.LOCALAPPDATA).root),
+    defaultProgramUntouched: true, shortcutsLaunched: launchedFrom.length, productionRegistration: true,
+    startupTask: task.level, runnerIntegrityRid: launched.runnerIntegrityRid,
+    entryIntegrityRid: launched.started.integrityRid, runtimeIntegrityRid: launched.main.integrityRid,
+    rendererIntegrityRids: launched.renderers.map(renderer => renderer.integrityRid), rendererSandboxed: true,
+    uacPromptObserved: false
+  }
+}
+
+async function launchBetaShortcut(shortcut, target, entry, runtime) {
+  await windows('launch', '-Target', shortcut)
   const launched = await until(async () => {
     const { processes, runnerIntegrityRid } = await windows('processes', '-Target', target)
     const started = processes.find(process => samePath(process.path, entry))
@@ -359,16 +455,7 @@ async function verifyBetaIntegration(target, data, selections) {
   assert(launched.renderers.every(renderer => !renderer.noSandbox && renderer.restricted && renderer.integrityRid <= 0x1000))
   await windows('close', '-Target', runtime, '-ProcessId', String(launched.main.id))
   await until(async () => !(await windows('processes', '-Target', target)).processes.length, '快捷方式启动的实例退出')
-  await assert.rejects(access(join(process.env.LOCALAPPDATA, 'Programs', 'KevinLauncher')), { code: 'ENOENT' })
-  return {
-    nativeFolderDialogs: 2, ...selections, program: target, data,
-    differentSystemVolume: !samePath(parse(target).root, parse(process.env.LOCALAPPDATA).root),
-    defaultProgramUntouched: true, shortcutLaunched: true, productionRegistration: true,
-    startupTask: task.level, runnerIntegrityRid: launched.runnerIntegrityRid,
-    entryIntegrityRid: launched.started.integrityRid, runtimeIntegrityRid: launched.main.integrityRid,
-    rendererIntegrityRids: launched.renderers.map(renderer => renderer.integrityRid), rendererSandboxed: true,
-    uacPromptObserved: false
-  }
+  return launched
 }
 
 async function verifyUninstall(target, data) {
@@ -459,6 +546,7 @@ async function verifyFreshBeta() {
   console.log('Checking the fresh Beta before downloading the historical installer')
   const { target, selections } = await install(installer, 'fresh', source.version)
   const data = sandboxData('fresh')
+  console.log('Installed the selected Beta paths: ' + JSON.stringify({ ...selections, program: target, data }))
   const { fixture, history } = await seedProfile(target, data, source.version)
   await startInstalled(target, source.version, fixture)
   await comparePayload(target)
@@ -487,6 +575,7 @@ try {
   assert.equal(await previousUi.run('window.api.appVersion()'), previous.manifest.version)
   assert.ok((await previousUi.run('window.api.listApps()')).some(app => app.id === fixture.id))
   assert.equal((await previousUi.run('window.api.playTimeTotals()'))[fixture.id], 60)
+  const checkUnrelated = beta ? await placeLegacyInTray(previousUi, existing, data) : null
   console.log('Verified and started the published setup and launcher, v' + previous.manifest.version)
   const { target: covering } = await install(installer, 'upgrade', source.version, previous.manifest.version).catch(async error => {
     const launcherLog = (await readFile(join(sandboxData('upgrade'), 'launcher.log'), 'utf8').catch(() => ''))
@@ -497,8 +586,14 @@ try {
   })
   await previousUi.waitForExit()
   assert.equal(existing, covering)
-  await checkProfile(data, fixture, history)
-  await checkProfile(join(data, 'update-backup'), fixture, history)
+  const updatedHistory = await expectedOverlayHistory(data, history)
+  await checkUnrelated?.()
+  await checkProfile(data, fixture, updatedHistory)
+  await checkProfile(join(data, 'update-backup'), fixture, updatedHistory)
+  if (activity) {
+    await activityProcess('stop-activity-process')
+    activity = undefined
+  }
   await startInstalled(covering, source.version, fixture)
   console.log('Verified overwrite upgrade, startup, saved history and previous profile backup')
   if (!beta) {
@@ -526,7 +621,8 @@ try {
     uninstalled: true,
     entryMode: 'requireAdministrator',
     runtimeMode: 'asInvoker',
-    ...(beta ? { betaIntegration } : {}),
+    ...(beta ? { betaIntegration, legacyTrayOverlay: { hiddenBeforeUpgrade: true, foregroundInstaller: true, exitedNormally: true,
+      simultaneousActivityFlushed: true, activeApplicationContinued: true, unrelatedSameNamedProcessPreserved: true } } : {}),
     assets
   }
   await writeFile(join(dir, 'windows-verification.json'), JSON.stringify(verification, null, 2) + '\n')
@@ -548,6 +644,7 @@ try {
     await appendFile(process.env.GITHUB_STEP_SUMMARY, summary)
   }
 } finally {
+  if (activity) await activityProcess('stop-activity-process').catch(error => console.error(error.message))
   for (const child of children) {
     if (child.exitCode === null) {
       try {

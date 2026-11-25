@@ -234,14 +234,16 @@ export async function closeRunningInstances(targetDir: string): Promise<boolean>
   })
   if (!initial) return false
   const pids = processesUsingInstall(initial, targetDir)
+  const selected = new Set(pids)
+  const matching = initial.filter(hasProcessIdentity).filter(item => selected.has(item.pid))
+  const creationTimes = new Map(matching.map(item => [item.pid, item.createdAt]))
+  const paths = new Map(matching.map(item => [item.pid, canonicalExecutable(item.executable)]))
+  // Keep the browser under the entry, and skip Chromium processes under the same runtime image.
+  const browsers = matching.filter(item => paths.get(item.ppid) !== paths.get(item.pid))
   if (pids.length) {
     log(`install: requesting normal exit from ${pids.join(', ')} at ${targetDir}`)
     try {
-      const selected = new Set(pids)
-      const matching = initial.filter(hasProcessIdentity).filter(item => selected.has(item.pid))
-      const paths = new Map(matching.map(item => [item.pid, canonicalExecutable(item.executable)]))
-      // Keep the browser under the entry, and skip Chromium processes under the same runtime image.
-      const sent = await requestLauncherClose(matching.filter(item => paths.get(item.ppid) !== paths.get(item.pid)))
+      const sent = await requestLauncherClose(browsers)
       log(`install: launcher close posted to ${sent} window(s)`)
     } catch (error) {
       log(`install: launcher exit request failed (${String(error)})`)
@@ -252,7 +254,14 @@ export async function closeRunningInstances(targetDir: string): Promise<boolean>
   let remaining: number[] | null = pids
   while (Date.now() < expires) {
     remaining = await ProcessTree.snapshot(AbortSignal.timeout(Math.max(1, expires - Date.now())))
-      .then(snapshot => processesUsingInstall(snapshot, targetDir)).catch(() => null)
+      .then(snapshot => {
+        const active = new Set(processesUsingInstall(snapshot, targetDir))
+        for (const item of snapshot) {
+          // Keep waiting for a previously verified process when CIM temporarily omits its image path.
+          if (item.createdAt !== undefined && creationTimes.get(item.pid) === item.createdAt) active.add(item.pid)
+        }
+        return [...active]
+      }).catch(() => null)
     if (remaining?.length === 0 && (ownsExecutable || await isUnlocked(exe) && await isUnlocked(runtime))) return true
     await new Promise((resolve) => setTimeout(resolve, 450))
   }

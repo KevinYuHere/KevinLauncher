@@ -92,6 +92,24 @@ describe('managed uninstall', () => {
     expect(close).toHaveBeenCalledWith([entry, runtime])
   })
 
+  it.skipIf(process.platform !== 'win32')('waits for the verified process to exit when CIM temporarily omits its path', async () => {
+    const target = await fs.realpath(await temp())
+    const identity = {
+      pid: 424242, ppid: 0, name: 'KevinLauncher.exe', executable: join(target, 'KevinLauncher.exe'),
+      createdAt: Date.now()
+    }
+    const inaccessible = { ...identity, executable: undefined }
+    const reused = { ...inaccessible, createdAt: identity.createdAt + 1 }
+    const snapshot = vi.spyOn(ProcessTree, 'snapshot')
+      .mockResolvedValueOnce([identity])
+      .mockResolvedValueOnce([inaccessible])
+      .mockResolvedValueOnce([reused])
+    vi.mocked(requestLauncherClose).mockResolvedValueOnce(1)
+
+    await expect(closeRunningInstances(target)).resolves.toBe(true)
+    expect(snapshot).toHaveBeenCalledTimes(3)
+  })
+
 
   it('uses only the validated recorded file set', () => {
     expect(managedUninstallPaths(['KevinLauncher.exe', 'resources/app/main.js', 'INSTALL.JSON']))

@@ -5,8 +5,8 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { createRequire } from 'node:module'
 import { setTimeout as delay } from 'node:timers/promises'
-import { afterAll, beforeAll, describe, expect, test } from 'vitest'
-import { buildWindowsEntry, windowsEntrySourceFiles } from '../scripts/build-windows-entry.mjs'
+import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest'
+import { buildWindowsEntry, windowsAutomationReferences, windowsEntrySourceFiles } from '../scripts/build-windows-entry.mjs'
 import windowsLayout from '../src/shared/windowsLayout.json'
 
 const require = createRequire(import.meta.url)
@@ -45,7 +45,8 @@ describe.skipIf(process.platform !== 'win32').each([
     writeFileSync(invoker, readFileSync(manifest, 'utf8').replace('requireAdministrator', 'asInvoker'))
     const compiler = join(process.env.SystemRoot!, 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe')
     const compile = (file: string, code: string) => execFileSync(compiler,
-      ['/nologo', '/optimize+', '/target:winexe', '/platform:x64', ...(trial ? ['/define:TRIAL'] : []),
+      ['/nologo', '/optimize+', '/target:winexe', '/platform:x64', ...windowsAutomationReferences(compiler),
+        ...(trial ? ['/define:TRIAL'] : []),
         '/out:' + file, '/win32manifest:' + invoker, code],
       { windowsHide: true })
     // Only this test copy is runnable without prompting the logged-in user for UAC.
@@ -138,6 +139,29 @@ describe.skipIf(process.platform !== 'win32').each([
       expect(request(created, image).stdout.trim()).toBe('0')
       expect(target.exitCode).toBeNull()
       expect(stdout).not.toContain('KevinLauncherFixture_Other')
+    } finally {
+      if (target.exitCode === null && target.signalCode === null) target.kill()
+      await closed
+    }
+  }, 10000)
+
+  test('requests the legacy tray action before falling back to closing a hidden window', async () => {
+    const target = spawn(legacy, ['--legacy-tray'], { cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] })
+    const closed = once(target, 'close')
+    let stdout = ''
+    target.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk })
+    try {
+      await vi.waitFor(() => expect(stdout).toMatch(/ready:(\d+)\r?\n/))
+      const [, created] = stdout.match(/ready:(\d+)\r?\n/)!
+      const response = spawnSync(entry, ['--kevin-close-launcher-window', String(target.pid), created, legacy],
+        { cwd, windowsHide: true, encoding: 'utf8', timeout: 4000 })
+      expect(response.error).toBeUndefined()
+      expect(response.status).toBe(0)
+      expect(response.stdout.trim()).toBe('1')
+      expect(response.stderr).toBe('')
+      expect(await closed).toEqual([0, null])
+      expect(stdout).toMatch(/tray:quit\r?\ntray:saved\r?\n$/)
+      expect(stdout).not.toContain('close:')
     } finally {
       if (target.exitCode === null && target.signalCode === null) target.kill()
       await closed

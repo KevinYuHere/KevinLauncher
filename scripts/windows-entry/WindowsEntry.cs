@@ -1,9 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
+using System.Windows.Automation;
 
 static class WindowsEntry
 {
@@ -89,6 +92,11 @@ static class WindowsEntry
         const uint CloseMessage = 0x0010;
         // WM_APP + 75, shared with the installed Electron main window.
         const uint SetupCloseMessage = 0x804B;
+        // The first Tray in legacy Electron reports clicks to this message window.
+        const string TrayHostClass = "Electron_NotifyIconHostWindow";
+        const uint TrayCallback = 0x8001;
+        const int FirstTrayIcon = 3;
+        const int ContextMenuMessage = 0x007B;
         const int InvalidWindowHandle = 1400;
         const long UnixEpochFileTime = 116444736000000000L;
 
@@ -110,6 +118,10 @@ static class WindowsEntry
         static extern uint GetWindowThreadProcessId(IntPtr window, out uint id);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         static extern int GetClassNameW(IntPtr window, StringBuilder name, int capacity);
+        [DllImport("user32.dll")]
+        static extern bool IsWindowVisible(IntPtr window);
+        [DllImport("user32.dll")]
+        static extern bool AllowSetForegroundWindow(uint id);
         [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         static extern bool PostMessageW(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
 
@@ -173,6 +185,80 @@ static class WindowsEntry
             return delivered;
         }
 
+        static bool StillOwnsWindow(IntPtr process, uint pid, uint thread, IntPtr window)
+        {
+            uint owner;
+            return WaitForSingleObject(process, 0) == WaitTimeout &&
+                GetWindowThreadProcessId(window, out owner) == thread && owner == pid;
+        }
+
+        static bool InvokeTrayQuit(IntPtr process, uint pid)
+        {
+            var name = new StringBuilder(128);
+            var openedBeforeRequest = new HashSet<IntPtr>();
+            IntPtr tray = IntPtr.Zero;
+            uint trayThread = 0;
+            EnumWindows((window, context) => {
+                uint owner;
+                uint thread = GetWindowThreadProcessId(window, out owner);
+                if (thread == 0 || owner != pid || GetClassNameW(window, name, name.Capacity) == 0) return true;
+                if (name.ToString() == TrayHostClass)
+                {
+                    tray = window;
+                    trayThread = thread;
+                }
+                if (IsWindowVisible(window)) openedBeforeRequest.Add(window);
+                return true;
+            }, IntPtr.Zero);
+            if (tray == IntPtr.Zero || !StillOwnsWindow(process, pid, trayThread, tray)) return false;
+
+            // Grant permission from the foreground installer. The old launcher may already be
+            // eligible when the grant fails, so still attempt the addressed tray callback.
+            bool canActivate = AllowSetForegroundWindow(pid);
+            if (!PostMessageW(tray, TrayCallback, new IntPtr(FirstTrayIcon), new IntPtr(ContextMenuMessage))) return false;
+            var quitItem = new AndCondition(
+                new PropertyCondition(AutomationElement.ProcessIdProperty, (int)pid),
+                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.MenuItem),
+                new PropertyCondition(AutomationElement.NameProperty, "\u9000\u51fa"));
+            var wait = Stopwatch.StartNew();
+            do
+            {
+                uint state = WaitForSingleObject(process, 0);
+                if (state == 0) return true;
+                if (state != WaitTimeout) throw new Win32Exception();
+                var popups = new List<IntPtr>();
+                EnumWindows((window, context) => {
+                    if (!openedBeforeRequest.Contains(window) && IsWindowVisible(window) &&
+                        StillOwnsWindow(process, pid, trayThread, window) &&
+                        GetClassNameW(window, name, name.Capacity) > 0 &&
+                        name.ToString().StartsWith("Chrome_WidgetWin_", StringComparison.Ordinal)) popups.Add(window);
+                    return true;
+                }, IntPtr.Zero);
+                foreach (var popup in popups)
+                {
+                    try
+                    {
+                        if (!StillOwnsWindow(process, pid, trayThread, popup)) continue;
+                        var root = AutomationElement.FromHandle(popup);
+                        var items = root.FindAll(TreeScope.Descendants, quitItem);
+                        object pattern;
+                        if (items.Count != 1 || !items[0].Current.IsEnabled ||
+                            !items[0].TryGetCurrentPattern(InvokePattern.Pattern, out pattern) ||
+                            !StillOwnsWindow(process, pid, trayThread, popup)) continue;
+                        ((InvokePattern)pattern).Invoke();
+                        return true;
+                    }
+                    catch (ElementNotAvailableException)
+                    {
+                        // The menu can disappear as the user switches windows or the launcher closes.
+                    }
+                }
+                Thread.Sleep(50);
+            } while (wait.ElapsedMilliseconds < 1500);
+            Console.Error.WriteLine(canActivate ? "Launcher tray quit action unavailable" : "Launcher tray could not obtain foreground permission");
+            return false;
+        }
+
         public static int Run(string[] args)
         {
             uint id;
@@ -188,7 +274,9 @@ static class WindowsEntry
             try
             {
                 AssertIdentity(process, expected, created);
-                Console.WriteLine(PostClose(process, id, message).ToString(CultureInfo.InvariantCulture));
+                int sent = message == CloseMessage && InvokeTrayQuit(process, id)
+                    ? 1 : PostClose(process, id, message);
+                Console.WriteLine(sent.ToString(CultureInfo.InvariantCulture));
                 return 0;
             }
             finally { CloseHandle(process); }
@@ -322,6 +410,7 @@ static class WindowsEntry
         finally { CloseHandle(process.Process); }
     }
 
+    [MTAThread]
     static int Main(string[] args)
     {
         bool closeWindow = args.Length > 0 && args[0] == CloseWindowArgument;

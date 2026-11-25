@@ -1,5 +1,6 @@
 param(
-  [Parameter(Mandatory)][ValidateSet('choose-folder', 'links', 'integration', 'launch', 'processes', 'close', 'volumes', 'clear-fixture-data-dir')]
+  [Parameter(Mandatory)][ValidateSet('choose-folder', 'links', 'integration', 'launch', 'processes', 'close', 'volumes',
+    'activate-installer', 'clear-fixture-data-dir', 'activity-process', 'stop-activity-process')]
   [string]$Action,
   [string]$Target,
   [string]$FixtureRoot,
@@ -21,13 +22,14 @@ if ($Action -eq 'volumes') {
   return
 }
 
-if ($Action -eq 'choose-folder') {
+if ($Action -eq 'choose-folder' -or $Action -eq 'activate-installer') {
   $entry = @(Get-CimInstance Win32_Process -Filter "Name = '$($layout.entry)' AND ParentProcessId = $ProcessId")
   if ($entry.Count -ne 1) { throw 'Could not identify the public entry inside the portable installer' }
   $entryId = $entry[0].ProcessId
   $runtime = @(Get-CimInstance Win32_Process -Filter "Name = '$($layout.runtime)' AND ParentProcessId = $entryId")
-  if ($runtime.Count -ne 1 -or -not (Test-Path -LiteralPath $Target -PathType Container)) {
-    throw 'Expected the observed installer runtime and an existing fixture folder'
+  if ($runtime.Count -ne 1) { throw 'Could not identify the observed installer runtime' }
+  if ($Action -eq 'choose-folder' -and -not (Test-Path -LiteralPath $Target -PathType Container)) {
+    throw 'Expected an existing fixture folder'
   }
   Add-Type -TypeDefinition @'
 using System;
@@ -61,6 +63,8 @@ public static class SetupFolderPicker {
     [DllImport("user32.dll")]
     static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")]
+    static extern bool SetForegroundWindow(IntPtr window);
+    [DllImport("user32.dll")]
     static extern bool GetWindowRect(IntPtr window, out Rectangle rect);
     [DllImport("user32.dll")]
     static extern bool SetCursorPos(int x, int y);
@@ -84,6 +88,14 @@ public static class SetupFolderPicker {
         var children = new List<IntPtr>();
         EnumChildWindows(window, (child, _) => { children.Add(child); return true; }, IntPtr.Zero);
         return children;
+    }
+    public static bool Activate(uint processId, IntPtr window) {
+        if (window == IntPtr.Zero || !IsWindowVisible(window)) return false;
+        uint owner;
+        GetWindowThreadProcessId(window, out owner);
+        if (owner != processId) return false;
+        if (GetForegroundWindow() != window) SetForegroundWindow(window);
+        return GetForegroundWindow() == window;
     }
     static void Confirm(IntPtr dialog, IntPtr button) {
         Rectangle rect;
@@ -157,17 +169,57 @@ public static class SetupFolderPicker {
     }
 }
 '@
-  [SetupFolderPicker]::Select([uint32]$runtime[0].ProcessId, $Target) | ConvertTo-Json -Compress
+  $runtimeId = $runtime[0].ProcessId
+  if ($Action -eq 'activate-installer') {
+    $window = (Get-Process -Id $runtimeId).MainWindowHandle
+    [SetupFolderPicker]::Activate([uint32]$runtimeId, $window) | ConvertTo-Json -Compress
+  } else {
+    [SetupFolderPicker]::Select([uint32]$runtimeId, $Target) | ConvertTo-Json -Compress
+  }
   return
 }
 
 if ($Action -eq 'links') {
-  $shell = New-Object -ComObject WScript.Shell
+  Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.ComTypes;
+using System.Text;
+
+public static class SetupShellLink {
+    [ComImport, Guid("000214F9-0000-0000-C000-000000000046"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IShellLinkW {
+        void GetPath([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder path, int size, IntPtr findData, uint flags);
+        void GetIDList(out IntPtr idList);
+        void SetIDList(IntPtr idList);
+        void GetDescription([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder description, int size);
+        void SetDescription([MarshalAs(UnmanagedType.LPWStr)] string description);
+        void GetWorkingDirectory([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder directory, int size);
+        void SetWorkingDirectory([MarshalAs(UnmanagedType.LPWStr)] string directory);
+        void GetArguments([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder arguments, int size);
+    }
+    public static string[] Read(string file) {
+        var type = Type.GetTypeFromCLSID(new Guid("00021401-0000-0000-C000-000000000046"));
+        object instance = Activator.CreateInstance(type);
+        try {
+            ((IPersistFile)instance).Load(file, 0);
+            var link = (IShellLinkW)instance;
+            var target = new StringBuilder(32768);
+            var directory = new StringBuilder(32768);
+            var arguments = new StringBuilder(32768);
+            link.GetPath(target, target.Capacity, IntPtr.Zero, 4); // SLGP_RAWPATH
+            link.GetWorkingDirectory(directory, directory.Capacity);
+            link.GetArguments(arguments, arguments.Capacity);
+            return new[] { target.ToString(), directory.ToString(), arguments.ToString() };
+        } finally { Marshal.ReleaseComObject(instance); }
+    }
+}
+'@
   @('DesktopDirectory', 'Programs') | ForEach-Object {
     $path = Join-Path ([Environment]::GetFolderPath($_, 'DoNotVerify')) 'KevinLauncher.lnk'
     if (Test-Path -LiteralPath $path -PathType Leaf) {
-      $link = $shell.CreateShortcut($path)
-      [pscustomobject]@{ path = $path; target = $link.TargetPath; workingDirectory = $link.WorkingDirectory; arguments = $link.Arguments }
+      $link = [SetupShellLink]::Read($path)
+      [pscustomobject]@{ path = $path; target = $link[0]; workingDirectory = $link[1]; arguments = $link[2] }
     }
   } | ConvertTo-Json -Compress
   return
@@ -217,6 +269,29 @@ if ($Action -eq 'clear-fixture-data-dir') {
     }
     $key.DeleteValue('DataDir')
   } finally { $key.Dispose() }
+  return
+}
+
+if ($Action -eq 'activity-process' -or $Action -eq 'stop-activity-process') {
+  $rootPath = [IO.Path]::GetFullPath($FixtureRoot)
+  $file = [IO.Path]::GetFullPath($Target)
+  if ([IO.Path]::GetFileName($rootPath) -cnotmatch '^kl-beta-check-[A-Za-z0-9]{6}$' -or
+      $file -ine (Join-Path $rootPath 'playtime-fixture.exe')) {
+    throw 'Refused to inspect or stop a process outside this Beta activity fixture'
+  }
+  $process = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+  $alive = $false
+  if ($process) {
+    try {
+      $null = $process.Handle
+      $alive = -not $process.HasExited -and $process.Path -ieq $file
+      if ($alive -and $Action -eq 'stop-activity-process') {
+        $process.Kill()
+        if (-not $process.WaitForExit(2000)) { throw 'The verified activity fixture did not exit' }
+      }
+    } finally { $process.Dispose() }
+  }
+  ConvertTo-Json -InputObject $alive -Compress
   return
 }
 

@@ -3,11 +3,13 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 
 static class WindowsEntryCloseFixture
 {
     const string LegacyClass = "Chrome_WidgetWin_1";
     const string OtherClass = "KevinLauncherFixture_Other";
+    const string TrayClass = "Electron_NotifyIconHostWindow";
     static readonly WindowProcedure Handler = HandleWindow;
 
     delegate IntPtr WindowProcedure(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
@@ -50,9 +52,24 @@ static class WindowsEntryCloseFixture
     static extern IntPtr DispatchMessageW(ref Message message);
     [DllImport("user32.dll")]
     static extern bool DestroyWindow(IntPtr window);
+    [DllImport("user32.dll")]
+    static extern void PostQuitMessage(int exitCode);
 
     static IntPtr HandleWindow(IntPtr window, uint message, IntPtr wParam, IntPtr lParam)
     {
+        if (message == 0x8001 && wParam == new IntPtr(3) && lParam == new IntPtr(0x007B))
+        {
+            var tray = new StringBuilder(128);
+            GetClassNameW(window, tray, tray.Capacity);
+            if (tray.ToString() == TrayClass)
+            {
+                Console.WriteLine("tray:quit");
+                Thread.Sleep(250);
+                Console.WriteLine("tray:saved");
+                PostQuitMessage(0);
+            }
+            return IntPtr.Zero;
+        }
         if (message != 0x0010 && message != 0x804B) return DefWindowProcW(window, message, wParam, lParam);
         var name = new StringBuilder(128);
         GetClassNameW(window, name, name.Capacity);
@@ -70,10 +87,11 @@ static class WindowsEntryCloseFixture
             IntPtr.Zero, IntPtr.Zero, info.Instance, IntPtr.Zero) == IntPtr.Zero) throw new Win32Exception();
     }
 
-    static int Main()
+    static int Main(string[] args)
     {
         CreateHiddenWindow(LegacyClass);
         CreateHiddenWindow(OtherClass);
+        if (args.Length == 1 && args[0] == "--legacy-tray") CreateHiddenWindow(TrayClass);
         using (var process = Process.GetCurrentProcess())
         {
             long created = (process.StartTime.ToUniversalTime().ToFileTimeUtc() - 116444736000000000L) / 10000;
