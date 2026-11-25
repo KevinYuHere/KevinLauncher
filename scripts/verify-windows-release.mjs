@@ -423,19 +423,32 @@ async function expectedOverlayHistory(data, previous) {
   return after
 }
 
-async function startInstalled(target, version, fixture) {
+async function startInstalled(target, version, fixture, savedSession) {
   windowsExecutable.assertExecutionLevel(join(target, windowsLayout.entry), 'requireAdministrator')
   windowsExecutable.assertExecutionLevel(join(target, windowsLayout.runtime), 'asInvoker')
   const ui = await launch(join(target, windowsLayout.entry))
   assert.equal(await ui.run('window.api.appVersion()'), version)
   assert.ok((await ui.run('navigator.userAgent')).includes('Electron/' + source.electron))
   assert.ok((await ui.run('window.api.listApps()')).some(app => app.id === fixture.id && app.name === fixture.name))
-  assert.equal((await ui.run('window.api.playTimeTotals()'))[fixture.id], 60)
+  const totals = await ui.run('window.api.playTimeTotals()')
+  assert.equal(totals[fixture.id], 60)
+  if (savedSession) assert.equal(totals[savedSession.appId], savedSession.durationSec)
   await until(async () => {
     const health = JSON.parse(await readFile(join(target, 'resources', 'app-activation.json'), 'utf8'))
     return health.healthy === version
   }, '渲染器报告启动健康')
-  await ui.close()
+  if (scenario === 'legacy-tray') {
+    // The upgrade preserved close-to-tray. Close this verified test runtime
+    // through the modern setup message so the fixture needs no setting change.
+    const runtime = join(target, windowsLayout.runtime)
+    const { processes } = await windows('processes', '-Target', target)
+    const main = processes.find(process => process.parentId === ui.pid && samePath(process.path, runtime) && !process.renderer)
+    assert.ok(main, '无法确认升级后的运行库进程')
+    await windows('close', '-Target', runtime, '-ProcessId', String(main.id))
+    await ui.waitForExit()
+  } else {
+    await ui.close()
+  }
 }
 
 async function verifyBetaIntegration(target, data, selections) {
@@ -629,7 +642,7 @@ async function verifyPublishedOverlay() {
     await activityProcess('stop-activity-process')
     activity = undefined
   }
-  await startInstalled(covering, source.version, fixture)
+  await startInstalled(covering, source.version, fixture, beta ? updatedHistory.sessions.at(-1) : undefined)
   console.log('Verified overwrite upgrade, startup, saved history and previous profile backup')
   return {
     previousVersion: previous.manifest.version, previousInstallerSha256: previousInstaller.manifest.installerSha256,
