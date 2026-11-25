@@ -38,18 +38,45 @@ function codexMarker(body, marker) {
   try { return JSON.parse(serialized) ?? {} } catch { return {} }
 }
 
-function completedSecurityReview(state, body, sha, issueUrl) {
+function securityReviewFindings(threads) {
+  return threads.flatMap(thread => {
+    const comment = thread?.comments?.nodes?.[0]
+    const original = comment?.originalCommit?.oid
+    if (comment?.author?.__typename !== 'Bot' ||
+        !['chatgpt-codex-connector', codexLogin].includes(comment.author.login) ||
+        !/^<!-- codex-security-review-finding:v1 -->\r?$/m.test(comment.body ?? '') ||
+        !shaPattern.test(original ?? '') || !Number.isSafeInteger(comment.databaseId)) return []
+    return [{ id: String(comment.databaseId), original, resolved: thread.isResolved === true }]
+  })
+}
+
+function archivedSecurityFindings(body, sha, scope, findings) {
+  const [, section, extra] = body.split(/^### Security findings[ \t]*\r?$/mi)
+  if (section === undefined) return true
+  if (extra !== undefined) return false
+  const rows = section.split(/^<details\b|^### /m)[0].split(/\r?\n/).filter(line => /^\s*[-*] /.test(line))
+  const prefix = 'https://github.com/' + scope.repository + '/pull/' + scope.pullRequestNumber + '#discussion_r'
+  const resolved = new Set(findings.filter(finding => finding.resolved && finding.original !== sha).map(finding => finding.id))
+  return rows.length > 0 && rows.every(row => {
+    const links = [...row.matchAll(/\]\((https:\/\/[^)]+)\)/g)]
+    return links.length === 1 && links[0][1].startsWith(prefix) && resolved.has(links[0][1].slice(prefix.length))
+  })
+}
+
+function completedSecurityReview(state, body, sha, issueUrl, threads) {
   const scope = codexMarker(body, 'codex-security-review:v1')
   if (state?.commit_sha !== sha || state.status !== 'completed' || scope?.headSha !== sha ||
       scope.status !== 'completed' || !Number.isSafeInteger(scope.pullRequestNumber) ||
       'https://api.github.com/repos/' + scope.repository + '/issues/' + scope.pullRequestNumber !== issueUrl) return false
+  const findings = securityReviewFindings(threads)
+  if (findings.some(finding => finding.original === sha && !finding.resolved)) return false
   if (state.has_unresolved_findings === false) return typeof state.has_any_findings === 'boolean'
-  // Codex currently uses two null flags in completed security reviews with no findings.
+  // A clean security pass can still display advisories carried forward from older commits.
   return state.has_any_findings === null && state.has_unresolved_findings === null &&
-    !/^### Security findings\s*$/mi.test(body)
+    archivedSecurityFindings(body, sha, scope, findings)
 }
 
-export function completedCodexReview(reviews, comments, sha, mergedAt, issueUrl) {
+export function completedCodexReview(reviews, comments, sha, mergedAt, issueUrl, threads = []) {
   const beforeMerge = time => Date.parse(time) <= Date.parse(mergedAt)
   const trusted = item => item.user?.login === codexLogin &&
     item.user.type === 'Bot' &&
@@ -65,18 +92,23 @@ export function completedCodexReview(reviews, comments, sha, mergedAt, issueUrl)
   if (state?.commit_sha !== sha || !shaPattern.test(state.commit_sha) || state.status !== 'completed' ||
       typeof state.has_any_findings !== 'boolean' || state.has_unresolved_findings !== false ||
       !beforeMerge(comment.created_at) || !beforeMerge(comment.updated_at) ||
-      !completedSecurityReview(security, comment.body, sha, issueUrl)) return undefined
+      !completedSecurityReview(security, comment.body, sha, issueUrl, threads)) return undefined
   if (reviews.some(review => trusted(review) && review.commit_id === sha &&
       ['CHANGES_REQUESTED', 'COMMENTED'].includes(review.state) &&
       Date.parse(review.submitted_at) > Date.parse(comment.updated_at))) return undefined
   return { id: comment.id, url: comment.html_url, submittedAt: comment.updated_at, reviewed: state.commit_sha }
 }
 
-export async function github(path, options = {}) {
-  const token = process.env.GH_TOKEN
+function repository() {
   const repo = process.env.GITHUB_REPOSITORY
-  if (!token || !/^[\w.-]+\/[\w.-]+$/.test(repo ?? '')) throw new Error('缺少 GitHub Actions 访问上下文')
-  const response = await fetch('https://api.github.com/repos/' + repo + path, {
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo ?? '')) throw new Error('缺少 GitHub Actions 仓库')
+  return repo
+}
+
+async function githubRequest(url, options) {
+  const token = process.env.GH_TOKEN
+  if (!token) throw new Error('缺少 GitHub Actions 访问上下文')
+  const response = await fetch(url, {
     ...options,
     headers: {
       authorization: 'Bearer ' + token,
@@ -86,9 +118,51 @@ export async function github(path, options = {}) {
     },
     signal: AbortSignal.timeout(30_000)
   })
-  if (!response.ok) throw new Error('GitHub API ' + path + ' 返回 HTTP ' + response.status)
+  if (!response.ok) throw new Error('GitHub API ' + new URL(url).pathname + ' 返回 HTTP ' + response.status)
   if (response.status === 204) return undefined
   return await response.json()
+}
+
+export async function github(path, options = {}) {
+  return githubRequest('https://api.github.com/repos/' + repository() + path, options)
+}
+
+export async function pullRequestReviewThreads(number, sha) {
+  const [owner, repo] = repository().split('/')
+  const query = `query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
+    repository(owner: $owner, name: $repo) {
+      pullRequest(number: $number) {
+        headRefOid
+        reviewThreads(first: 100, after: $cursor) {
+          pageInfo { hasNextPage endCursor }
+          nodes {
+            isResolved
+            comments(first: 1) {
+              nodes { databaseId author { __typename login } body originalCommit { oid } }
+            }
+          }
+        }
+      }
+    }
+  }`
+  const threads = []
+  let cursor = null
+  for (let page = 0; page < 20; page++) {
+    const response = await githubRequest('https://api.github.com/graphql', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ query, variables: { owner, repo, number, cursor } })
+    })
+    const pr = response.data?.repository?.pullRequest
+    const connection = pr?.reviewThreads
+    if (response.errors?.length || pr?.headRefOid !== sha || !Array.isArray(connection?.nodes) ||
+        typeof connection.pageInfo?.hasNextPage !== 'boolean') throw new Error('无法确认准确 PR 提交的审阅讨论')
+    threads.push(...connection.nodes)
+    if (!connection.pageInfo.hasNextPage) return threads
+    const next = connection.pageInfo.endCursor
+    if (typeof next !== 'string' || !next || cursor === next) throw new Error('GitHub 审阅讨论分页无效')
+    cursor = next
+  }
+  throw new Error('GitHub 审阅讨论超出校验限制')
 }
 
 export async function pages(path, key) {
@@ -147,13 +221,14 @@ async function sourceEvidence(version) {
     git('fetch', '--no-tags', 'origin', 'refs/pull/' + pr.number + '/head')
     if (git('rev-parse', 'FETCH_HEAD') !== head || git('merge-base', base, head) !== base ||
         git('rev-parse', head + '^{tree}') !== tree) continue
-    const [reviews, comments, priorCiRuns] = await Promise.all([
+    const [reviews, comments, priorCiRuns, threads] = await Promise.all([
       pages('/pulls/' + pr.number + '/reviews'),
       pages('/issues/' + pr.number + '/comments'),
-      pages('/actions/workflows/ci.yml/runs?event=pull_request&head_sha=' + head, 'workflow_runs')
+      pages('/actions/workflows/ci.yml/runs?event=pull_request&head_sha=' + head, 'workflow_runs'),
+      pullRequestReviewThreads(pr.number, head)
     ])
     const issueUrl = 'https://api.github.com/repos/' + repo + '/issues/' + pr.number
-    const review = completedCodexReview(reviews, comments, head, pr.merged_at, issueUrl)
+    const review = completedCodexReview(reviews, comments, head, pr.merged_at, issueUrl, threads)
     if (!review) continue
     const resolvedReview = await github('/commits/' + review.reviewed)
     if (resolvedReview.sha !== head) continue

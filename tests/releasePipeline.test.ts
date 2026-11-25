@@ -85,6 +85,28 @@ test('uses the latest full-commit Codex status issued on the reviewed pull reque
   expect(completedCodexReview([{
     user: clean.user, commit_id: head, state: 'COMMENTED', submitted_at: '2026-11-25T10:43:00Z'
   }], [clean], head, merged, issue)).toBeUndefined()
+
+  const findingId = 4694576796
+  const archived = {
+    ...clean,
+    body: clean.body + '\n### Security findings\n\n#### Advisory findings (1)\n\n' +
+      '- 🟡 [Previous advisory](https://github.com/KevinYuHere/KevinLauncher/pull/3#discussion_r' + findingId + ') · **Medium**\n\n<details>'
+  }
+  const thread = (isResolved: boolean, original = other, author = 'chatgpt-codex-connector') => ({
+    isResolved,
+    comments: { nodes: [{ databaseId: findingId, author: { __typename: 'Bot', login: author },
+      originalCommit: { oid: original }, body: '<!-- codex-security-review-finding:v1 -->\nPrevious advisory' }] }
+  })
+  const review = (comment: typeof clean, threads: ReturnType<typeof thread>[] = []) =>
+    completedCodexReview([], [comment], head, merged, issue, threads)
+  expect(review(archived, [thread(true)])).toMatchObject({ reviewed: head })
+  expect(review(archived)).toBeUndefined()
+  expect(review(archived, [thread(false)])).toBeUndefined()
+  expect(review(archived, [thread(true, head)])).toBeUndefined()
+  expect(review(archived, [thread(true, other, 'other-bot')])).toBeUndefined()
+  expect(review({ ...archived, body: archived.body.replace('KevinYuHere/KevinLauncher/pull/3#discussion',
+    'AnotherOwner/AnotherRepository/pull/3#discussion') }, [thread(true)])).toBeUndefined()
+  expect(review(clean, [thread(false, head)])).toBeUndefined()
 })
 
 test('only an unbuilt push can build and retries never replace conflicting or published assets', () => {
