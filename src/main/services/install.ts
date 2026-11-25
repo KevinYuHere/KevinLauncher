@@ -9,13 +9,14 @@ import { directorySize } from './updateDownload'
 import { AUTO_START_TASK } from './autostart'
 import { currentAppVersion } from './appVersion'
 import { loadJsonSafe, writeFileAtomic } from './atomicFile'
-import { psQuote, runPowerShell } from './powershell'
+import { psDataLiteral } from './powershell'
 import { log } from './logger'
 import { directoriesOverlap } from '@shared/paths'
 import { realDirectoryPath } from './dataDir'
 import { createSiblingWorkspace, isFileSystemRoot } from './directoryPath'
 import { availableSpace, requireDiskSpace, type SpaceNeed } from './diskSpace'
-import { canonicalExecutable, ProcessTree, type ProcInfo } from './processTree'
+import { canonicalExecutable, hasProcessIdentity, ProcessTree, type ProcInfo } from './processTree'
+import { requestLegacyLauncherClose } from './setupProcess'
 import {
   assertTrialInstallDirectory, launcherDisplayName, launcherExecutableName as EXE,
   launcherEntryPath, launcherProcessNames, launcherProductName, launcherRuntimeExecutableName as RUNTIME,
@@ -228,40 +229,45 @@ export async function closeRunningInstances(targetDir: string): Promise<boolean>
   assertTrialInstallDirectory(targetDir)
   const exe = join(targetDir, EXE)
   const runtime = join(targetDir, RUNTIME)
-  const expires = Date.now() + 12_000
-  const scan = () => ProcessTree.snapshot(AbortSignal.timeout(Math.max(1, expires - Date.now())))
-    .then(snapshot => processesUsingInstall(snapshot, targetDir)).catch(() => null)
-  const pids = await scan()
-  if (!pids) return false
+  const initial = await ProcessTree.snapshot().catch(error => {
+    log(`install: could not inspect running launcher processes (${String(error)})`)
+    return null
+  })
+  if (!initial) return false
+  const pids = processesUsingInstall(initial, targetDir)
   if (pids.length) {
     log(`install: requesting normal exit from ${pids.join(', ')} at ${targetDir}`)
+    const hasCloseProtocol = await pathExists(join(targetDir, 'resources', 'release-compatibility.json'))
     try {
-      const env = { ...process.env }
-      delete env.PORTABLE_EXECUTABLE_FILE
-      delete env.PORTABLE_EXECUTABLE_DIR
-      const messenger = spawn(exe, [SETUP_EXIT_ARGUMENT], {
-        cwd: targetDir, env, windowsHide: true, stdio: 'ignore'
-      })
-      await once(messenger, 'spawn')
-      messenger.unref()
-    } catch {
-      // Older installations can still handle a normal WM_CLOSE.
-    }
-    if (!(await pathExists(join(targetDir, 'resources', 'release-compatibility.json')))) {
-      await runPowerShell(
-        `Get-Process -Id ${pids.join(',')} -ErrorAction SilentlyContinue | ` +
-        `Where-Object { $_.Path -iin @(${psQuote(exe)}, ${psQuote(runtime)}) } | ` +
-        'ForEach-Object { $_.CloseMainWindow() }',
-        { timeout: 2500 }
-      ).catch(() => undefined)
+      if (hasCloseProtocol) {
+        const env = { ...process.env }
+        delete env.PORTABLE_EXECUTABLE_FILE
+        delete env.PORTABLE_EXECUTABLE_DIR
+        const messenger = spawn(exe, [SETUP_EXIT_ARGUMENT], {
+          cwd: targetDir, env, windowsHide: true, stdio: 'ignore'
+        })
+        await once(messenger, 'spawn')
+        messenger.unref()
+      } else {
+        const selected = new Set(pids)
+        const sent = await requestLegacyLauncherClose(initial.filter(hasProcessIdentity)
+          .filter(item => selected.has(item.pid) && !selected.has(item.ppid)))
+        log(`install: legacy window close posted to ${sent} window(s)`)
+      }
+    } catch (error) {
+      log(`install: launcher exit request failed (${String(error)})`)
     }
   }
   const ownsExecutable = canonicalExecutable(launcherEntryPath()) === canonicalExecutable(exe)
+  const expires = Date.now() + 12_000
+  let remaining: number[] | null = pids
   while (Date.now() < expires) {
-    const active = await scan()
-    if (active?.length === 0 && (ownsExecutable || await isUnlocked(exe) && await isUnlocked(runtime))) return true
+    remaining = await ProcessTree.snapshot(AbortSignal.timeout(Math.max(1, expires - Date.now())))
+      .then(snapshot => processesUsingInstall(snapshot, targetDir)).catch(() => null)
+    if (remaining?.length === 0 && (ownsExecutable || await isUnlocked(exe) && await isUnlocked(runtime))) return true
     await new Promise((resolve) => setTimeout(resolve, 450))
   }
+  log(`install: exit wait expired; remaining launcher PIDs: ${remaining?.join(', ') || 'none observed'}`)
   return false
 }
 
@@ -806,12 +812,12 @@ export async function writeUninstallEntry(installDir: string, version: string): 
 /** Deferred cleanup inspects the current target of each system integration. */
 export function uninstallIntegrationScript(installDir: string, removedDataDir?: string): string {
   assertTrialInstallDirectory(installDir)
-  const registryPath = (key: string) => psQuote(key.replace(/^(HKCU|HKLM)\\/, '$1:\\'))
+  const registryPath = (key: string) => psDataLiteral(key.replace(/^(HKCU|HKLM)\\/, '$1:\\'))
   const shortcutsScript = `
-$exe = ${psQuote(join(installDir, EXE))}
+$exe = ${psDataLiteral(join(installDir, EXE))}
 if (!(Test-Path -LiteralPath $exe -ErrorAction Stop)) {
   $shortcutShell = New-Object -ComObject WScript.Shell
-  foreach ($link in @(${Object.values(shortcuts()).map(psQuote).join(',')})) {
+  foreach ($link in @(${Object.values(shortcuts()).map(psDataLiteral).join(',')})) {
     if (!(Test-Path -LiteralPath $link -PathType Leaf -ErrorAction Stop)) { continue }
     Assert-PlainPath $link
     if ($shortcutShell.CreateShortcut($link).TargetPath -ieq $exe) {
@@ -823,7 +829,7 @@ if (!(Test-Path -LiteralPath $exe -ErrorAction Stop)) {
   return shortcutsScript + `
   $tasks = Get-ScheduledTask -TaskPath '\\' -ErrorAction Stop
   foreach ($task in $tasks) {
-    if ($task.TaskName -ieq ${psQuote(AUTO_START_TASK)} -and
+    if ($task.TaskName -ieq ${psDataLiteral(AUTO_START_TASK)} -and
         @($task.Actions | Where-Object { $_.Execute -and $_.Execute.Trim('"') -ieq $exe }).Count -gt 0) {
       Unregister-ScheduledTask -InputObject $task -Confirm:$false -ErrorAction Stop
     }
@@ -856,7 +862,7 @@ if (!(Test-Path -LiteralPath $exe -ErrorAction Stop)) {
         }
       }
     }
-    ${removedDataDir ? `if ($properties.DataDir -ieq ${psQuote(removedDataDir)}) {
+    ${removedDataDir ? `if ($properties.DataDir -ieq ${psDataLiteral(removedDataDir)}) {
       Remove-ItemProperty -LiteralPath $appKey -Name 'DataDir' -ErrorAction Stop
     }` : ''}
   }

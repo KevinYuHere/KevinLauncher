@@ -48,7 +48,7 @@ export async function installLauncher(
   await applyPayload(source, dir, progress => onProgress({ phase: 'copying', ...progress }), {
     beforeStage: async programSpace => {
       if (!(await closeRunningInstances(dir))) {
-        throw new Error(`无法关闭正在运行的 ${join(dir, launcherExecutableName)}，请手动退出该实例后重试`)
+        throw new Error(`启动器尚未退出。请从系统托盘退出 ${join(dir, launcherExecutableName)} 后重试`)
       }
       // Once the old instance closes, it can no longer race with the backup.
       const reason = `install ${currentAppVersion()}`

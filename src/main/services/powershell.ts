@@ -1,7 +1,6 @@
 import { execFile, execFileSync, spawn, type ChildProcessWithoutNullStreams } from 'child_process'
 import { promisify } from 'util'
-import { once } from 'events'
-import { dirname } from 'path'
+import { win32 } from 'path'
 
 const execFileAsync = promisify(execFile)
 
@@ -19,6 +18,12 @@ export interface PowerShellOptions {
  */
 export function psQuote(value: string): string {
   return `'${value.replace(/'/g, "''")}'`
+}
+
+/** Embed a value as data even if it contains PowerShell's typographic quote delimiters. */
+export function psDataLiteral(value: string): string {
+  const encoded = Buffer.from(value, 'utf8').toString('base64')
+  return `([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}')))`
 }
 
 function powerShellArgs(script: string): string[] {
@@ -61,18 +66,14 @@ export function startPowerShell(script: string): ChildProcessWithoutNullStreams 
   return spawn('powershell.exe', powerShellArgs(script), { windowsHide: true })
 }
 
-function fileArguments(file: string): string[] {
-  return ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', file]
-}
-
-export async function runPowerShellFile(file: string, timeout: number, args: string[] = []): Promise<string> {
-  return (await execFileAsync('powershell.exe', [...fileArguments(file), ...args], { windowsHide: true, timeout })).stdout
-}
-
-export async function startDetachedPowerShellFile(file: string): Promise<void> {
-  const child = spawn('powershell.exe', fileArguments(file), {
-    cwd: dirname(file), windowsHide: true, stdio: 'ignore'
+/** Run the fixed elevated helper entry with private input/output and an open diagnostics sink. */
+export function startPowerShellWithReport(script: string, reportFd: number) {
+  const systemRoot = process.env.SystemRoot
+  if (!systemRoot || !/^[a-z]:[\\/]/i.test(systemRoot)) throw new Error('无法定位 Windows 系统 PowerShell')
+  const directory = win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0')
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'psmodulepath'))
+  env.PSModulePath = win32.join(directory, 'Modules')
+  return spawn(win32.join(directory, 'powershell.exe'), powerShellArgs(script), {
+    cwd: directory, env, windowsHide: true, stdio: ['pipe', 'pipe', reportFd]
   })
-  await once(child, 'spawn')
-  child.unref()
 }

@@ -19,23 +19,18 @@ afterEach(async () => {
   await Promise.all(temps.splice(0).map(path => fs.rm(path, { recursive: true, force: true })))
 })
 
-test('requires a completed trusted current-head review separately from successful exact push CI', () => {
+test('simple review text cannot substitute for both scoped reviews or exact push CI', () => {
   const head = '1234567890abcdef1234567890abcdef12345678'
   const previous = 'abcdef1234567890abcdef1234567890abcdef12'
   const merged = '2026-11-25T01:00:00Z'
   const time = '2026-11-25T00:30:00Z'
   const bot = { login: 'chatgpt-codex-connector[bot]', type: 'Bot' }
+  const issue = 'https://api.github.com/repos/KevinYuHere/KevinLauncher/issues/3'
   const summary = {
-    user: bot, created_at: time, updated_at: time, id: 7, html_url: 'https://example.test/review/7',
+    user: bot, created_at: time, updated_at: time, id: 7, html_url: 'https://example.test/review/7', issue_url: issue,
     body: "Codex Review: Didn't find any major issues.\n\n**Reviewed commit:** \x60" + head.slice(0, 10) + '\x60'
   }
-  expect(completedCodexReview([], [summary], head, merged)?.id).toBe(7)
-  expect(completedCodexReview([], [summary], previous, merged)).toBeUndefined()
-  expect(completedCodexReview([], [{ ...summary, user: { ...bot, type: 'User' } }], head, merged)).toBeUndefined()
-  expect(completedCodexReview([], [{ ...summary, body: 'Code Review / Completed' }], head, merged)).toBeUndefined()
-  expect(completedCodexReview([{
-    user: bot, state: 'CHANGES_REQUESTED', commit_id: head, submitted_at: '2026-11-25T00:40:00Z'
-  }], [summary], head, merged)).toBeUndefined()
+  expect(completedCodexReview([], [summary], head, merged, issue)).toBeUndefined()
   const ci = {
     head_sha: head, head_branch: 'main', event: 'push', conclusion: 'success', path: '.github/workflows/ci.yml'
   }
@@ -49,7 +44,7 @@ test('uses the latest full-commit Codex status issued on the reviewed pull reque
   const other = 'abcdef1234567890abcdef1234567890abcdef12'
   const issue = 'https://api.github.com/repos/KevinYuHere/KevinLauncher/issues/3'
   const merged = '2026-11-25T11:00:00Z'
-  const summary = (overrides = {}) => ({
+  const summary = (overrides = {}, securityOverrides = {}) => ({
     id: 10, html_url: 'https://github.com/KevinYuHere/KevinLauncher/pull/3#issuecomment-10', issue_url: issue,
     created_at: '2026-11-25T10:35:17Z', updated_at: '2026-11-25T10:42:00Z',
     user: { login: 'chatgpt-codex-connector[bot]', type: 'Bot' },
@@ -59,8 +54,11 @@ test('uses the latest full-commit Codex status issued on the reviewed pull reque
         commit_sha: head, has_any_findings: true, has_unresolved_findings: false, status: 'completed', ...overrides
       },
       security_review: {
-        commit_sha: head, has_any_findings: null, has_unresolved_findings: null, status: 'completed'
+        commit_sha: head, has_any_findings: null, has_unresolved_findings: null, status: 'completed', ...securityOverrides
       }
+    }) + ' -->\n<!-- codex-security-review:v1 ' + JSON.stringify({
+      blockingSeverityThreshold: 'P0', headSha: head, mergeGateEnabled: false,
+      pullRequestNumber: 3, repository: 'KevinYuHere/KevinLauncher', status: 'completed'
     }) + ' -->'
   })
   const clean = summary()
@@ -69,6 +67,12 @@ test('uses the latest full-commit Codex status issued on the reviewed pull reque
   expect(verdict([summary({ commit_sha: other })])).toBeUndefined()
   expect(verdict([summary({ commit_sha: head.slice(0, 12) })])).toBeUndefined()
   expect(verdict([summary({ status: 'in_progress' })])).toBeUndefined()
+  expect(verdict([{ ...clean, user: { ...clean.user, type: 'User' } }])).toBeUndefined()
+  expect(verdict([summary({}, { status: 'running' })])).toBeUndefined()
+  expect(verdict([summary({}, { commit_sha: other })])).toBeUndefined()
+  expect(verdict([summary({}, { has_any_findings: true, has_unresolved_findings: true })])).toBeUndefined()
+  expect(verdict([{ ...clean, body: clean.body.replace('"pullRequestNumber":3', '"pullRequestNumber":4') }])).toBeUndefined()
+  expect(verdict([{ ...clean, body: clean.body + '\n### Security findings\n#### Blocking findings (1)' }])).toBeUndefined()
   expect(verdict([{ ...clean, issue_url: issue + '0' }])).toBeUndefined()
   expect(verdict([{ ...clean, performed_via_github_app: { slug: 'other-reviewer' } }])).toBeUndefined()
   expect(verdict([{ ...clean, updated_at: '2026-11-25T11:01:00Z' }])).toBeUndefined()

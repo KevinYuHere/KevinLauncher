@@ -15,6 +15,8 @@ static class WindowsEntryRuntimeFixture
         Write(Environment.GetEnvironmentVariable("PORTABLE_EXECUTABLE_FILE"));
         Write(Environment.GetEnvironmentVariable("ELECTRON_RUN_AS_NODE"));
         Write(Console.ReadLine());
+        Write(Environment.GetEnvironmentVariable("SystemRoot"));
+        Write(Environment.GetEnvironmentVariable("windir"));
         Console.Error.WriteLine("fixture stderr");
         return unchecked((int)0x80000003u);
     }

@@ -1,8 +1,10 @@
-import { execFileSync, spawnSync } from 'node:child_process'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
+import { once } from 'node:events'
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createRequire } from 'node:module'
+import { setTimeout as delay } from 'node:timers/promises'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import { buildWindowsEntry, windowsEntrySourceFiles } from '../scripts/build-windows-entry.mjs'
 
@@ -14,6 +16,7 @@ describe.skipIf(process.platform !== 'win32')('Windows launcher entry', () => {
   let entry: string
   let runtime: string
   let cwd: string
+  let legacy: string
 
   beforeAll(() => {
     root = realpathSync(mkdtempSync(join(tmpdir(), 'kl-entry-')))
@@ -43,6 +46,10 @@ describe.skipIf(process.platform !== 'win32')('Windows launcher entry', () => {
     compile(entry, source)
     assertExecutionLevel(entry, 'asInvoker')
     compile(runtime, join(import.meta.dirname, 'fixtures', 'windows-entry-runtime.cs'))
+    const legacyDir = join(root, '旧 版本')
+    mkdirSync(legacyDir)
+    legacy = join(legacyDir, 'KevinLauncher.exe')
+    compile(legacy, join(import.meta.dirname, 'fixtures', 'windows-entry-close.cs'))
   })
 
   afterAll(() => { if (root) rmSync(root, { recursive: true, force: true, maxRetries: 3 }) })
@@ -51,14 +58,21 @@ describe.skipIf(process.platform !== 'win32')('Windows launcher entry', () => {
     const portable = join(root, '包 文件.exe')
     const args = ['--install', '', '中文 with spaces', 'literal"quote', 'backslash\\"quote', 'trailing slash\\']
     const child = spawnSync(entry, args, {
-      cwd, env: { ...process.env, PORTABLE_EXECUTABLE_FILE: portable, ELECTRON_RUN_AS_NODE: '1' }, input: 'fixture stdin\n',
+      cwd, env: {
+        ...process.env, PORTABLE_EXECUTABLE_FILE: portable, ELECTRON_RUN_AS_NODE: '1', SystemRoot: cwd, windir: cwd
+      }, input: 'fixture stdin\n',
       encoding: 'utf8', windowsHide: true, timeout: 10000
     })
     expect(child.error).toBeUndefined()
     expect(child.signal).toBeNull()
     expect(child.status! >>> 0).toBe(0x80000003)
-    expect(child.stdout.trimEnd().split(/\r?\n/).map(line => Buffer.from(line, 'base64').toString('utf8')))
-      .toEqual([...args, cwd, portable, '', 'fixture stdin'])
+    const output = child.stdout.trimEnd().split(/\r?\n/).map(line => Buffer.from(line, 'base64').toString('utf8'))
+    expect(output.slice(0, args.length)).toEqual(args)
+    // The runner's 8.3 TEMP alias can differ from the directory reported by .NET.
+    expect(realpathSync.native(output[args.length])).toBe(realpathSync.native(cwd))
+    expect(output.slice(args.length + 1, args.length + 4)).toEqual([portable, '', 'fixture stdin'])
+    const windows = realpathSync.native(process.env.SystemRoot!)
+    expect(output.slice(args.length + 4).map(path => realpathSync.native(path))).toEqual([windows, windows])
     expect(child.stderr.trim()).toBe('fixture stderr')
   })
 
@@ -72,4 +86,47 @@ describe.skipIf(process.platform !== 'win32')('Windows launcher entry', () => {
     expect(child.status).toBe(2)
     expect(child.stderr).toContain('KevinLauncherRuntime.exe (2)')
   })
+
+  test('only posts a normal close to hidden Chrome windows owned by the verified legacy process', async () => {
+    const target = spawn(legacy, [], { cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] })
+    let stdout = ''
+    target.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk })
+    await once(target, 'spawn')
+    const closed = once(target, 'close')
+    async function receive(pattern: RegExp): Promise<RegExpMatchArray> {
+      for (let attempt = 0; attempt < 100; attempt++) {
+        const match = stdout.match(pattern)
+        if (match) return match
+        if (target.exitCode !== null) break
+        await delay(30)
+      }
+      throw new Error('Legacy window fixture did not report ' + pattern)
+    }
+    const request = (created: number, expected: string) => spawnSync(entry,
+      ['--kevin-close-legacy-window', String(target.pid), String(created), expected],
+      { cwd, windowsHide: true, encoding: 'utf8', timeout: 3000 })
+    try {
+      const created = Number((await receive(/ready:(\d+)\r?\n/))[1])
+      for (const [time, expected] of [[created + 1, legacy], [created, join(cwd, 'KevinLauncher.exe')]] as const) {
+        const rejected = request(time, expected)
+        expect(rejected.error).toBeUndefined()
+        expect(rejected.status).toBe(1)
+        expect(rejected.stdout).toBe('')
+        expect(rejected.stderr).toContain('process identity changed')
+      }
+      expect(stdout).not.toContain('close:')
+      const matched = request(created, legacy)
+      expect(matched.error).toBeUndefined()
+      expect(matched.status).toBe(0)
+      expect(matched.stdout.trim()).toBe('1')
+      expect(matched.stderr).toBe('')
+      await receive(/close:Chrome_WidgetWin_1\r?\n/)
+      expect(request(created, legacy).stdout.trim()).toBe('0')
+      expect(target.exitCode).toBeNull()
+      expect(stdout).not.toContain('close:KevinLauncherFixture_Other')
+    } finally {
+      if (target.exitCode === null && target.signalCode === null) target.kill()
+      await closed
+    }
+  }, 10000)
 })

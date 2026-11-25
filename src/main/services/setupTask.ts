@@ -8,7 +8,7 @@ let active = false
 
 /** The setup UI must have a Chromium profile separate from a running launcher. */
 export function isolateSetupSession(): void {
-  const root = trialBuild ? trialDirectory('integration') : realpathSync(app.getPath('temp'))
+  const root = trialBuild ? trialDirectory('integration') : realpathSync.native(app.getPath('temp'))
   const session = mkdtempSync(join(root, 'kevin-setup-session-'))
   try {
     app.setPath('sessionData', session)

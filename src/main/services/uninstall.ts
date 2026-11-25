@@ -1,14 +1,14 @@
 import { app } from 'electron'
 import { randomUUID } from 'crypto'
 import { promises as fs } from 'fs'
-import { dirname, join, resolve } from 'path'
+import { basename, dirname, join, resolve } from 'path'
+import { createInterface } from 'readline'
 import { directoriesOverlap } from '@shared/paths'
-import { writeFileAtomic } from './atomicFile'
 import { assertTrialInstallDirectory, launcherExecutableName, launcherRuntimeExecutableName } from './buildIdentity'
 import { isFileSystemRoot } from './directoryPath'
 import { closeRunningInstances, readInstallInfo, uninstallIntegrationScript } from './install'
 import { log } from './logger'
-import { psQuote, startDetachedPowerShellFile } from './powershell'
+import { psDataLiteral, startPowerShellWithReport } from './powershell'
 
 export function managedUninstallPaths(files: unknown[]): string[] {
   const found = new Set<string>()
@@ -39,31 +39,24 @@ export function uninstallHelperScript(input: {
   dataDir: string | undefined
   dataBackup?: string
   backup: string
-  report: string
-  ready: string
-  commit: string
+  owners: ReadonlyArray<{ pid: number; path: string; required: boolean }>
   files: string[]
   cleanup?: string
 }): string {
-  const { installDir, dataDir, dataBackup, backup, report, ready, commit, files, cleanup = '' } = input
+  const { installDir, dataDir, dataBackup, backup, owners, files, cleanup = '' } = input
   if (dataDir && !dataBackup) throw new Error('Missing data quarantine directory')
   return `
-param([switch]$ResumeCleanup)
 $ErrorActionPreference = 'Stop'
-$root = ${psQuote(installDir)}
-$backup = ${psQuote(backup)}
-$report = ${psQuote(report)}
-$ack = ${psQuote(ready)}
-$permission = ${psQuote(commit)}
-$cleanupReady = $permission + '.cleanup'
-$data = ${dataDir ? psQuote(dataDir) : "$null"}
-$savedData = ${dataBackup ? psQuote(dataBackup) : "$null"}
-$files = @(${files.map(psQuote).join(',\n')})
+$root = ${psDataLiteral(installDir)}
+$backup = ${psDataLiteral(backup)}
+$data = ${dataDir ? psDataLiteral(dataDir) : "$null"}
+$savedData = ${dataBackup ? psDataLiteral(dataBackup) : "$null"}
+$files = ConvertFrom-Json -InputObject ${psDataLiteral(JSON.stringify(files))}
+$owners = ConvertFrom-Json -InputObject ${psDataLiteral(JSON.stringify(owners))}
 $moved = [System.Collections.Generic.List[string]]::new()
 $dirs = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-$gone = $false
+$committed = $false
 $dataMoved = $false
-$ownScript = $MyInvocation.MyCommand.Path
 function Assert-PlainPath([string]$path) {
   $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
   while ($item) {
@@ -83,46 +76,51 @@ function Remove-Quarantine([string]$path) {
   }
   [IO.Directory]::Delete($path)
 }
-try {
-  if ($ResumeCleanup) {
-    if (!(Test-Path -LiteralPath $cleanupReady) -or [IO.File]::ReadAllText($cleanupReady) -ne 'cleanup') {
-      throw 'Uninstall cleanup was not committed'
+function Invoke-Cleanup([scriptblock]$operation) {
+  for ($attempt = 0; ; $attempt++) {
+    try { & $operation; return }
+    catch {
+      if ($attempt -ge 3) { throw }
+      Start-Sleep -Milliseconds (250 * ($attempt + 1))
     }
-    $gone = $true
-  } else {
-    Assert-PlainPath $root
-    $entry = Join-Path $root ${psQuote(launcherExecutableName)}
-    $runtime = Join-Path $root ${psQuote(launcherRuntimeExecutableName)}
-    $owner = Get-Process -Id ${process.pid} -ErrorAction SilentlyContinue
-    $waiting = @()
-    if ($owner -and $owner.Path -iin @($entry, $runtime)) {
-      $null = $owner.Handle
-      $waiting += $owner
-      if ($runtime -ine $entry -and $owner.Path -ieq $runtime) {
-        $parent = Get-Process -Id ${process.ppid} -ErrorAction SilentlyContinue
-        if ($parent -and $parent.Path -ieq $entry) {
-          $null = $parent.Handle
-          $waiting += $parent
-        }
-      }
-    }
-    [IO.File]::WriteAllText($ack, 'ready', [Text.Encoding]::UTF8)
-    foreach ($process in $waiting) {
-      if (!$process.WaitForExit(30000)) { throw 'Uninstaller or its launcher entry did not exit' }
-    }
-    if (!(Test-Path -LiteralPath $permission) -or [IO.File]::ReadAllText($permission) -ne 'commit') {
-      throw 'Uninstall handoff was not confirmed'
-    }
-    if (Test-Path -LiteralPath $backup -ErrorAction Stop) { throw 'Program quarantine already exists' }
-    [IO.Directory]::CreateDirectory($backup) | Out-Null
   }
+}
+try {
+  Assert-PlainPath $root
+  $waiting = @()
+  foreach ($expected in $owners) {
+    $owner = Get-Process -Id $expected.pid -ErrorAction SilentlyContinue
+    if ($owner) {
+      $null = $owner.Handle
+      if ($owner.Path -ieq $expected.path) {
+        $waiting += $owner
+        continue
+      }
+      $owner.Dispose()
+    }
+    if ($expected.required) { throw 'Uninstaller process could not be verified' }
+  }
+  [Console]::WriteLine('ready')
+  if ([Console]::ReadLine() -cne 'commit') { throw 'Uninstall handoff was not confirmed' }
+  [Console]::WriteLine('accepted')
+  foreach ($process in $waiting) {
+    if (!$process.WaitForExit(30000)) { throw 'Uninstaller or its launcher entry did not exit' }
+    $process.Dispose()
+  }
+  Assert-PlainPath (Split-Path -Parent $backup)
+  if (Test-Path -LiteralPath $backup -ErrorAction Stop) { throw 'Program quarantine already exists' }
+  [IO.Directory]::CreateDirectory($backup) | Out-Null
+  Assert-PlainPath $backup
   foreach ($relative in $files) {
     $file = Join-Path $root $relative
-    if (!$gone -and (Test-Path -LiteralPath $file -ErrorAction Stop)) {
+    if (Test-Path -LiteralPath $file -ErrorAction Stop) {
       Assert-PlainPath $file
       if (!(Test-Path -LiteralPath $file -PathType Leaf -ErrorAction Stop)) { throw "Expected file: $file" }
       $saved = Join-Path $backup $relative
-      [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($saved)) | Out-Null
+      $savedParent = [IO.Path]::GetDirectoryName($saved)
+      [IO.Directory]::CreateDirectory($savedParent) | Out-Null
+      Assert-PlainPath $savedParent
+      if (Test-Path -LiteralPath $saved -ErrorAction Stop) { throw "Quarantine file already exists: $saved" }
       Move-Item -LiteralPath $file -Destination $saved -ErrorAction Stop
       $moved.Add($relative)
     }
@@ -132,54 +130,121 @@ try {
       $directory = [IO.Path]::GetDirectoryName($directory)
     }
   }
-  if (!$gone) {
-    if ($data -and (Test-Path -LiteralPath $data -ErrorAction Stop)) {
-      Assert-PlainPath $data
-      if (Test-Path -LiteralPath $savedData -ErrorAction Stop) { throw 'Data quarantine already exists' }
-      Move-Item -LiteralPath $data -Destination $savedData -ErrorAction Stop
-      $dataMoved = $true
+  if ($data -and (Test-Path -LiteralPath $data -ErrorAction Stop)) {
+    Assert-PlainPath $data
+    if (Test-Path -LiteralPath $savedData -ErrorAction Stop) { throw 'Data quarantine already exists' }
+    Move-Item -LiteralPath $data -Destination $savedData -ErrorAction Stop
+    $dataMoved = $true
+  }
+  Invoke-Cleanup {
+    ${cleanup}
+  }
+  $committed = $true
+  Invoke-Cleanup {
+    foreach ($dir in @($dirs | Sort-Object Length -Descending) + @($root)) {
+      if (!(Test-Path -LiteralPath $dir -ErrorAction Stop)) { continue }
+      Assert-PlainPath $dir
+      if (@(Get-ChildItem -LiteralPath $dir -Force -ErrorAction Stop).Count -eq 0) { [IO.Directory]::Delete($dir) }
     }
-    [IO.File]::WriteAllText($cleanupReady, 'cleanup', [Text.Encoding]::UTF8)
-    $gone = $true
-  }
-  foreach ($dir in @($dirs | Sort-Object Length -Descending) + @($root)) {
-    if (!(Test-Path -LiteralPath $dir -ErrorAction Stop)) { continue }
-    Assert-PlainPath $dir
-    if (@(Get-ChildItem -LiteralPath $dir -Force -ErrorAction Stop).Count -eq 0) { [IO.Directory]::Delete($dir) }
-  }
-  foreach ($directory in @($backup, $savedData)) {
-    if ($directory -and (Test-Path -LiteralPath $directory -ErrorAction Stop)) {
-      Assert-PlainPath $directory
-      Remove-Quarantine $directory
+    foreach ($directory in @($backup, $savedData)) {
+      if ($directory -and (Test-Path -LiteralPath $directory -ErrorAction Stop)) {
+        Assert-PlainPath $directory
+        Remove-Quarantine $directory
+      }
     }
   }
-  ${cleanup}
-  [IO.File]::WriteAllText($report, 'complete', [Text.Encoding]::UTF8)
-  Remove-Item -LiteralPath $cleanupReady -Force -ErrorAction SilentlyContinue
-  Remove-Item -LiteralPath $ownScript -Force -ErrorAction SilentlyContinue
+  [Console]::Error.WriteLine('complete')
 } catch {
   $failure = $_.Exception.Message
-  if (!$gone) {
+  if (!$committed) {
     if ($dataMoved) {
-      try { Move-Item -LiteralPath $savedData -Destination $data -ErrorAction Stop }
+      try {
+        Assert-PlainPath $savedData
+        if (Test-Path -LiteralPath $data -ErrorAction Stop) { throw 'Data location is no longer empty' }
+        Move-Item -LiteralPath $savedData -Destination $data -ErrorAction Stop
+      }
       catch { $failure += "; data rollback: $($_.Exception.Message) ($savedData)" }
     }
     foreach ($relative in $moved) {
       $from = Join-Path $backup $relative
       $to = Join-Path $root $relative
-      try { Move-Item -LiteralPath $from -Destination $to -ErrorAction Stop }
+      try {
+        Assert-PlainPath $from
+        Assert-PlainPath (Split-Path -Parent $to)
+        if (Test-Path -LiteralPath $to -ErrorAction Stop) { throw "File location is no longer empty: $to" }
+        Move-Item -LiteralPath $from -Destination $to -ErrorAction Stop
+      }
       catch { $failure += "; rollback: $($_.Exception.Message)" }
     }
-    [IO.File]::WriteAllText($report, "failed: $failure; recovery: $backup", [Text.Encoding]::UTF8)
-    if (!$ResumeCleanup) { Remove-Item -LiteralPath $ownScript -Force -ErrorAction SilentlyContinue }
+    [Console]::Error.WriteLine("failed: $failure; recovery: $backup; retry using the installed launcher")
   } else {
-    [IO.File]::WriteAllText($report, "cleanup pending: $failure; rerun $ownScript with -ResumeCleanup", [Text.Encoding]::UTF8)
+    [Console]::Error.WriteLine("cleanup pending: $failure; quarantine: $backup $savedData")
   }
   exit 1
-} finally {
-  Remove-Item -LiteralPath $permission -Force -ErrorAction SilentlyContinue
 }
 `.trim()
+}
+
+const HELPER_ENTRY = `
+$ErrorActionPreference = 'Stop'
+[Console]::InputEncoding = [Text.Encoding]::UTF8
+$env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules')
+$line = [Console]::ReadLine()
+if ($null -eq $line) { exit 1 }
+$body = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($line))
+& ([scriptblock]::Create($body)) | Out-Null
+`.trim()
+
+/** The report is a write-only inherited handle. Only the anonymous pipe can authorize removal. */
+export async function startUninstallHelper(script: string, report: string, ready?: () => void): Promise<void> {
+  const diagnostics = await fs.open(report, 'wx')
+  try {
+    const child = startPowerShellWithReport(HELPER_ENTRY, diagnostics.fd)
+    const { stdin, stdout } = child
+    if (!stdin || !stdout) {
+      child.kill()
+      throw new Error('卸载辅助程序缺少交接管道')
+    }
+    const lines = createInterface({ input: stdout })
+    let commitSent = false
+    await new Promise<void>((resolveHandoff, reject) => {
+      let finished = false
+      const finish = (error?: Error): void => {
+        if (finished) return
+        finished = true
+        clearTimeout(timeout)
+        lines.close()
+        stdout.destroy()
+        if (error) {
+          stdin.destroy()
+          if (!commitSent) child.kill()
+          reject(error)
+        } else {
+          child.unref()
+          resolveHandoff()
+        }
+      }
+      const timeout = setTimeout(() => finish(new Error('卸载辅助程序未就绪，诊断文件：' + report)), 10_000)
+      child.once('error', finish)
+      child.once('close', () => finish(new Error('卸载辅助程序提前退出，诊断文件：' + report)))
+      stdin.once('error', finish)
+      stdout.once('error', finish)
+      lines.on('line', (line) => {
+        if (line === 'ready' && !commitSent) {
+          try {
+            ready?.()
+            commitSent = true
+            stdin.end('commit\n')
+          } catch (error) {
+            finish(error instanceof Error ? error : new Error(String(error)))
+          }
+        } else if (line === 'accepted' && commitSent) finish()
+      })
+      stdin.write(Buffer.from(script, 'utf8').toString('base64') + '\n')
+    })
+  } finally {
+    await diagnostics.close()
+  }
 }
 
 export async function prepareUninstall(options: {
@@ -207,35 +272,22 @@ export async function prepareUninstall(options: {
     throw new Error('启动器仍在运行，请先退出再重试卸载')
   }
   const id = randomUUID()
-  const temp = join(app.getPath('temp'), `kevin-uninstall-${id}`)
-  const script = temp + '.ps1'
-  const report = temp + '.result.txt'
-  const ready = temp + '.ready'
-  const commit = temp + '.commit'
+  const report = join(app.getPath('temp'), `kevin-uninstall-${id}.result.txt`)
   const backup = join(dirname(installDir), `.kevin-uninstall-${id}`)
   const dataBackup = dataDir && join(dirname(dataDir), `.kevin-uninstall-data-${id}`)
-  await writeFileAtomic(script, '\uFEFF' + uninstallHelperScript({
-    installDir, files, dataDir, dataBackup, backup, report, ready, commit,
-    cleanup: uninstallIntegrationScript(installDir, dataDir)
-  }))
-  try {
-    await startDetachedPowerShellFile(script)
-    for (let attempt = 0; attempt < 40; attempt++) {
-      const confirmed = await fs.readFile(ready, 'utf8').catch(() => '')
-      if (confirmed.replace(/^\uFEFF/, '') === 'ready') {
-        await fs.rm(ready, { force: true })
-        onProgress?.('正在交接卸载，程序文件移除后将清理系统设置…')
-        await writeFileAtomic(commit, 'commit')
-        log(`uninstall: handed off to helper. Result: ${report}`)
-        return report
-      }
-      await new Promise(resolve => setTimeout(resolve, 150))
-    }
-    // The helper only works after the calling process exits. Leave this
-    // window open if startup cannot be confirmed.
-    throw new Error('卸载辅助程序未启动。诊断文件：' + report)
-  } catch (error) {
-    await fs.rm(script, { force: true }).catch(() => undefined)
-    throw error
+  const executable = process.execPath
+  const owners = [{ pid: process.pid, path: executable, required: true }]
+  if (launcherExecutableName !== launcherRuntimeExecutableName &&
+      basename(executable).toLowerCase() === launcherRuntimeExecutableName.toLowerCase()) {
+    owners.push({ pid: process.ppid, path: join(dirname(executable), launcherExecutableName), required: false })
   }
+  const script = uninstallHelperScript({
+    installDir, files, dataDir, dataBackup, backup, owners,
+    cleanup: uninstallIntegrationScript(installDir, dataDir)
+  })
+  await startUninstallHelper(script, report, () => {
+    onProgress?.('正在交接卸载，程序文件移除后将清理系统设置…')
+  })
+  log(`uninstall: handed off to helper. Result: ${report}`)
+  return report
 }

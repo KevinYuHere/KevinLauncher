@@ -1,11 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
 import { promises as fs } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyPayload, listFiles, normalizeInstallDir, processesUsingInstall, staleFiles } from '../src/main/services/install'
-import { managedUninstallPaths, uninstallHelperScript } from '../src/main/services/uninstall'
-import { psQuote, runPowerShellFile, startDetachedPowerShellFile } from '../src/main/services/powershell'
+import { applyPayload, closeRunningInstances, listFiles, normalizeInstallDir, processesUsingInstall, staleFiles } from '../src/main/services/install'
+import { managedUninstallPaths, startUninstallHelper, uninstallHelperScript } from '../src/main/services/uninstall'
+import { psDataLiteral } from '../src/main/services/powershell'
 import { launcherEntryPath } from '../src/main/services/buildIdentity'
+import { ProcessTree } from '../src/main/services/processTree'
+import * as setupProcess from '../src/main/services/setupProcess'
 
 vi.mock('electron', () => ({ app: { isPackaged: false, getVersion: () => '2.0.5' } }))
 
@@ -55,6 +59,22 @@ describe('managed uninstall', () => {
       .toEqual([1, 2, 3, 4, 5, 6])
   })
 
+  it.skipIf(process.platform !== 'win32')('requests ordinary close from the matching legacy image before waiting for exit', async () => {
+    const target = await fs.realpath(await temp())
+    const fixture = {
+      pid: 424242, ppid: 0, name: 'KevinLauncher.exe', executable: join(target, 'KevinLauncher.exe'),
+      createdAt: Date.now()
+    }
+    const unrelated = { ...fixture, pid: 424243, executable: join(target, 'another installation', 'KevinLauncher.exe') }
+    vi.spyOn(ProcessTree, 'snapshot').mockResolvedValueOnce([fixture, unrelated]).mockResolvedValueOnce([unrelated])
+    const close = vi.spyOn(setupProcess, 'requestLegacyLauncherClose').mockResolvedValue(1)
+
+    await expect(closeRunningInstances(target)).resolves.toBe(true)
+    expect(close).toHaveBeenCalledOnce()
+    expect(close).toHaveBeenCalledWith([fixture])
+  })
+
+
   it('uses only the validated recorded file set', () => {
     expect(managedUninstallPaths(['KevinLauncher.exe', 'resources/app/main.js', 'INSTALL.JSON']))
       .toEqual(['KevinLauncher.exe', 'resources/app/main.js', 'INSTALL.JSON'])
@@ -65,7 +85,7 @@ describe('managed uninstall', () => {
 
   it.skipIf(process.platform !== 'win32')('removes managed files from a Chinese path and preserves unknown files', async () => {
     const root = await fs.realpath(await temp())
-    const installDir = join(root, '安装 甲')
+    const installDir = join(root, "安装 ‘甲’ d'Art")
     await writeTree(installDir, {
       'KevinLauncher.exe': 'installed',
       'resources/中文 模块.dll': 'component',
@@ -73,66 +93,91 @@ describe('managed uninstall', () => {
       'install.json': '{}'
     })
     const report = join(root, '卸载结果.txt')
-    const ready = join(root, '准备完成')
-    const commit = join(root, '确认卸载')
     const backup = join(root, '保留的程序')
-    const script = join(root, '卸载程序.ps1')
-    await fs.writeFile(commit, 'commit')
-    await fs.writeFile(script, '\uFEFF' + uninstallHelperScript({
-      installDir, dataDir: undefined, backup, report, ready, commit,
-      files: managedUninstallPaths(['KevinLauncher.exe', 'resources/中文 模块.dll'])
-    }))
-    await startDetachedPowerShellFile(script)
-    await vi.waitFor(async () => {
-      expect((await fs.readFile(report, 'utf8')).replace(/^\uFEFF/, '')).toBe('complete')
-    }, { timeout: 10000 })
+    const owner = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { windowsHide: true })
+    await once(owner, 'spawn')
+    const exited = once(owner, 'exit')
+    try {
+      const script = uninstallHelperScript({
+        installDir, dataDir: undefined, backup,
+        owners: [{ pid: owner.pid!, path: process.execPath, required: true }],
+        files: managedUninstallPaths(['KevinLauncher.exe', 'resources/中文 模块.dll'])
+      })
+      await startUninstallHelper('#' + ' '.repeat(40_000) + '\n' + script, report).catch(async error => {
+        throw new Error(await fs.readFile(report, 'utf8'), { cause: error })
+      })
+      expect(await fs.readFile(join(installDir, 'KevinLauncher.exe'), 'utf8')).toBe('installed')
+      expect(new Set(await fs.readdir(root))).toEqual(new Set([installDir.slice(root.length + 1), '卸载结果.txt']))
+    } finally {
+      owner.kill()
+      await exited
+    }
+    await vi.waitFor(async () => expect((await fs.readFile(report, 'utf8')).trim()).toBe('complete'))
     expect(await listFiles(installDir)).toEqual(['my files/私有记录.txt'])
   }, 12000)
 
-  it.skipIf(process.platform !== 'win32')('keeps system entries on file rollback and resumes cleanup after commit', async () => {
+  it.skipIf(process.platform !== 'win32')('restores files on a failed uninstall and retries through the original entry', async () => {
     const root = await fs.realpath(await temp())
     const installDir = join(root, '运行位置')
+    const dataDir = join(root, '用户资料')
     const file = join(installDir, 'KevinLauncher.exe')
     const failurePoint = join(installDir, 'locked.dll')
-    const report = join(root, 'result.txt')
-    const ready = join(root, 'ready')
-    const commit = join(root, 'commit')
-    const backup = join(root, 'quarantine')
-    const script = join(root, 'helper.ps1')
     const systemEntry = join(root, 'system-entry')
     const allowCleanup = join(root, 'allow-cleanup')
+    const retriedCleanup = join(root, 'retried-cleanup')
     await writeTree(installDir, { 'KevinLauncher.exe': 'program', 'install.json': '{}' })
+    await writeTree(dataDir, { '配置.json': 'user data' })
     await fs.mkdir(failurePoint)
     await fs.writeFile(systemEntry, 'keep until committed')
-    const stage = async () => {
-      await fs.writeFile(commit, 'commit')
-      await fs.writeFile(script, '\uFEFF' + uninstallHelperScript({
-        installDir, dataDir: undefined, backup, report, ready, commit,
+    const stage = async (id: number, result: RegExp) => {
+      const report = join(root, `result-${id}.txt`)
+      await startUninstallHelper(uninstallHelperScript({
+        installDir, dataDir, backup: join(root, `quarantine-${id}`), dataBackup: join(root, `data-${id}`),
+        owners: [],
         files: managedUninstallPaths(['KevinLauncher.exe', 'locked.dll']),
-        cleanup: `if (!(Test-Path -LiteralPath ${psQuote(allowCleanup)})) { throw 'cleanup fixture' }
-Remove-Item -LiteralPath ${psQuote(systemEntry)} -ErrorAction Stop`
-      }))
+        cleanup: `if (!(Test-Path -LiteralPath ${psDataLiteral(allowCleanup)})) { throw 'cleanup fixture' }
+if (!(Test-Path -LiteralPath ${psDataLiteral(retriedCleanup)})) {
+  [IO.File]::WriteAllText(${psDataLiteral(retriedCleanup)}, 'yes')
+  throw 'temporary cleanup failure'
+}
+Remove-Item -LiteralPath ${psDataLiteral(systemEntry)} -ErrorAction Stop`
+      }), report)
+      await vi.waitFor(async () => expect((await fs.readFile(report, 'utf8')).trim()).toMatch(result), { timeout: 8000 })
     }
 
-    await stage()
-    await expect(runPowerShellFile(script, 10000)).rejects.toThrow()
-    expect((await fs.readFile(report, 'utf8')).replace(/^\uFEFF/, '')).toMatch(/^failed: Expected file/)
+    await stage(1, /^failed: Expected file/)
     expect(await fs.readFile(file, 'utf8')).toBe('program')
     expect(await fs.readFile(systemEntry, 'utf8')).toBe('keep until committed')
 
     await fs.rmdir(failurePoint)
-    await fs.rmdir(backup)
-    await stage()
-    await expect(runPowerShellFile(script, 10000)).rejects.toThrow()
-    expect((await fs.readFile(report, 'utf8')).replace(/^\uFEFF/, '')).toMatch(/^cleanup pending: cleanup fixture/)
-    await expect(fs.access(file)).rejects.toMatchObject({ code: 'ENOENT' })
+    await stage(2, /^failed: cleanup fixture/)
+    expect(await fs.readFile(file, 'utf8')).toBe('program')
+    expect(await fs.readFile(join(dataDir, '配置.json'), 'utf8')).toBe('user data')
     expect(await fs.readFile(systemEntry, 'utf8')).toBe('keep until committed')
 
     await fs.writeFile(allowCleanup, 'yes')
-    await runPowerShellFile(script, 10000, ['-ResumeCleanup'])
-    expect((await fs.readFile(report, 'utf8')).replace(/^\uFEFF/, '')).toBe('complete')
+    await stage(3, /^complete$/)
+    expect(await fs.readFile(retriedCleanup, 'utf8')).toBe('yes')
+    await expect(fs.access(file)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(fs.access(dataDir)).rejects.toMatchObject({ code: 'ENOENT' })
     await expect(fs.access(systemEntry)).rejects.toMatchObject({ code: 'ENOENT' })
   }, 30000)
+
+  it.skipIf(process.platform !== 'win32')('leaves the installation intact when the caller cancels the pipe handoff', async () => {
+    const root = await fs.realpath(await temp())
+    const installDir = join(root, 'installed')
+    await writeTree(installDir, { 'KevinLauncher.exe': 'keep', 'install.json': '{}' })
+    const backup = join(root, 'quarantine')
+    const report = join(root, 'result.txt')
+    const script = uninstallHelperScript({
+      installDir, dataDir: undefined, backup, owners: [], files: managedUninstallPaths(['KevinLauncher.exe'])
+    })
+    await expect(startUninstallHelper(script, report, () => { throw new Error('handoff cancelled') }))
+      .rejects.toThrow('handoff cancelled')
+    expect(await fs.readFile(join(installDir, 'KevinLauncher.exe'), 'utf8')).toBe('keep')
+    await expect(fs.access(backup)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(startUninstallHelper(script, report)).rejects.toMatchObject({ code: 'EEXIST' })
+  }, 12000)
 })
 
 describe('listFiles', () => {

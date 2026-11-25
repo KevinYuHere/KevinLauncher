@@ -259,7 +259,10 @@ try {
   assert.ok(Array.isArray(await previousUi.run('window.api.listApps()')))
   console.log('Verified and started the published setup and launcher, v' + previous.manifest.version)
   const covering = await install(installer, 'upgrade', source.version, previous.manifest.version).catch(async error => {
-    await diagnoseUnpackedSetup()
+    const launcherLog = (await readFile(join(sandboxData('upgrade'), 'launcher.log'), 'utf8').catch(() => ''))
+      .split(/\r?\n/).filter(line => /\b(?:install:|app:|shutdown:)/.test(line)).slice(-25).join('\n')
+    if (launcherLog) console.error('Installation and previous launcher log\n' + launcherLog)
+    if (/提前退出|Electron 页面就绪/.test(error.message)) await diagnoseUnpackedSetup()
     throw error
   })
   await previousUi.waitForExit()

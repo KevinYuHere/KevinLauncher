@@ -1,12 +1,14 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
 
 static class WindowsEntry
 {
     const string RuntimeName = "KevinLauncherRuntime.exe";
+    const string CloseLegacyArgument = "--kevin-close-legacy-window";
     const uint UseShowWindow = 0x00000001;
     const uint UseStdHandles = 0x00000100;
     const uint ExtendedStartupInfoPresent = 0x00080000;
@@ -40,6 +42,8 @@ static class WindowsEntry
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     static extern uint GetModuleFileNameW(IntPtr module, StringBuilder file, int size);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern uint GetSystemWindowsDirectoryW(StringBuilder directory, int size);
     [DllImport("kernel32.dll")]
     static extern IntPtr GetCommandLineW();
     [DllImport("kernel32.dll")]
@@ -70,6 +74,115 @@ static class WindowsEntry
     static extern bool CloseHandle(IntPtr handle);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
     static extern void OutputDebugStringW(string message);
+
+    static class LegacyWindowClose
+    {
+        const uint QueryLimitedInformation = 0x1000;
+        const uint Synchronize = 0x100000;
+        const uint WaitTimeout = 258;
+        const uint CloseMessage = 0x0010;
+        const int InvalidWindowHandle = 1400;
+        const long UnixEpochFileTime = 116444736000000000L;
+        const string LauncherName = "KevinLauncher.exe";
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct FileTime { public uint Low, High; }
+
+        delegate bool WindowCallback(IntPtr window, IntPtr context);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern IntPtr OpenProcess(uint access, bool inherit, uint id);
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        static extern bool QueryFullProcessImageNameW(IntPtr process, uint flags, StringBuilder path, ref int capacity);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool GetProcessTimes(IntPtr process, out FileTime creation, out FileTime exit,
+            out FileTime kernel, out FileTime user);
+        [DllImport("user32.dll", SetLastError = true)]
+        static extern bool EnumWindows(WindowCallback callback, IntPtr context);
+        [DllImport("user32.dll")]
+        static extern uint GetWindowThreadProcessId(IntPtr window, out uint id);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        static extern int GetClassNameW(IntPtr window, StringBuilder name, int capacity);
+        [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        static extern bool PostMessageW(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
+
+        static string ImagePath(string path)
+        {
+            // Use the image name itself, never PATH, the caller's cwd or a search for matching names.
+            if (path.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase)) path = @"\\" + path.Substring(8);
+            else if (path.StartsWith(@"\\?\", StringComparison.Ordinal)) path = path.Substring(4);
+            bool drive = path.Length >= 3 && char.IsLetter(path[0]) && path[1] == ':' && path[2] == '\\';
+            bool unc = path.StartsWith(@"\\", StringComparison.Ordinal) && !path.StartsWith(@"\\.\", StringComparison.Ordinal);
+            if ((!drive && !unc) || !string.Equals(path.Substring(path.LastIndexOf('\\') + 1), LauncherName,
+                StringComparison.OrdinalIgnoreCase)) throw new ArgumentException("Expected an absolute KevinLauncher.exe path");
+            return path;
+        }
+
+        static void AssertIdentity(IntPtr process, string expected, long expectedCreated)
+        {
+            var image = new StringBuilder(32768);
+            int capacity = image.Capacity;
+            if (!QueryFullProcessImageNameW(process, 0, image, ref capacity)) throw new Win32Exception();
+            FileTime created, exited, kernel, user;
+            if (!GetProcessTimes(process, out created, out exited, out kernel, out user)) throw new Win32Exception();
+            long time = (((long)created.High << 32) | created.Low) - UnixEpochFileTime;
+            if (time / 10000 != expectedCreated || !string.Equals(ImagePath(image.ToString()), expected, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("The legacy launcher process identity changed");
+        }
+
+        static int PostClose(IntPtr process, uint pid)
+        {
+            var name = new StringBuilder(128);
+            int delivered = 0;
+            int failure = 0;
+            bool ended = false;
+            bool enumerated = EnumWindows((window, context) => {
+                uint owner;
+                uint thread = GetWindowThreadProcessId(window, out owner);
+                if (thread == 0 || owner != pid || GetClassNameW(window, name, name.Capacity) == 0 ||
+                    !name.ToString().StartsWith("Chrome_WidgetWin_", StringComparison.Ordinal)) return true;
+
+                uint state = WaitForSingleObject(process, 0);
+                if (state != WaitTimeout)
+                {
+                    ended = state == 0;
+                    if (!ended) failure = Marshal.GetLastWin32Error();
+                    return false;
+                }
+                if (GetWindowThreadProcessId(window, out owner) != thread || owner != pid) return true;
+                if (PostMessageW(window, CloseMessage, IntPtr.Zero, IntPtr.Zero)) delivered++;
+                else
+                {
+                    int error = Marshal.GetLastWin32Error();
+                    if (error == InvalidWindowHandle) return true;
+                    failure = error;
+                    return false;
+                }
+                return true;
+            }, IntPtr.Zero);
+            if (!enumerated && !ended) throw failure == 0 ? new Win32Exception() : new Win32Exception(failure);
+            return delivered;
+        }
+
+        public static int Run(string[] args)
+        {
+            uint id;
+            long created;
+            if (args.Length != 4 || !uint.TryParse(args[1], NumberStyles.None, CultureInfo.InvariantCulture, out id) || id == 0 ||
+                !long.TryParse(args[2], NumberStyles.None, CultureInfo.InvariantCulture, out created) || created <= 0)
+                throw new ArgumentException("Expected a legacy launcher PID, creation time and executable path");
+            string expected = ImagePath(args[3]);
+            IntPtr process = OpenProcess(QueryLimitedInformation | Synchronize, false, id);
+            if (process == IntPtr.Zero) throw new Win32Exception();
+            try
+            {
+                AssertIdentity(process, expected, created);
+                Console.WriteLine(PostClose(process, id).ToString(CultureInfo.InvariantCulture));
+                return 0;
+            }
+            finally { CloseHandle(process); }
+        }
+    }
 
     // Let Windows inherit only duplicates of the caller's standard streams.
     sealed class ChildStartup : IDisposable
@@ -167,6 +280,12 @@ static class WindowsEntry
         var commandLine = new StringBuilder("\"" + runtime + "\"" + ArgumentTail());
         // The elevated user entry always starts the Electron GUI.
         Environment.SetEnvironmentVariable("ELECTRON_RUN_AS_NODE", null);
+        // Privileged system helpers must resolve against the actual Windows directory.
+        var windows = new StringBuilder(32768);
+        uint length = GetSystemWindowsDirectoryW(windows, windows.Capacity);
+        if (length == 0 || length >= windows.Capacity) throw new Win32Exception();
+        Environment.SetEnvironmentVariable("SystemRoot", windows.ToString());
+        Environment.SetEnvironmentVariable("windir", windows.ToString());
         ProcessInformation process;
         using (var startup = new ChildStartup())
         {
@@ -186,14 +305,16 @@ static class WindowsEntry
         finally { CloseHandle(process.Process); }
     }
 
-    static int Main()
+    static int Main(string[] args)
     {
-        try { return StartRuntime(); }
+        bool closeLegacy = args.Length > 0 && args[0] == CloseLegacyArgument;
+        try { return closeLegacy ? LegacyWindowClose.Run(args) : StartRuntime(); }
         catch (Exception error)
         {
             var nativeError = error as Win32Exception;
             int code = nativeError == null ? 1 : nativeError.NativeErrorCode;
-            string message = "KevinLauncher could not start " + RuntimeName + " (" + code + "): " + error.Message;
+            string action = closeLegacy ? "close the legacy launcher window" : "start " + RuntimeName;
+            string message = "KevinLauncher could not " + action + " (" + code + "): " + error.Message;
             OutputDebugStringW(message);
             try { Console.Error.WriteLine(message); }
             catch (System.IO.IOException) { }

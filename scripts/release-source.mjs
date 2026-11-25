@@ -32,47 +32,44 @@ export function readReleaseVersion() {
   return { version, tag: 'v' + version, electron }
 }
 
-/** @param {string} [issueUrl] */
+function codexMarker(body, marker) {
+  const serialized = (body ?? '').match(new RegExp('<!--\\s*' + marker + '\\s+([\\s\\S]*?)\\s*-->'))?.[1]
+  if (serialized === undefined) return undefined
+  try { return JSON.parse(serialized) ?? {} } catch { return {} }
+}
+
+function completedSecurityReview(state, body, sha, issueUrl) {
+  const scope = codexMarker(body, 'codex-security-review:v1')
+  if (state?.commit_sha !== sha || state.status !== 'completed' || scope?.headSha !== sha ||
+      scope.status !== 'completed' || !Number.isSafeInteger(scope.pullRequestNumber) ||
+      'https://api.github.com/repos/' + scope.repository + '/issues/' + scope.pullRequestNumber !== issueUrl) return false
+  if (state.has_unresolved_findings === false) return typeof state.has_any_findings === 'boolean'
+  // Codex currently uses two null flags in completed security reviews with no findings.
+  return state.has_any_findings === null && state.has_unresolved_findings === null &&
+    !/^### Security findings\s*$/mi.test(body)
+}
+
 export function completedCodexReview(reviews, comments, sha, mergedAt, issueUrl) {
   const beforeMerge = time => Date.parse(time) <= Date.parse(mergedAt)
   const trusted = item => item.user?.login === codexLogin &&
     item.user.type === 'Bot' &&
     (!item.performed_via_github_app || item.performed_via_github_app.slug === 'chatgpt-codex-connector')
-  const trustedComments = comments.filter(comment => trusted(comment) &&
-    (!issueUrl || comment.issue_url === issueUrl))
+  const trustedComments = comments.filter(comment => trusted(comment) && comment.issue_url === issueUrl)
   const summaries = trustedComments.flatMap(comment => {
-    const data = (comment.body ?? '').match(/<!--\s*codex-review-state:v1\s+([\s\S]*?)\s*-->/)?.[1]
-    if (data === undefined) return []
-    let state
-    try { state = JSON.parse(data)?.code_review } catch { /* A malformed current state cannot authorize release. */ }
-    return [{ comment, state }]
+    const state = codexMarker(comment.body, 'codex-review-state:v1')
+    return state === undefined ? [] : [{ comment, state }]
   }).sort((a, b) => Date.parse(b.comment.updated_at) - Date.parse(a.comment.updated_at) || b.comment.id - a.comment.id)
   const latest = summaries[0]
-  if (latest) {
-    const { comment, state } = latest
-    if (state?.commit_sha !== sha || !shaPattern.test(state.commit_sha) || state.status !== 'completed' ||
-        typeof state.has_any_findings !== 'boolean' || state.has_unresolved_findings !== false ||
-        !beforeMerge(comment.created_at) || !beforeMerge(comment.updated_at)) return undefined
-    if (reviews.some(review => trusted(review) && review.commit_id === sha &&
-        ['CHANGES_REQUESTED', 'COMMENTED'].includes(review.state) &&
-        Date.parse(review.submitted_at) > Date.parse(comment.updated_at))) return undefined
-    return { id: comment.id, url: comment.html_url, submittedAt: comment.updated_at, reviewed: state.commit_sha }
-  }
-  const clean = trustedComments.flatMap(comment => {
-    if (!beforeMerge(comment.created_at) || !beforeMerge(comment.updated_at)) return []
-    if (!/^Codex Review:\s+Didn't find any major issues\b/i.test(comment.body ?? '')) return []
-    const reviewed = (comment.body ?? '').match(/(?:\*\*)?Reviewed commit:(?:\*\*)?\s*\x60([a-f0-9]{10,40})\x60/i)?.[1]
-    if (!reviewed || !sha.startsWith(reviewed.toLowerCase())) return []
-    return [{ id: comment.id, url: comment.html_url, submittedAt: comment.created_at, reviewed }]
-  })
-  const approvals = reviews.filter(review => trusted(review) && review.state === 'APPROVED' &&
-    review.commit_id === sha && beforeMerge(review.submitted_at))
-    .map(review => ({ id: review.id, url: review.html_url, submittedAt: review.submitted_at, reviewed: review.commit_id }))
-  const verdict = [...clean, ...approvals].sort((a, b) => Date.parse(b.submittedAt) - Date.parse(a.submittedAt))[0]
-  const hasLaterFindings = reviews.some(review => trusted(review) && review.commit_id === sha &&
-    ['CHANGES_REQUESTED', 'COMMENTED'].includes(review.state) && beforeMerge(review.submitted_at) &&
-    Date.parse(review.submitted_at) >= Date.parse(verdict?.submittedAt))
-  return hasLaterFindings ? undefined : verdict
+  if (!latest) return undefined
+  const { comment, state: { code_review: state, security_review: security } } = latest
+  if (state?.commit_sha !== sha || !shaPattern.test(state.commit_sha) || state.status !== 'completed' ||
+      typeof state.has_any_findings !== 'boolean' || state.has_unresolved_findings !== false ||
+      !beforeMerge(comment.created_at) || !beforeMerge(comment.updated_at) ||
+      !completedSecurityReview(security, comment.body, sha, issueUrl)) return undefined
+  if (reviews.some(review => trusted(review) && review.commit_id === sha &&
+      ['CHANGES_REQUESTED', 'COMMENTED'].includes(review.state) &&
+      Date.parse(review.submitted_at) > Date.parse(comment.updated_at))) return undefined
+  return { id: comment.id, url: comment.html_url, submittedAt: comment.updated_at, reviewed: state.commit_sha }
 }
 
 export async function github(path, options = {}) {
