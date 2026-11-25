@@ -34,23 +34,43 @@ export const frostMotion = (): boolean =>
 export type Task = (dt: number) => boolean
 
 const tasks = new Set<Task>()
-let running = false
+let frame = 0
 let last = 0
+let active = true
 
 function loop(now: number): void {
+  frame = 0
   const dt = Math.min(0.032, (now - last) / 1000)
   last = now
   for (const task of [...tasks]) if (!task(dt)) tasks.delete(task)
-  if (tasks.size > 0) requestAnimationFrame(loop)
-  else running = false
+  if (active && tasks.size > 0) frame = requestAnimationFrame(loop)
+}
+
+function resumeLoop(): void {
+  if (active && !frame && tasks.size > 0) {
+    last = performance.now()
+    frame = requestAnimationFrame(loop)
+  }
+}
+
+export function setSpringsActive(next: boolean): void {
+  active = next
+  if (next) resumeLoop()
+  else {
+    cancelAnimationFrame(frame)
+    frame = 0
+  }
 }
 
 /** Register a per-frame task on the shared rAF loop (starts it if needed). */
-export function addTask(task: Task): void {
+export function addTask(task: Task): () => void {
   tasks.add(task)
-  if (!running) {
-    running = true
-    last = performance.now()
-    requestAnimationFrame(loop)
+  resumeLoop()
+  return () => {
+    tasks.delete(task)
+    if (tasks.size === 0) {
+      cancelAnimationFrame(frame)
+      frame = 0
+    }
   }
 }

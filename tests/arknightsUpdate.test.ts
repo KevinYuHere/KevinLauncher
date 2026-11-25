@@ -10,6 +10,7 @@ import {
   readAkPredownloadState,
   writeAkPredownloadState
 } from '../src/main/update/arknightsUpdate'
+import { arknightsFullVolumes } from '../src/main/update/arknightsPackages'
 
 /** Same AES key/IV the Arknights client uses for `config.ini`. */
 const KEY = Buffer.from([
@@ -52,6 +53,14 @@ const response = {
 }
 
 afterEach(() => vi.unstubAllGlobals())
+
+describe('arknights archive volumes', () => {
+  it('orders interleaved parts within each archive and rejects gaps', () => {
+    const names = ['app.zip.002', 'data.zip', 'APP.ZIP.001']
+    expect(arknightsFullVolumes(['app2', 'data', 'app1'], names)).toEqual([['app1', 'app2'], ['data']])
+    expect(() => arknightsFullVolumes(['app2'], ['app.zip.002'])).toThrow(/分卷不连续/)
+  })
+})
 
 /** A response where only a pre-download for 79.0.0 is offered. */
 const preDownloadResponse = {
@@ -112,6 +121,7 @@ describe('getArknightsUpdateInfo', () => {
   it('reports the incremental download size', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(response))))
     const dir = await fs.mkdtemp(join(tmpdir(), 'kl-akinfo-'))
+    await writeConfigIni(dir, '77.0.0')
     const info = await getArknightsUpdateInfo(dir)
     expect(info.hasUpdate).toBe(true)
     expect(info.latestVersion).toBe('78.0.0')
@@ -161,7 +171,7 @@ describe('arknights predownload state', () => {
     const state = await readAkPredownloadState(dir)
     expect(state?.version).toBe('79.0.0')
     expect(state?.ready).toBe(true)
-    await clearAkPredownload(dir)
+    await clearAkPredownload(dir, '79.0.0')
     expect(await readAkPredownloadState(dir)).toBeNull()
     await fs.rm(dir, { recursive: true, force: true })
   })

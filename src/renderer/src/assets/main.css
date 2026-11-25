@@ -2219,7 +2219,8 @@ textarea {
   white-space: nowrap;
   min-width: 0;
 }
-.select-option:hover {
+.select-option:hover,
+.select-option.highlighted {
   background: var(--glass-hover);
 }
 .select-option.active {
@@ -2658,6 +2659,16 @@ textarea {
 }
 .gallery-thumb:hover {
   border-color: var(--brand-line);
+}
+.thumb-placeholder {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+[data-visual-paused] .app *,
+[data-visual-paused] .app *::before,
+[data-visual-paused] .app *::after {
+  animation-play-state: paused !important;
 }
 .thumb-skeleton {
   display: block;

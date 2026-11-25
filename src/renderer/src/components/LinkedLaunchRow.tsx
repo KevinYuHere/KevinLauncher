@@ -84,7 +84,8 @@ export default function LinkedLaunchRow({
   if (items.length === 0) return null
 
   return (
-    <div className={`linked-row-wrap${visible ? '' : ' hidden'}`}>
+    <div className={`linked-row-wrap${visible ? '' : ' hidden'}`}
+      ref={(el) => { if (el) el.inert = !visible }}>
       <div
         className={`linked-viewport${scroll.left > 1 ? ' fade-left' : ''}${scroll.left < scroll.max - 1 ? ' fade-right' : ''}`}
         ref={viewportRef}

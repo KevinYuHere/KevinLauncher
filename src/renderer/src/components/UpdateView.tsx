@@ -7,7 +7,8 @@ import { useDownloadSpeed } from '../useDownloadSpeed'
 interface UpdateViewProps {
   entry: AppEntry
   info: UpdateInfo | undefined
-  onChecked: (info: UpdateInfo) => void
+  status?: UpdateStatus
+  onCheck: (appId: string) => Promise<UpdateInfo | null>
   onBack: () => void
   onToast: (message: string) => void
 }
@@ -23,33 +24,32 @@ const IDLE = (appId: string): UpdateStatus => ({
 export default function UpdateView({
   entry,
   info,
-  onChecked,
+  status: latestStatus,
+  onCheck,
   onBack,
   onToast
 }: UpdateViewProps): ReactElement {
-  const [status, setStatus] = useState<UpdateStatus>(IDLE(entry.id))
+  const status = latestStatus ?? IDLE(entry.id)
   const [busy, setBusy] = useState(false)
   const autoChecked = useRef(false)
+  const active = useRef(false)
 
   useEffect(() => {
-    void window.api.updateStatus(entry.id).then(setStatus)
-    return window.api.onUpdateProgress((s) => {
-      if (s.appId === entry.id) setStatus(s)
-    })
-  }, [entry.id])
+    active.current = true
+    return () => { active.current = false }
+  }, [])
 
   const check = useCallback(async (): Promise<void> => {
     setBusy(true)
     try {
-      const res = await window.api.updateInfo(entry.id)
-      onChecked(res)
-      if (res.message) onToast(res.message)
+      const res = await onCheck(entry.id)
+      if (active.current && res?.message) onToast(res.message)
     } catch (error) {
-      onToast(`检查失败：${(error as Error).message}`)
+      if (active.current) onToast(`检查失败：${(error as Error).message}`)
     } finally {
-      setBusy(false)
+      if (active.current) setBusy(false)
     }
-  }, [entry.id, onChecked, onToast])
+  }, [entry.id, onCheck, onToast])
 
   // If the startup check hasn't produced a result yet, fetch it once.
   useEffect(() => {

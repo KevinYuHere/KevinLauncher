@@ -9,14 +9,6 @@
  * colour scheme), so they are cached by geometry — changing refraction /
  * highlight / dispersion / blur is then just a cheap markup rebuild.
  */
-import {
-  buildBezelProfile,
-  buildDisplacementBytes,
-  buildSpecularBytes,
-  bytesToDataUrl,
-  DEFAULT_BEZEL_HEIGHT_FN
-} from './liquidGlass'
-
 export interface LiquidFilterOptions {
   width: number
   height: number
@@ -43,66 +35,26 @@ export interface LiquidFilterOptions {
 
 /** Largest map side (px); bigger surfaces are sampled at a lower resolution. */
 const MAX_MAP_SIDE = 400
-const MAP_CACHE_LIMIT = 96
 
-interface Maps {
+export interface LiquidMaps {
   dispHref: string
   specHref: string
   maxDisp: number
 }
 
-const mapCache = new Map<string, Maps>()
-
-function resolveDpr(width: number, height: number, sampleScale?: number): number {
-  const native = Math.max(1, window.devicePixelRatio || 1)
-  return sampleScale ?? Math.min(native, MAX_MAP_SIDE / Math.max(width, height, 1))
-}
-
-function getMaps(
-  width: number,
-  height: number,
-  radius: number,
-  bezelWidth: number,
-  glassThickness: number,
-  refractiveIndex: number,
-  angle: number,
-  dpr: number
-): Maps {
-  const key = `${Math.round(width)}x${Math.round(height)}x${radius}x${bezelWidth}x${glassThickness}x${refractiveIndex}x${angle.toFixed(2)}x${dpr.toFixed(3)}`
-  const cached = mapCache.get(key)
-  if (cached) return cached
-
-  const cw = Math.max(1, Math.round(width * dpr))
-  const ch = Math.max(1, Math.round(height * dpr))
-  // The band width is purely the material's edge width (independent of layout).
-  const profile = buildBezelProfile(
-    glassThickness,
-    bezelWidth,
-    DEFAULT_BEZEL_HEIGHT_FN,
-    refractiveIndex
-  )
-  let maxDisp = 0
-  for (const v of profile) maxDisp = Math.max(maxDisp, Math.abs(v))
-  maxDisp = Math.max(maxDisp, 1e-6)
-
-  const maps: Maps = {
-    dispHref: bytesToDataUrl(
-      buildDisplacementBytes(width, height, radius, bezelWidth, maxDisp, profile, dpr),
-      cw,
-      ch
-    ),
-    // The specular band scales with the corner radius (a fixed size would leave
-    // small corners with no rim).
-    specHref: bytesToDataUrl(
-      buildSpecularBytes(width, height, radius, Math.max(8, radius * 1.1), angle, dpr),
-      cw,
-      ch
-    ),
-    maxDisp
+export function liquidMapInputs(options: LiquidFilterOptions, pixelRatio: number) {
+  const {
+    width, height, radius, glassThickness = 40, bezelWidth = 16, refractiveIndex = 1.5,
+    highlightAngle = 60, sampleScale
+  } = options
+  const dpr = sampleScale ?? Math.min(Math.max(1, pixelRatio), MAX_MAP_SIDE / Math.max(width, height, 1))
+  const geometryKey = JSON.stringify([width, height, radius, dpr])
+  return {
+    width, height, radius, glassThickness, bezelWidth, refractiveIndex, dpr,
+    angle: highlightAngle * Math.PI / 180,
+    displacementKey: JSON.stringify([geometryKey, bezelWidth, glassThickness, refractiveIndex]),
+    specularKey: JSON.stringify([geometryKey, highlightAngle])
   }
-  if (mapCache.size >= MAP_CACHE_LIMIT) mapCache.clear()
-  mapCache.set(key, maps)
-  return maps
 }
 
 /** Force the alpha to 1 (used after the screen-blended dispersion passes). */
@@ -111,36 +63,19 @@ const R_ONLY = '1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0'
 const G_ONLY = '0 0 0 0 0 0 1 0 0 0 0 0 0 0 0 0 0 0 1 0'
 const B_ONLY = '0 0 0 0 0 0 0 0 0 0 0 0 1 0 0 0 0 0 1 0'
 
-export function buildLiquidFilter(id: string, options: LiquidFilterOptions): string {
+export function buildLiquidFilter(id: string, options: LiquidFilterOptions, maps: LiquidMaps): string {
   const {
     width,
     height,
-    radius,
     blur = 0,
-    glassThickness = 40,
-    bezelWidth = 16,
-    refractiveIndex = 1.5,
     refraction = 1,
     highlight = 0.4,
-    highlightAngle = 60,
     dispersion = 0,
     specularSaturation = 4,
-    maxScale,
-    sampleScale
+    maxScale
   } = options
 
-  const dpr = resolveDpr(width, height, sampleScale)
-  const angle = (highlightAngle * Math.PI) / 180
-  const { dispHref, specHref, maxDisp } = getMaps(
-    width,
-    height,
-    radius,
-    bezelWidth,
-    glassThickness,
-    refractiveIndex,
-    angle,
-    dpr
-  )
+  const { dispHref, specHref, maxDisp } = maps
   const scale = maxScale != null ? Math.min(maxDisp * refraction, maxScale) : maxDisp * refraction
 
   const displacement =

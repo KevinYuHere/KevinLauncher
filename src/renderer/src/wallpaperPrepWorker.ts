@@ -34,14 +34,14 @@ async function encode(
 ): Promise<Blob> {
   const canvas = new OffscreenCanvas(width, height)
   const ctx = canvas.getContext('2d')
-  if (!ctx) {
+  try {
+    if (!ctx) throw new Error('no 2d context')
+    ctx.imageSmoothingEnabled = true
+    ctx.imageSmoothingQuality = 'high'
+    ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, width, height)
+  } finally {
     bitmap.close()
-    throw new Error('no 2d context')
   }
-  ctx.imageSmoothingEnabled = true
-  ctx.imageSmoothingQuality = 'high'
-  ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, width, height)
-  bitmap.close()
   return canvas.convertToBlob({ type: 'image/webp', quality: 0.95 })
 }
 

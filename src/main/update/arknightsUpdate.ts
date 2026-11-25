@@ -4,6 +4,8 @@ import { createDecipheriv } from 'crypto'
 import type { UpdateInfo } from '@shared/types'
 import { compareVersions } from '@shared/version'
 import { writeFileAtomic } from '../services/atomicFile'
+import { arknightsRecoveryPending } from './arknightsCommit'
+import { arknightsFileName, arknightsPath } from './arknightsPaths'
 
 const API_URL = 'https://launcher.hypergryph.com/api/proxy/batch_proxy'
 const APP_CODE = 'GzD1CpaWgmSq1wew'
@@ -102,7 +104,7 @@ function decryptConfig(buffer: Buffer): string {
 /** Read the installed client version from `<gameDir>/config.ini`. */
 export async function readLocalVersion(gameDir: string): Promise<string> {
   try {
-    const raw = await fs.readFile(join(gameDir, 'config.ini'))
+    const raw = await fs.readFile(await arknightsPath(gameDir, 'config.ini'))
     const text = decryptConfig(raw)
     const match = /(?:^|\n)\s*version\s*=\s*([^\r\n]+)/i.exec(text)
     return match ? match[1].trim() : ''
@@ -111,7 +113,7 @@ export async function readLocalVersion(gameDir: string): Promise<string> {
   }
 }
 
-export async function getArknightsLatest(localVersion: string): Promise<AkLatest> {
+export async function getArknightsLatest(localVersion: string, signal?: AbortSignal): Promise<AkLatest> {
   const body = {
     seq: SEQ,
     proxy_reqs: [
@@ -127,16 +129,19 @@ export async function getArknightsLatest(localVersion: string): Promise<AkLatest
       }
     ]
   }
+  const timeout = AbortSignal.timeout(20_000)
   const res = await fetch(API_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
+    signal: signal ? AbortSignal.any([signal, timeout]) : timeout
   })
+  if (!res.ok) throw new Error(`游戏版本查询失败：HTTP ${res.status}`)
   const json = (await res.json()) as RawResponse
   const rsp = json.proxy_rsps?.find((x) => x.kind === 'get_latest_game')?.get_latest_game_rsp
   if (!rsp) {
     const message = json.message ?? ''
-    if (!res.ok || /patchExist|not\s*found/i.test(message)) {
+    if (/patchExist|not\s*found/i.test(message)) {
       return { action: 0, version: localVersion, packs: [], patch: null, prePatch: null }
     }
     throw new Error(message || '鹰角接口返回异常')
@@ -172,12 +177,9 @@ function toPacks(raw: RawPack[] | undefined): AkPack[] {
     .filter((p) => p.url)
     .map((p) => {
       const url = p.url as string
-      let name = 'package.zip'
-      try {
-        name = basename(new URL(url).pathname)
-      } catch {
-        /* keep default */
-      }
+      const parsed = new URL(url)
+      if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('更新包地址无效')
+      const name = arknightsFileName(decodeURIComponent(basename(parsed.pathname)))
       return { url, md5: p.md5, size: Number(p.package_size ?? 0), name }
     })
 }
@@ -195,20 +197,18 @@ export interface AkPredownloadState {
 }
 
 export function akPredownloadDir(gameDir: string, version: string): string {
-  return join(gameDir, '_kl_pre', version)
+  return join(gameDir, '_kl_pre', arknightsFileName(version))
 }
 
 /** Newest staged predownload (if any). */
-export async function readAkPredownloadState(gameDir: string): Promise<AkPredownloadState | null> {
+export async function readAkPredownloadState(gameDir: string, targetVersion?: string): Promise<AkPredownloadState | null> {
   try {
-    const root = join(gameDir, '_kl_pre')
-    const versions = (await fs.readdir(root, { withFileTypes: true }))
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => entry.name)
-    if (versions.length === 0) return null
-    versions.sort(compareVersions)
-    const version = versions[versions.length - 1]
-    const raw = await fs.readFile(join(root, version, 'state.json'), 'utf-8')
+    const root = await arknightsPath(gameDir, '_kl_pre')
+    const versions = targetVersion ? [arknightsFileName(targetVersion)] :
+      (await fs.readdir(root, { withFileTypes: true })).filter(entry => entry.isDirectory()).map(entry => entry.name)
+    const version = versions.sort(compareVersions).at(-1)
+    if (!version) return null
+    const raw = await fs.readFile(await arknightsPath(root, `${version}/state.json`), 'utf-8')
     const state = JSON.parse(raw) as AkPredownloadState
     return state?.version === version ? state : null
   } catch {
@@ -220,14 +220,14 @@ export async function writeAkPredownloadState(
   gameDir: string,
   state: AkPredownloadState
 ): Promise<void> {
-  const dir = akPredownloadDir(gameDir, state.version)
+  const dir = await arknightsPath(gameDir, `_kl_pre/${arknightsFileName(state.version)}`)
   await fs.mkdir(dir, { recursive: true })
   await writeFileAtomic(join(dir, 'state.json'), JSON.stringify(state, null, 2))
 }
 
-/** Drop every staged predownload (after the formal update applied them). */
-export async function clearAkPredownload(gameDir: string): Promise<void> {
-  await fs.rm(join(gameDir, '_kl_pre'), { recursive: true, force: true }).catch(() => undefined)
+/** The formal update owns the staged volumes for its exact target version. */
+export async function clearAkPredownload(gameDir: string, version: string): Promise<void> {
+  await fs.rm(await arknightsPath(gameDir, `_kl_pre/${arknightsFileName(version)}`), { recursive: true, force: true })
 }
 
 export async function getArknightsUpdateInfo(gameDir: string): Promise<UpdateInfo> {
@@ -242,7 +242,14 @@ export async function getArknightsUpdateInfo(gameDir: string): Promise<UpdateInf
     preDownloadSizeBytes: 0
   }
   try {
+    if (!gameDir) throw new Error('请先设置游戏安装目录')
+    if (await arknightsRecoveryPending(gameDir)) {
+      info.hasUpdate = true
+      info.message = '上次更新中断，继续更新后可启动游戏'
+      return info
+    }
     const local = await readLocalVersion(gameDir)
+    if (!local) throw new Error('无法识别明日方舟客户端，请选择已安装的游戏目录')
     info.currentVersion = local || null
     const latest = await getArknightsLatest(local)
     info.latestVersion = latest.version || null
@@ -258,7 +265,7 @@ export async function getArknightsUpdateInfo(gameDir: string): Promise<UpdateInf
     info.preDownloadVersion = preNewer ? (pre?.version ?? null) : null
     if (preNewer && pre) {
       info.preDownloadSizeBytes = pre.size
-      const state = await readAkPredownloadState(gameDir)
+      const state = await readAkPredownloadState(gameDir, pre.version)
       info.preDownloadFinished = !!state && state.ready && state.version === pre.version
     }
     if (!info.hasUpdate) {

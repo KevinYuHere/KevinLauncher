@@ -80,6 +80,7 @@ export class HardLinkService {
         const refreshed = await this.refresh(item, signal)
         if (refreshed.length === size && refreshed.digest.toLowerCase() === md5.toLowerCase()) {
           if (await link(refreshed.path, target)) {
+            try { this.index.touch(refreshed.path) } catch { /* Index maintenance is best effort. */ }
             void this.track(this.insertVerified(target, expectedSize, md5))
             return true
           }

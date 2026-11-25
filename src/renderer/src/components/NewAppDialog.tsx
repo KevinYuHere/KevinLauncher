@@ -1,5 +1,6 @@
 import { useRef, useState, type ReactElement } from 'react'
 import { useOpenOrigin } from './useOpenOrigin'
+import { useDialogFocus } from './useDialogFocus'
 import type { AddonDescriptor, AddonId, LaunchMethod, NewAppEntry } from '@shared/types'
 import Select from './Select'
 import IconPicker from './IconPicker'
@@ -49,6 +50,7 @@ export default function NewAppDialog({
     setClosing(true)
     window.setTimeout(onClose, 180)
   }
+  useDialogFocus(modalRef, true, busy ? undefined : requestClose)
 
   const pickIcon = async (): Promise<void> => {
     const picked = await pickIconCropped()
@@ -88,13 +90,17 @@ export default function NewAppDialog({
     <div className={`modal-mask${closing ? ' closing' : ''}`}>
       <div
         ref={modalRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="添加应用"
+        tabIndex={-1}
         className={`modal wallpaper-region${closing ? ' closing' : ''}`}
         onClick={(e) => e.stopPropagation()}
       >
         <span className="wp-region-layer" aria-hidden="true" />
         <div className="modal-header">
           <h2>添加应用</h2>
-          <button className="modal-close" onClick={requestClose}>
+          <button className="modal-close" aria-label="关闭添加应用" onClick={requestClose}>
             ✕
           </button>
         </div>

@@ -1,0 +1,57 @@
+name: Request Codex review of updated PRs
+
+on:
+  pull_request:
+    branches: [main]
+    types: [synchronize]
+
+permissions: {}
+
+concurrency:
+  group: codex-review-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  request:
+    name: Request review of the current head once
+    if: |
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      !github.event.pull_request.draft &&
+      github.event.pull_request.head.sha != github.event.before
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Check existing Codex activity and request this head
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ && "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]
+          pr="repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER"
+          comments="repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments"
+          marker="<!-- kevin-codex-review:$HEAD_SHA -->"
+          for wait in 0 15 15 15; do
+            sleep "$wait"
+            live=$(gh api "$pr")
+            if ! jq -e --arg sha "$HEAD_SHA" --arg repo "$GITHUB_REPOSITORY" '
+              .state == "open" and .draft == false and .base.ref == "main" and
+              .base.repo.full_name == $repo and .head.repo.full_name == $repo and
+              .head.sha == $sha
+            ' <<< "$live" > /dev/null; then exit 0; fi
+            activity=$(gh api --paginate "$comments?per_page=100")
+            if jq -es --arg marker "$marker" --arg sha "$HEAD_SHA" '
+              any(.[][]; (
+                .user.login == "github-actions[bot]" and ((.body // "") | contains($marker))
+              ) or (
+                .user.login == "chatgpt-codex-connector[bot]" and
+                (try ((.body // "") | capture("<!-- codex-review-state:v1 (?<state>[^\\r\\n]+) -->").state |
+                  fromjson | .code_review.commit_sha == $sha) catch false)
+              ))
+            ' <<< "$activity" > /dev/null; then exit 0; fi
+          done
+          gh api --method POST "$comments" -f body="$(printf '@codex review\n\n%s' "$marker")" --jq '.html_url'

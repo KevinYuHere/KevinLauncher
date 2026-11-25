@@ -4,10 +4,10 @@ import {
   DEFAULT_WALLPAPER_SETTINGS,
   type AppEntry,
   type GlassAppearance,
-  type LauncherSettings,
   type LinkedLaunch,
   type UiPrefs
 } from '@shared/types'
+import type { LauncherConfig } from './configValidation'
 
 /**
  * Config migrations. Kept **pure** (no electron / fs) so every upgrade step is
@@ -30,7 +30,7 @@ export interface MigratableConfig {
   version: number
   apps: AppEntry[]
   ui?: Partial<UiPrefs>
-  launcher?: Partial<LauncherSettings>
+  launcher?: LauncherConfig['launcher']
   linkedLaunches?: LinkedLaunch[]
 }
 

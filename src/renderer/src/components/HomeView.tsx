@@ -33,6 +33,9 @@ interface HomeViewProps {
   entry: AppEntry
   addon: AddonDescriptor | undefined
   running: boolean
+  starting?: boolean
+  elapsedSec?: number
+  activeSince?: string
   startedAt?: string
   totalSec: number
   updateInfo: UpdateInfo | undefined
@@ -95,6 +98,7 @@ function HomeModule({
   register,
   onDrag,
   onDrop,
+  onCancel,
   onMeasure,
   children
 }: {
@@ -113,6 +117,7 @@ function HomeModule({
   register: (id: HomeModuleId, el: HTMLDivElement | null) => void
   onDrag: (id: HomeModuleId, dx: number, dy: number) => void
   onDrop: (id: HomeModuleId, dx: number, dy: number) => void
+  onCancel: (id: HomeModuleId) => void
   onMeasure?: (w: number, h: number) => void
   children: ReactNode
 }): ReactElement {
@@ -171,7 +176,8 @@ function HomeModule({
     popScale: 1.2,
     maxStretch: 0.46,
     onDrag: (dx, dy) => onDrag(moduleId, dx, dy),
-    onDrop: (dx, dy) => onDrop(moduleId, dx, dy)
+    onDrop: (dx, dy) => onDrop(moduleId, dx, dy),
+    onCancel: () => onCancel(moduleId)
   })
 
   return (
@@ -204,6 +210,9 @@ export default function HomeView({
   entry,
   addon,
   running,
+  starting,
+  elapsedSec,
+  activeSince,
   startedAt,
   totalSec,
   updateInfo,
@@ -231,7 +240,7 @@ export default function HomeView({
   const [shifts, setShifts] = useState<Record<string, { x: number; y: number }>>({})
   const [override, setOverride] = useState<Record<string, { left: number; top: number }>>({})
   const [dragId, setDragId] = useState<HomeModuleId | null>(null)
-  const [picker, setPicker] = useState<{ kind: 'launch' | 'linked'; anchor: DOMRect } | null>(null)
+  const [picker, setPicker] = useState<{ kind: 'launch' | 'linked'; anchor: DOMRect; pointerId?: number } | null>(null)
   const [pickerClosing, setPickerClosing] = useState(false)
   const [pickHighlight, setPickHighlight] = useState<string | null>('default')
   const stageRef = useRef<HTMLDivElement>(null)
@@ -246,7 +255,9 @@ export default function HomeView({
   }, [running])
 
   const speed = useDownloadSpeed(updateStatus)
-  const elapsed = running && startedAt ? now - new Date(startedAt).getTime() : 0
+  const liveStart = activeSince ?? (elapsedSec === undefined ? startedAt : undefined)
+  const liveElapsed = running && liveStart ? Math.max(0, now - Date.parse(liveStart)) : 0
+  const elapsed = (elapsedSec ?? 0) * 1000 + liveElapsed
 
   const status = updateStatus
   const active = !!status && (status.phase === 'downloading' || status.phase === 'extracting')
@@ -378,11 +389,22 @@ export default function HomeView({
     yieldShifts(id, { id, x: nx, y: ny, w: el.offsetWidth, h: el.offsetHeight }, w, h)
   }
 
+  const onCancelModule = (id: HomeModuleId): void => {
+    if (!baseRef.current[id]) return
+    delete baseRef.current[id]
+    setLive((prev) => {
+      const next = { ...prev }
+      delete next[id]
+      return next
+    })
+    setDragId(null)
+    setShifts({})
+  }
+
   const onDropModule = (id: HomeModuleId, dx: number, dy: number): void => {
     const el = refs.current[id]
     if (!el) return
     const base = baseOf(id, el)
-    delete baseRef.current[id]
     const { w, h } = stageSize()
     const maxX = Math.max(0, w - el.offsetWidth)
     const maxY = Math.max(0, h - el.offsetHeight)
@@ -395,13 +417,7 @@ export default function HomeView({
       .filter((r): r is Rect => r !== null)
     const { moves, resolved } = pushOut2D(others, target, GAP, { w, h })
 
-    setLive((prev) => {
-      const next = { ...prev }
-      delete next[id]
-      return next
-    })
-    setDragId(null)
-    setShifts({})
+    onCancelModule(id)
 
     if (!resolved) {
       showToast('没有可用空间，请先隐藏或移开模块')
@@ -640,8 +656,11 @@ export default function HomeView({
   // being *available* must never replace the launch action (that made the launch
   // button dead whenever a pre-download existed).
   let circleClick: (() => void) | undefined
-  const idleLaunch = !running && !mainActive && !updateAvailable && !preActive
-  if (running) {
+  const idleLaunch = !starting && !running && !mainActive && !updateAvailable && !preActive
+  if (starting) {
+    launchLabel = '等待进程'
+    launchClick = () => undefined
+  } else if (running) {
     launchLabel = '停止'
     launchTone = 'stop'
     launchClick = onStop
@@ -683,9 +702,9 @@ export default function HomeView({
     stageRef.current?.getBoundingClientRect() ??
     new DOMRect(0, 0, window.innerWidth, window.innerHeight)
 
-  const openPicker = (kind: 'launch' | 'linked', anchor: DOMRect): void => {
+  const openPicker = (kind: 'launch' | 'linked', anchor: DOMRect, pointerId?: number): void => {
     setPickerClosing(false)
-    setPicker({ kind, anchor })
+    setPicker({ kind, anchor, pointerId })
     setPickHighlight('default')
   }
 
@@ -699,6 +718,7 @@ export default function HomeView({
   }
 
   const pickChoice = (id: string): void => {
+    if (!picker || pickerClosing) return
     if (picker?.kind === 'launch') {
       onLaunch(id === 'default' ? undefined : id)
     } else if (id === 'default') {
@@ -718,8 +738,8 @@ export default function HomeView({
     launchClick()
   }
 
-  const onLinkedLongPress = (rect: DOMRect): void => {
-    if (linkedPickerEnabled && !picker) openPicker('linked', rect)
+  const onLinkedLongPress = (rect: DOMRect, pointerId?: number): void => {
+    if (linkedPickerEnabled && !picker) openPicker('linked', rect, pointerId)
   }
   const linkedLongPress = useLongPress(onLinkedLongPress)
   const linkedClick = (el?: HTMLElement): void => {
@@ -748,6 +768,7 @@ export default function HomeView({
           register={register}
           onDrag={onDragModule}
           onDrop={onDropModule}
+          onCancel={onCancelModule}
         >
           <div className="wallpaper-switch">
             <button
@@ -783,6 +804,7 @@ export default function HomeView({
           register={register}
           onDrag={onDragModule}
           onDrop={onDropModule}
+          onCancel={onCancelModule}
         >
           <div className="home-info glass">
             <div className="hi-title">{entry.name}</div>
@@ -791,7 +813,7 @@ export default function HomeView({
                 {entry.moduleLabel?.trim() ? entry.moduleLabel : addon ? addon.name : '普通应用'}
               </span>
               <span className="sep" />
-              <span className={running ? 'live' : ''}>{running ? '运行中' : '未运行'}</span>
+              <span className={running ? 'live' : ''}>{starting ? '等待进程' : running ? '运行中' : '未运行'}</span>
             </div>
             <button className="hi-stats" onClick={onShowStats}>
               总时长 {formatTotal(totalSec)}
@@ -813,6 +835,7 @@ export default function HomeView({
           register={register}
           onDrag={onDragModule}
           onDrop={onDropModule}
+          onCancel={onCancelModule}
           onMeasure={(w, h) => {
             setPlaytimeW((prev) => (Math.abs(prev - w) > 1 ? w : prev))
             setPlaytimeH((prev) => (Math.abs(prev - h) > 1 ? h : prev))
@@ -843,6 +866,7 @@ export default function HomeView({
           register={register}
           onDrag={onDragModule}
           onDrop={onDropModule}
+          onCancel={onCancelModule}
           onMeasure={(_w, h) => setLinkedH((prev) => (Math.abs(prev - h) > 1 ? h : prev))}
         >
           <button
@@ -856,6 +880,13 @@ export default function HomeView({
                 : '关联启动'
             }
             onPointerDown={linkedLongPress.onPointerDown}
+            aria-keyshortcuts={linkedPickerEnabled ? 'Alt+ArrowDown' : undefined}
+            onKeyDown={(event) => {
+              if (event.altKey && event.key === 'ArrowDown' && linkedPickerEnabled) {
+                event.preventDefault()
+                onLinkedLongPress(event.currentTarget.getBoundingClientRect())
+              }
+            }}
             onClick={(e) => linkedClick(e.currentTarget)}
           >
             <Icon name="link" size={16} />
@@ -879,6 +910,7 @@ export default function HomeView({
           register={register}
           onDrag={onDragModule}
           onDrop={onDropModule}
+          onCancel={onCancelModule}
           onMeasure={(w, h) => {
             setLaunchW((prev) => (Math.abs(prev - w) > 1 ? w : prev))
             setLaunchH((prev) => (Math.abs(prev - h) > 1 ? h : prev))
@@ -898,7 +930,7 @@ export default function HomeView({
             boundsRef={stageRef}
             onLongPress={
               methodPickerEnabled && !picker
-                ? (rect) => openPicker('launch', rect)
+                ? (rect, pointerId) => openPicker('launch', rect, pointerId)
                 : undefined
             }
           />
@@ -908,6 +940,7 @@ export default function HomeView({
       {picker && drawerOptions.length > 0 && (
         <LaunchDrawer
           anchor={picker.anchor}
+          pointerId={picker.pointerId}
           bounds={boundsRect}
           radius={Math.round(picker.anchor.height / 2)}
           options={drawerOptions}

@@ -1,9 +1,14 @@
 import { app } from 'electron'
 import { join } from 'path'
-import type { GachaRecord, GachaStats, GachaPoolStat } from '@shared/types'
+import type { GachaGame, GachaRecord, GachaRecordPage, GachaStats } from '@shared/types'
 import { writeFileAtomic } from '../services/atomicFile'
 import { openJsonStore } from '../services/jsonStore'
-import { topRankFor, secondRankFor, poolGroup, poolName } from './metadata'
+import { currentAppVersion } from '../services/appVersion'
+import { GachaIndex, recordIdentity } from './gachaIndex'
+import { decodeGachaArchive, exportGachaArchive } from './gachaFormats'
+import { isObject } from '../services/configValidation'
+import type { GachaIndexClient } from './gachaIndexClient'
+import type { IndexQuery } from './gachaIndexMessages'
 
 interface StoreShape {
   version: number
@@ -11,37 +16,33 @@ interface StoreShape {
 }
 
 const CURRENT_VERSION = 1
+const LARGE_HISTORY_SIZE = 20_000
+const DATASET_LIMIT = 6
 
-/**
- * The API `id` (the last `:`-separated part of our composite id) is monotonic,
- * so it gives the true pull order. Records pulled within the same second share
- * the same `time` string — sorting by time alone leaves them reversed.
- */
-function idNumber(id: string): bigint {
-  const tail = id.slice(id.lastIndexOf(':') + 1).replace(/\D/g, '')
-  try {
-    return tail ? BigInt(tail) : 0n
-  } catch {
-    return 0n
+function enrichRecord(previous: GachaRecord, incoming: GachaRecord): GachaRecord | undefined {
+  const patch: Partial<GachaRecord> = {}
+  for (const key of ['lang', 'gachaId', 'timestampMs', 'uigfGachaType', 'seq'] as const) {
+    if (previous[key] === undefined && incoming[key] !== undefined) Object.assign(patch, { [key]: incoming[key] })
   }
-}
-
-/** Oldest → newest pull order (time, then API id). */
-function compareAscending(a: GachaRecord, b: GachaRecord): number {
-  if (a.time !== b.time) return a.time < b.time ? -1 : 1
-  const na = idNumber(a.id)
-  const nb = idNumber(b.id)
-  return na < nb ? -1 : na > nb ? 1 : 0
+  if (previous.timezone === undefined && incoming.timezone !== undefined && previous.time === incoming.time &&
+      (previous.timestampMs === undefined || previous.timestampMs === incoming.timestampMs)) {
+    patch.timezone = incoming.timezone
+  }
+  if (previous.rankType === 0 && previous.game !== 'arknights' && incoming.rankType > 0) patch.rankType = incoming.rankType
+  if (Object.keys(patch).length) return { ...previous, ...patch }
+  return undefined
 }
 
 /** Persists gacha records per application to `%userData%/gacha/<appId>.json`. */
 export class GachaStore {
   private readonly cache = new Map<string, GachaRecord[]>()
   private readonly loading = new Map<string, Promise<GachaRecord[]>>()
-  private readonly pending = new Map<string, symbol>()
-  /** App ids whose store file could not be read — writes are refused for them. */
-  private readonly saveBlocked = new Set<string>()
-
+  private readonly pending = new Map<string, GachaRecord[]>()
+  private readonly writes = new Map<string, Promise<void>>()
+  private readonly indexes = new Map<string, { records: GachaRecord[]; index: GachaIndex }>()
+  private largeIndex: Promise<GachaIndexClient> | undefined
+  private readonly revisions = new WeakMap<GachaRecord[], number>()
+  private revision = 0
   private dir(): string {
     return join(app.getPath('userData'), 'gacha')
   }
@@ -53,7 +54,10 @@ export class GachaStore {
 
   async load(appId: string): Promise<GachaRecord[]> {
     const cached = this.cache.get(appId)
-    if (cached) return cached
+    if (cached) {
+      this.remember(appId, cached)
+      return cached
+    }
     let pending = this.loading.get(appId)
     if (!pending) {
       pending = this.read(appId).finally(() => this.loading.delete(appId))
@@ -68,41 +72,63 @@ export class GachaStore {
       () => ({ version: CURRENT_VERSION, records: [] }),
       `gacha:${appId}`
     )
-    const records = Array.isArray(data?.records) ? data.records : []
-    if (writable) this.saveBlocked.delete(appId)
-    else this.saveBlocked.add(appId)
-    this.cache.set(appId, records)
+    const valid = isObject(data) && (data.version === undefined || data.version === CURRENT_VERSION) &&
+      Array.isArray(data.records) && data.records.every((entry) => isObject(entry) &&
+        typeof entry.id === 'string' && typeof entry.time === 'string' &&
+        ['genshin', 'starrail', 'zzz', 'arknights'].includes(String(entry.game)) &&
+        typeof entry.gachaType === 'string' && Number.isFinite(entry.rankType))
+    if (!writable) throw new Error('无法读取现有抽卡记录，已保留原文件')
+    if (!valid) throw new Error('抽卡记录版本或格式不受支持，已保留原文件')
+    const records = data.records.map((record) => ({ ...record, appId, uid: typeof record.uid === 'string' ? record.uid : '' }))
+    this.remember(appId, records)
     return records
   }
 
   /** Add records, skipping duplicates. Returns the number of new records. */
   async add(appId: string, incoming: GachaRecord[]): Promise<number> {
-    await this.load(appId)
-    this.assertWritable(appId)
-    const records = this.cache.get(appId)!
-    const seen = new Set(records.map((r) => r.id))
-    let added = 0
-    for (const record of incoming) {
-      if (seen.has(record.id)) continue
-      seen.add(record.id)
-      records.push({ ...record, appId })
-      added += 1
-    }
-    if (added > 0) this.pending.set(appId, Symbol())
-    await this.save(appId)
-    return added
+    return this.enqueue(appId, async () => {
+      const current = await this.load(appId)
+      const previous = this.pending.get(appId) ?? current
+      const records = previous.slice()
+      const seen = new Map(records.map((record, index) => [recordIdentity(record), index]))
+      let changed = previous !== current
+      for (const record of incoming) {
+        const key = recordIdentity(record)
+        const existing = seen.get(key)
+        if (existing !== undefined) {
+          const enriched = enrichRecord(records[existing], record)
+          if (enriched) {
+            records[existing] = enriched
+            changed = true
+          }
+          continue
+        }
+        seen.set(key, records.length)
+        records.push({ ...record, appId })
+        changed = true
+      }
+      const added = records.length - current.length
+      if (changed) {
+        this.pending.set(appId, records)
+        await this.save(appId, records)
+      }
+      return added
+    })
   }
 
   async clear(appId: string): Promise<void> {
-    await this.load(appId)
-    this.assertWritable(appId)
-    this.cache.set(appId, [])
-    this.pending.set(appId, Symbol())
-    await this.save(appId)
+    return this.enqueue(appId, async () => {
+      await this.load(appId)
+      await this.save(appId, [])
+    })
   }
 
   async flush(): Promise<void> {
-    const results = await Promise.allSettled([...this.pending.keys()].map((appId) => this.save(appId)))
+    await Promise.all(this.writes.values())
+    const results = await Promise.allSettled([...this.pending.keys()].map((appId) => this.enqueue(appId, async () => {
+      const records = this.pending.get(appId)
+      if (records) await this.save(appId, records)
+    })))
     const failure = results.find((result) => result.status === 'rejected')
     if (failure) throw failure.reason
   }
@@ -112,183 +138,98 @@ export class GachaStore {
     await Promise.allSettled(this.loading.values())
     await this.flush()
     this.cache.clear()
-    this.saveBlocked.clear()
+    this.indexes.clear()
+    await this.dispose()
   }
 
-  /**
-   * Records sorted newest first, each annotated with `pityAtPull` (the number
-   * of pulls since the previous item of the same rarity within the same pool).
-   */
+  async dispose(): Promise<void> {
+    const large = this.largeIndex
+    this.largeIndex = undefined
+    if (large) await (await large).stop()
+  }
+
+  private async index(appId: string): Promise<GachaIndex> {
+    const records = await this.load(appId)
+    const cached = this.indexes.get(appId)
+    if (cached?.records === records) return cached.index
+    const index = new GachaIndex(records, false)
+    this.indexes.set(appId, { records, index })
+    return index
+  }
+
+  async count(appId: string, game?: GachaGame): Promise<number> {
+    const records = await this.load(appId)
+    return game ? records.reduce((total, record) => total + Number(record.game === game), 0) : records.length
+  }
+
   async list(appId: string): Promise<GachaRecord[]> {
-    const records = await this.load(appId)
-    const game = records[0]?.game ?? 'genshin'
-
-    const byGroup = new Map<string, GachaRecord[]>()
-    for (const record of records) {
-      const group = poolGroup(game, record.gachaType, record.poolId)
-      const list = byGroup.get(group)
-      if (list) list.push(record)
-      else byGroup.set(group, [record])
-    }
-
-    const pityById = new Map<string, number>()
-    const groupById = new Map<string, string>()
-    for (const [group, list] of byGroup) {
-      for (const record of list) groupById.set(record.id, group)
-      const ascending = [...list].sort(compareAscending)
-      const lastPos: Record<number, number> = {}
-      ascending.forEach((record, index) => {
-        const position = index + 1
-        const previous = lastPos[record.rankType] ?? 0
-        pityById.set(record.id, position - previous)
-        lastPos[record.rankType] = position
-      })
-    }
-
-    return [...records]
-      .sort((a, b) => -compareAscending(a, b))
-      .map((record) => ({
-        ...record,
-        group: groupById.get(record.id),
-        pityAtPull: pityById.get(record.id)
-      }))
+    return new GachaIndex(await this.load(appId)).records
   }
 
-  async stats(appId: string): Promise<GachaStats> {
-    const records = await this.load(appId)
-    const game = records[0]?.game ?? 'genshin'
-    const topRank = topRankFor(game)
-    const secondRank = secondRankFor(game)
+  async stats(appId: string, game?: GachaGame): Promise<GachaStats> {
+    const result = await this.queryLargeIndex(appId, { type: 'stats', game })
+    return result ? result as GachaStats : (await this.index(appId)).stats(game)
+  }
 
-    const rankCounts: Record<string, number> = {}
-    const byGroup = new Map<string, GachaRecord[]>()
-    for (const record of records) {
-      rankCounts[String(record.rankType)] = (rankCounts[String(record.rankType)] ?? 0) + 1
-      const group = poolGroup(game, record.gachaType, record.poolId)
-      const list = byGroup.get(group)
-      if (list) list.push(record)
-      else byGroup.set(group, [record])
-    }
+  async page(appId: string, group: string, showSecond: boolean, offset: number, limit = 40): Promise<GachaRecordPage> {
+    const result = await this.queryLargeIndex(appId, { type: 'page', group, showSecond, offset, limit })
+    return result ? result as GachaRecordPage : (await this.index(appId)).page(group, showSecond, offset, limit)
+  }
 
-    const pools: GachaPoolStat[] = []
-    for (const [group, list] of byGroup) {
-      const ascending = [...list].sort(compareAscending)
-      let topPity = 0
-      let secondPity = 0
-      let lastTopName: string | null = null
-      let lastTopTime: string | null = null
-      let lastSecondName: string | null = null
-      let lastSecondTime: string | null = null
-      let latestBanner: string | undefined
-
-      for (const record of ascending) {
-        latestBanner = record.bannerName || latestBanner
-        if (record.rankType >= topRank) {
-          topPity = 0
-          lastTopName = record.itemName
-          lastTopTime = record.time
-        } else {
-          topPity += 1
-        }
-        if (record.rankType === secondRank) {
-          secondPity = 0
-          lastSecondName = record.itemName
-          lastSecondTime = record.time
-        } else {
-          secondPity += 1
-        }
+  private async queryLargeIndex(appId: string, query: IndexQuery): Promise<GachaStats | GachaRecordPage | null> {
+    let records = await this.load(appId)
+    while (records.length >= LARGE_HISTORY_SIZE) {
+      let revision = this.revisions.get(records)
+      if (revision === undefined) {
+        revision = ++this.revision
+        this.revisions.set(records, revision)
       }
-
-      pools.push({
-        group,
-        bannerName: poolName(game, group, latestBanner),
-        count: list.length,
-        topRank,
-        secondRank,
-        topPity,
-        lastTopName,
-        lastTopTime,
-        secondPity,
-        lastSecondName,
-        lastSecondTime
-      })
+      this.largeIndex ??= import('./gachaIndexClient').then(({ GachaIndexClient }) => new GachaIndexClient())
+      const client = await this.largeIndex
+      const reply = await client.request({ appId, file: this.file(appId), revision, query })
+      const current = await this.load(appId)
+      if (current === records) return reply
+      records = current
     }
-    pools.sort((a, b) => b.count - a.count)
-
-    const lastUpdated = records.length
-      ? records.reduce((max, r) => (r.time > max ? r.time : max), records[0].time)
-      : null
-
-    return { total: records.length, rankCounts, topRank, secondRank, pools, lastUpdated }
+    return null
   }
 
-  /** UIGF-flavoured export object. */
-  async exportUigf(appId: string, appName: string): Promise<string> {
-    const records = await this.list(appId)
-    const uid = records[0]?.uid ?? ''
-    const payload = {
-      info: {
-        uid,
-        lang: 'zh-cn',
-        export_time: new Date().toISOString(),
-        export_app: 'KevinLauncher',
-        export_app_version: app.getVersion(),
-        uigf_version: 'v4.0'
-      },
-      hk4e: records
-    }
-    void appName
-    return JSON.stringify(payload, null, 2)
+  async exportArchive(appId: string): Promise<ReturnType<typeof exportGachaArchive>> {
+    return exportGachaArchive(await this.load(appId), currentAppVersion())
   }
 
-  /** Import from a UIGF-ish or raw record list. Returns number added. */
-  async importRecords(appId: string, raw: string): Promise<number> {
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(raw)
-    } catch {
-      throw new Error('文件不是有效的 JSON')
-    }
-    const obj = parsed as Record<string, unknown> | null
-    const list =
-      Array.isArray(parsed) ? parsed : (obj?.list ?? obj?.hk4e ?? obj?.hkrpg ?? obj?.nap)
-    if (!Array.isArray(list)) throw new Error('文件没有可识别的抽卡记录')
-    const incoming: GachaRecord[] = []
-    for (const item of list) {
-      if (!item || typeof item !== 'object' || Array.isArray(item)) continue
-      const r = item as Record<string, unknown>
-      const id = String(r.id ?? r.recordId ?? '')
-      if (!id) continue
-      const poolId = r.poolId ?? r.pool_id
-      incoming.push({
-        id,
-        appId,
-        game: (r.game as GachaRecord['game']) ?? 'genshin',
-        uid: String(r.uid ?? ''),
-        gachaType: String(r.gacha_type ?? r.gachaType ?? ''),
-        poolId: typeof poolId === 'string' ? poolId : undefined,
-        bannerName: String(r.bannerName ?? ''),
-        itemId: String(r.item_id ?? r.itemId ?? ''),
-        itemName: String(r.name ?? r.itemName ?? ''),
-        rankType: Number(r.rank_type ?? r.rankType ?? 0),
-        time: String(r.time ?? ''),
-        seq: r.seq != null ? String(r.seq) : undefined
-      })
-    }
-    return this.add(appId, incoming)
+  async importRecords(appId: string, raw: string, game?: GachaGame): Promise<number> {
+    return this.add(appId, decodeGachaArchive(raw, appId, game))
   }
 
-  private assertWritable(appId: string): void {
-    if (this.saveBlocked.has(appId)) throw new Error('无法读取现有抽卡记录，已保留原文件')
+  private enqueue<T>(appId: string, action: () => Promise<T>): Promise<T> {
+    const chain = this.writes.get(appId) ?? Promise.resolve()
+    const task = chain.then(action)
+    const next = task.then(() => undefined, () => undefined)
+    this.writes.set(appId, next)
+    void next.then(() => {
+      if (this.writes.get(appId) === next) this.writes.delete(appId)
+    })
+    return task
   }
 
-  private async save(appId: string): Promise<void> {
-    const revision = this.pending.get(appId)
-    const records = this.cache.get(appId)
-    if (!revision || !records) return
-    this.assertWritable(appId)
+  private remember(appId: string, records: GachaRecord[]): void {
+    this.cache.delete(appId)
+    this.cache.set(appId, records)
+    if (this.cache.size <= DATASET_LIMIT) return
+    for (const key of this.cache.keys()) {
+      if (key === appId || this.writes.has(key) || this.pending.has(key)) continue
+      this.cache.delete(key)
+      this.indexes.delete(key)
+      if (this.cache.size <= DATASET_LIMIT) break
+    }
+  }
+
+  private async save(appId: string, records: GachaRecord[]): Promise<void> {
     const data: StoreShape = { version: CURRENT_VERSION, records }
     await writeFileAtomic(this.file(appId), JSON.stringify(data))
-    if (this.pending.get(appId) === revision) this.pending.delete(appId)
+    this.remember(appId, records)
+    this.indexes.delete(appId)
+    this.pending.delete(appId)
   }
 }

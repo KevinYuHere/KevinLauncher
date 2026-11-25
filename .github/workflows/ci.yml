@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    name: Portable core tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      npm_config_registry: https://registry.npmjs.org/
+      KEVIN_LINT_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: node node_modules/electron/install.js
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run test:core
+
+  verify:
+    name: Typecheck, tests and build
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      npm_config_registry: https://registry.npmjs.org/
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: node node_modules/electron/install.js
+      - run: npm run typecheck
+      - run: |
+          $canonicalTemp = node -p "require('node:fs').realpathSync.native(require('node:os').tmpdir())"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:TEMP = $env:TMP = $canonicalTemp
+          npm test
+      - run: npm run build

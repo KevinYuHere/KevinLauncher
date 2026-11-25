@@ -1,9 +1,10 @@
 import { app } from 'electron'
 import { join } from 'path'
-import type { PlayTimeDay, PlayTimeTotals } from '@shared/types'
+import type { PlayTimeTotals } from '@shared/types'
 import { writeFileAtomic } from './atomicFile'
 import { openJsonStore } from './jsonStore'
 import { log } from './logger'
+import { calculatePlayTime } from './playTimeStats'
 
 export interface PlaySessionRecord {
   appId: string
@@ -18,15 +19,10 @@ interface StoreShape {
 }
 
 const CURRENT_VERSION = 1
-const DAY_MS = 24 * 60 * 60 * 1000
-
 let singleton: PlayTimeStore | null = null
 
-function localDateKey(date: Date): string {
-  const y = date.getFullYear()
-  const m = String(date.getMonth() + 1).padStart(2, '0')
-  const d = String(date.getDate()).padStart(2, '0')
-  return `${y}-${m}-${d}`
+function sessionKey(record: PlaySessionRecord): string {
+  return JSON.stringify([record.appId, record.startUtc, record.endUtc])
 }
 
 /**
@@ -36,11 +32,13 @@ function localDateKey(date: Date): string {
  */
 export class PlayTimeStore {
   private sessions: PlaySessionRecord[] = []
+  private seen = new Set<string>()
   private loaded = false
   private loading: Promise<void> | undefined
   private revision = 0
   private persisted = 0
   private saveTimer: NodeJS.Timeout | null = null
+  private saving: Promise<void> | undefined
   /** Set when the store file could not be read — writes are refused. */
   private saveBlocked = false
 
@@ -66,14 +64,16 @@ export class PlayTimeStore {
       'playTime'
     )
     this.sessions = Array.isArray(data?.sessions) ? data.sessions : []
+    this.seen = new Set(this.sessions.map(sessionKey))
     this.saveBlocked = !writable
     this.loaded = true
   }
 
   async addSession(record: PlaySessionRecord): Promise<void> {
     await this.load()
-    if (record.durationSec < 1) return
-    this.sessions.push(record)
+    if (!Number.isFinite(record.durationSec) || record.durationSec < 1 || this.seen.has(sessionKey(record))) return
+    this.seen.add(sessionKey(record))
+    this.sessions.push({ ...record })
     this.revision += 1
     this.scheduleSave()
   }
@@ -84,6 +84,7 @@ export class PlayTimeStore {
     await this.flush()
     this.loaded = false
     this.sessions = []
+    this.seen.clear()
     await this.load()
   }
 
@@ -93,7 +94,9 @@ export class PlayTimeStore {
       clearTimeout(this.saveTimer)
       this.saveTimer = null
     }
-    await this.save()
+    do {
+      await this.save()
+    } while (this.revision !== this.persisted)
   }
 
   totalForApp(appId: string): number {
@@ -105,7 +108,7 @@ export class PlayTimeStore {
   }
 
   totalsMap(): Record<string, number> {
-    const map: Record<string, number> = {}
+    const map: Record<string, number> = Object.create(null)
     for (const session of this.sessions) {
       map[session.appId] = (map[session.appId] ?? 0) + session.durationSec
     }
@@ -113,50 +116,26 @@ export class PlayTimeStore {
   }
 
   summary(appId: string, days = 14): PlayTimeTotals {
-    const now = Date.now()
-    const todayKey = localDateKey(new Date(now))
-    const weekStart = now - 6 * DAY_MS
-    const monthStart = now - 29 * DAY_MS
-
-    const dailyMap = new Map<string, number>()
-    for (let i = days - 1; i >= 0; i--) {
-      dailyMap.set(localDateKey(new Date(now - i * DAY_MS)), 0)
-    }
-
-    let totalSec = 0
-    let todaySec = 0
-    let weekSec = 0
-    let monthSec = 0
-
-    for (const session of this.sessions) {
-      if (session.appId !== appId) continue
-      totalSec += session.durationSec
-      const startMs = new Date(session.startUtc).getTime()
-      if (startMs >= weekStart) weekSec += session.durationSec
-      if (startMs >= monthStart) monthSec += session.durationSec
-      const key = localDateKey(new Date(session.startUtc))
-      if (key === todayKey) todaySec += session.durationSec
-      if (dailyMap.has(key)) dailyMap.set(key, (dailyMap.get(key) ?? 0) + session.durationSec)
-    }
-
-    const daily: PlayTimeDay[] = [...dailyMap.entries()].map(([date, sec]) => ({ date, sec }))
-    return { totalSec, todaySec, weekSec, monthSec, daily }
+    return calculatePlayTime(this.sessions, appId, days)
   }
 
   private scheduleSave(): void {
     if (this.saveTimer) return
     this.saveTimer = setTimeout(() => {
       this.saveTimer = null
-      void this.save().catch((error) => log(`playTime: could not save sessions (${String(error)})`))
+      void this.flush().catch((error) => log(`playTime: could not save sessions (${String(error)})`))
     }, 1000)
   }
 
   private async save(): Promise<void> {
+    if (this.saving) return this.saving
     if (this.revision === this.persisted) return
     if (this.saveBlocked) throw new Error('无法读取现有使用时长，已保留原文件')
     const revision = this.revision
     const data: StoreShape = { version: CURRENT_VERSION, sessions: this.sessions }
-    await writeFileAtomic(this.file(), JSON.stringify(data))
-    this.persisted = Math.max(this.persisted, revision)
+    this.saving = writeFileAtomic(this.file(), JSON.stringify(data)).then(() => {
+      this.persisted = revision
+    }).finally(() => { this.saving = undefined })
+    return this.saving
   }
 }

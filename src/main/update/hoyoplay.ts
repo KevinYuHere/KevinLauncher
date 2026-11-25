@@ -5,11 +5,11 @@ import { BuildNotFound, fetchManifest, getSophonBuild, runPool, type SophonBuild
 import { selectCategories } from './sophonPlan'
 import { getScenario, selectionFiles } from './hoyoFiles'
 import { getPatchBuild } from './sophonPatch'
-import { getHoYoMetadata, hoyoFetch } from './hoyoNetwork'
+import { getHoYoMetadata, HOYO_CN_LAUNCHER_ID as LAUNCHER_ID, hoyoFetch } from './hoyoNetwork'
+import { validateHoYoInstall } from './hoyoInstall'
+export { GAME_BIZ } from './hoyoInstall'
 
 const API_BASE = 'https://hyp-api.mihoyo.com/hyp/hyp-connect/api'
-/** China official HoYoPlay launcher id (Global is VYTpXlbWo8). */
-const LAUNCHER_ID = 'jGHBHlcOq1'
 export const GAME_IDS: Record<string, string> = {
   genshin: '1Z8W5NHUQb',
   starrail: '64kMb5iAWu',
@@ -17,7 +17,6 @@ export const GAME_IDS: Record<string, string> = {
 }
 
 export type HoYoGame = 'genshin' | 'starrail' | 'zzz'
-export const GAME_BIZ: Record<HoYoGame, string> = { genshin: 'hk4e_cn', starrail: 'hkrpg_cn', zzz: 'nap_cn' }
 
 /** HoYoPlay CommonGetAsync checks HTTP, retcode, the list node, then the game. */
 async function gameList<T>(
@@ -193,7 +192,12 @@ export async function getHoYoUpdateInfo(
     preDownloadSizeBytes: 0
   }
   try {
-    info.currentVersion = (await readGameVersion(gameDir)) || null
+    try {
+      info.currentVersion = (await validateHoYoInstall(gameDir, game)).get('game_version') ?? null
+    } catch (error) {
+      info.supported = false
+      throw error
+    }
     let latest: string | null = null
     let pd: string | null = null
     let mainBranch: BranchPackage | null = null

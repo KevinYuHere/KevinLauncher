@@ -1,4 +1,4 @@
-import { useState, type ReactElement } from 'react'
+import { useEffect, useRef, useState, type ReactElement } from 'react'
 import { LAUNCH_EFFECTS, type LaunchEffect, type LaunchMethod } from '@shared/types'
 import Icon from './Icon'
 import Sortable from './Sortable'
@@ -7,11 +7,12 @@ import Switch from './Switch'
 import InlineEdit from './InlineEdit'
 import PathField from './PathField'
 import { confirm } from './confirm'
+import { showToast } from './toast'
 
 interface LaunchMethodsEditorProps {
   methods: LaunchMethod[]
   defaultId: string
-  onChange: (methods: LaunchMethod[], defaultId: string) => void
+  onChange: (methods: LaunchMethod[], defaultId: string) => Promise<void> | void
   /** Optional launch-effect row, rendered right after the default choice. */
   effect?: LaunchEffect
   onEffectChange?: (effect: LaunchEffect) => void
@@ -40,36 +41,61 @@ export default function LaunchMethodsEditor({
 }: LaunchMethodsEditorProps): ReactElement {
   const [methods, setMethods] = useState<LaunchMethod[]>(initialMethods)
   const [defaultId, setDefaultId] = useState(initialDefaultId)
+  const draft = useRef({ methods: initialMethods, defaultId: initialDefaultId })
+  const saved = useRef(draft.current)
+  const revision = useRef(0)
+  const writes = useRef(Promise.resolve())
+  const mounted = useRef(false)
+  useEffect(() => {
+    mounted.current = true
+    return () => { mounted.current = false }
+  }, [])
 
   const def = methods.find((m) => m.id === defaultId) ?? methods[0] ?? null
   const others = def ? methods.filter((m) => m.id !== def.id) : methods
 
-  const commit = (next: LaunchMethod[], nextDefault = defaultId): void => {
-    if (next.length === 0) return
+  const commit = (next: LaunchMethod[], nextDefault = draft.current.defaultId): void => {
+    if (!mounted.current || next.length === 0) return
     const chosen = next.some((m) => m.id === nextDefault) ? nextDefault : next[0].id
     const defaultMethod = next.find((m) => m.id === chosen)!
     const ordered = [defaultMethod, ...next.filter((m) => m.id !== chosen)]
+    draft.current = { methods: ordered, defaultId: chosen }
     setMethods(ordered)
     setDefaultId(chosen)
-    onChange(ordered, chosen)
+    const generation = ++revision.current
+    writes.current = writes.current.then(async () => {
+      try {
+        await onChange(ordered, chosen)
+        saved.current = { methods: ordered, defaultId: chosen }
+      } catch (error) {
+        showToast(`保存启动方式失败：${(error as Error).message}`)
+        if (mounted.current && revision.current === generation) {
+          draft.current = saved.current
+          setMethods(saved.current.methods)
+          setDefaultId(saved.current.defaultId)
+        }
+      }
+    })
   }
 
-  const patch = (id: string, changes: Partial<LaunchMethod>): void =>
-    setMethods((prev) => prev.map((m) => (m.id === id ? { ...m, ...changes } : m)))
+  const patch = (id: string, changes: Partial<LaunchMethod>): void => {
+    if (!draft.current.methods.some((method) => method.id === id)) return
+    commit(draft.current.methods.map((m) => (m.id === id ? { ...m, ...changes } : m)))
+  }
 
   const remove = async (id: string): Promise<void> => {
     if (!(await confirm('确定删除该启动方式吗？'))) return
-    commit(methods.filter((m) => m.id !== id))
+    commit(draft.current.methods.filter((m) => m.id !== id))
   }
 
   const pickFile = async (id: string): Promise<void> => {
     const path = await window.api.pickExecutable()
-    if (path) commit(methods.map((m) => (m.id === id ? { ...m, targetPath: path } : m)))
+    if (path) patch(id, { targetPath: path })
   }
 
   const pickDir = async (id: string): Promise<void> => {
     const path = await window.api.pickDirectory()
-    if (path) commit(methods.map((m) => (m.id === id ? { ...m, workingDirectory: path } : m)))
+    if (path) patch(id, { workingDirectory: path })
   }
 
   const fields = (method: LaunchMethod): ReactElement => (
@@ -147,7 +173,7 @@ export default function LaunchMethodsEditor({
         commit([
           ...methods,
               {
-                id: `m-${Date.now()}-${methods.length}`,
+                id: crypto.randomUUID(),
                 name: `启动方式 ${methods.length + 1}`,
                 targetPath: '',
                 arguments: '',

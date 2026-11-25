@@ -23,12 +23,31 @@ function hexToRgb(hex: string): { r: number; g: number; b: number } {
 
 export default function PlayTimeView({ entry, onBack }: PlayTimeViewProps): ReactElement {
   const [totals, setTotals] = useState<PlayTimeTotals | null>(null)
+  const [error, setError] = useState('')
   const [selected, setSelected] = useState<PlayTimeDay | null>(null)
   const [cell, setCell] = useState(13)
   const wrapRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    void window.api.playTimeSummary(entry.id, DAYS).then(setTotals)
+    let active = true
+    let request = 0
+    const refresh = (): void => {
+      const current = ++request
+      void window.api.playTimeSummary(entry.id, DAYS).then((next) => {
+        if (!active || request !== current) return
+        setTotals(next)
+        setError('')
+        setSelected((selected) => next.daily.find((day) => day.date === selected?.date) ?? null)
+      }).catch((failure: unknown) => {
+        if (active && request === current) setError(failure instanceof Error ? failure.message : String(failure))
+      })
+    }
+    const unsubscribe = window.api.onPlayTimeChanged(refresh)
+    refresh()
+    return () => {
+      active = false
+      unsubscribe()
+    }
   }, [entry.id])
 
   const daily = totals?.daily ?? []
@@ -83,7 +102,7 @@ export default function PlayTimeView({ entry, onBack }: PlayTimeViewProps): Reac
         <div>
           <h1 className="page-title">使用时长 · {entry.name}</h1>
           <p className="page-subtitle">
-            {totals && totals.totalSec > 0 ? `累计 ${formatHours(totals.totalSec)}` : '暂无记录'}
+            {error || (totals && totals.totalSec > 0 ? `累计 ${formatHours(totals.totalSec)}` : totals ? '暂无记录' : '加载中…')}
           </p>
         </div>
         <div className="page-actions">

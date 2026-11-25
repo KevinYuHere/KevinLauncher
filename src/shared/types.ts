@@ -374,10 +374,17 @@ export interface NewAppEntry {
   monitorProcessNames?: string[]
 }
 
+export const APP_SETTINGS_FIELDS = [
+  'name', 'addonId', 'gameDirectory', 'screenshotDirectory', 'monitorProcessNames', 'environmentVariables'
+] as const satisfies readonly (keyof AppEntry)[]
+export type AppSettingsPatch = Partial<Pick<AppEntry, (typeof APP_SETTINGS_FIELDS)[number]>>
+
 export interface LaunchResult {
   ok: boolean
   pid: number | null
   elevated: boolean
+  /** An indirect launch can be accepted before its actual program is observed. */
+  confirmation?: 'started' | 'requested'
   /** Optional informational note (e.g. auto-elevated). Not an error. */
   message?: string
   error?: string
@@ -386,6 +393,8 @@ export interface LaunchResult {
 export interface StopResult {
   ok: boolean
   killed: number
+  remaining?: number
+  error?: string
 }
 
 export interface RunningApp {
@@ -394,6 +403,9 @@ export interface RunningApp {
   elevated: boolean
   startedAt: string
   pids: number[]
+  confirmed?: boolean
+  elapsedSec?: number
+  activeSince?: string
 }
 
 export interface PlayTimeDay {
@@ -432,6 +444,14 @@ export interface GachaRecord {
   rankType: number
   /** Local time string `YYYY-MM-DD HH:MM:SS`. */
   time: string
+  /** Absolute timestamp supplied by the account history service, when known. */
+  timestampMs?: number
+  /** Original server offset and locale, where supplied by the source. */
+  timezone?: number
+  lang?: string
+  /** Game-native banner ID and optional changed-banner code from UIGF. */
+  gachaId?: string
+  uigfGachaType?: string
   isUp?: boolean
   seq?: string
   /** Pulls since the previous item of the same rarity in the same pool. */
@@ -441,6 +461,10 @@ export interface GachaRecord {
 export interface GachaPoolStat {
   /** Pool group id (banners that share pity). */
   group: string
+  game: GachaGame
+  uid: string
+  /** A missing account or ambiguous source ordering makes pity unverifiable. */
+  pityKnown: boolean
   bannerName: string
   count: number
   topRank: number
@@ -462,6 +486,13 @@ export interface GachaStats {
   secondRank: number | null
   pools: GachaPoolStat[]
   lastUpdated: string | null
+}
+
+export interface GachaRecordPage {
+  records: GachaRecord[]
+  offset: number
+  limit: number
+  matched: number
 }
 
 export interface GachaUpdateResult {
@@ -506,6 +537,7 @@ export type UpdatePhase =
 
 export interface UpdateStatus {
   appId: string
+  taskId?: string
   phase: UpdatePhase
   progress: number
   downloadedBytes: number
@@ -521,6 +553,7 @@ export interface GalleryItem {
   path: string
   name: string
   mtimeMs: number
+  ctimeMs: number
   size: number
 }
 
@@ -535,7 +568,7 @@ export type AfterLaunchAction = 'none' | 'minimize' | 'tray' | 'close'
 /** Launch-at-login behaviour: off, show the window, or start hidden in the tray. */
 export type AutoStartMode = 'off' | 'window' | 'tray'
 /** Which GitHub releases the launcher self-updater follows. */
-export type UpdateChannel = 'stable' | 'beta'
+export type UpdateChannel = 'stable'
 
 /** 特别版主题标识（可扩展；`default` 表示不套用主题）。 */
 export type SpecialThemeId = 'default' | 'starsnow' | (string & {})
@@ -607,7 +640,7 @@ export interface LauncherSettings {
   autoStart: AutoStartMode
   /** 侧边栏是否应用当前应用的玻璃材质（否则用主题色）。 */
   sidebarMaterial: boolean
-  /** Follow stable releases or also pre-releases (测试版). */
+  /** The installed launcher follows stable releases. */
   updateChannel: UpdateChannel
   /** Download speed limit in MB/s (0 = unlimited). */
   downloadLimitMbps: number
@@ -617,6 +650,19 @@ export interface LauncherSettings {
   themeLocks: Partial<Record<SpecialAreaId, SpecialThemeId>>
   /** 已经应用过的主题策略版本（同一版本不再覆盖用户选择）。 */
   themePolicyVersion: string | null
+}
+
+export const LAUNCHER_BEHAVIOR_FIELDS = [
+  'closeAction', 'afterLaunch', 'autoStart', 'sidebarMaterial', 'downloadLimitMbps', 'themeAreas'
+] as const satisfies readonly (keyof LauncherSettings)[]
+export type LauncherBehaviorPatch = Partial<Pick<LauncherSettings, (typeof LAUNCHER_BEHAVIOR_FIELDS)[number]>>
+
+/** Host interfaces that must match before switching only the versioned app. */
+export interface AppUpdateCompatibility {
+  shellProtocol: number
+  installProtocol: number
+  dataSchema: number
+  hostSha256: string
 }
 
 /** A newer release found on GitHub (self-update). */
@@ -642,10 +688,12 @@ export interface AppUpdateInfo {
   installSize: number
   /** Electron version the release was built with ('' when unknown). */
   electronVersion: string | null
+  compatibility?: AppUpdateCompatibility
   /** Full installer used when the runtime itself changed (URLs, best first). */
   installerUrls: string[]
   installerName: string | null
   installerSize: number
+  installerUnpackedSize?: number
   installerSha256: string | null
   publishedAt: string
 }
@@ -682,6 +730,7 @@ export interface AppUpdateState {
   total: number
   bytesPerSecond: number
   installPercent: number
+  installTotal?: number
   message: string
   error?: string
   /** 当前下载是重要更新：不可暂停 / 跳过，失败会自动重试。 */
@@ -737,15 +786,28 @@ export interface UninstallerInfo {
   installSize: number
 }
 
-/** Disk usage of the caches the launcher can clean up. */
-export interface UsageReport {
-  /** Staged update downloads (`update-staging`). */
-  staging: number
-  /** Gallery thumbnail cache (`thumbs`). */
-  thumbs: number
-  /** Log files. */
-  logs: number
-  total: number
+export type DiskCacheKind = 'staging' | 'thumbs' | 'logs'
+export type CacheKind = DiskCacheKind | 'wallpaper'
+
+export interface DiskUsageReport {
+  staleStaging: number | null
+  retainedStaging: number | null
+  legacyThumbs: number | null
+  logs: number | null
+  gameCache: number | null
+  media: number | null
+  recovery: number | null
+}
+
+export interface UsageReport extends DiskUsageReport {
+  thumbnailMemory: number
+  wallpaperMemory: number
+  wallpaperDisk: number | null
+}
+
+export interface DiskCleanupReport {
+  diskBytes: number
+  failures: string[]
 }
 
 /** API exposed on `window.api` through the preload context bridge. */
@@ -754,7 +816,7 @@ export interface KevinApi {
 
   listApps(): Promise<AppEntry[]>
   addApp(input: NewAppEntry): Promise<AppEntry>
-  updateApp(app: AppEntry): Promise<AppEntry>
+  updateApp(appId: string, patch: AppSettingsPatch): Promise<AppEntry>
   removeApp(id: string): Promise<void>
   /** Reorder applications by id; returns the new order. */
   reorderApps(ids: string[]): Promise<AppEntry[]>
@@ -775,27 +837,20 @@ export interface KevinApi {
   /** Installed font family names (for the launcher font picker). */
   listFonts(): Promise<string[]>
   appVersion(): Promise<string>
+  confirmAppReady(): Promise<void>
   /** Current Windows desktop wallpaper path (used when there are no apps). */
   desktopWallpaper(): Promise<string | null>
   getLauncherSettings(): Promise<LauncherSettings>
   setLauncherIcon(dataUrl: string | null): Promise<LauncherSettings>
   setLauncherFont(family: string | null): Promise<LauncherSettings>
-  setLauncherBehavior(patch: {
-    closeAction?: CloseAction
-    afterLaunch?: AfterLaunchAction
-    autoStart?: AutoStartMode
-    sidebarMaterial?: boolean
-    updateChannel?: UpdateChannel
-    downloadLimitMbps?: number
-    themeAreas?: LauncherSettings['themeAreas']
-  }): Promise<LauncherSettings>
+  setLauncherBehavior(patch: LauncherBehaviorPatch): Promise<LauncherSettings>
   /** 抽卡记录里是否显示次高品级（每个应用独立）。 */
   setGachaShowSecond(appId: string, value: boolean): Promise<AppEntry>
   hideToTray(): Promise<void>
   /** Export every setting (apps, playtime, gacha, icons, wallpapers) to a zip. */
   exportData(): Promise<string | null>
   /** Restore a previously exported zip (overwrites everything). */
-  importData(): Promise<{ apps: number } | null>
+  importData(): Promise<{ apps: number; warnings: string[] } | null>
   setThemeColor(appId: string, color: string | null): Promise<AppEntry>
   /** Update the app's glass appearance (colour / material / blur). */
   setGlass(appId: string, patch: GlassPatch): Promise<AppEntry>
@@ -855,22 +910,21 @@ export interface KevinApi {
   playTimeTotals(): Promise<Record<string, number>>
   playTimeSummary(appId: string, days?: number): Promise<PlayTimeTotals>
 
-  gachaList(appId: string): Promise<GachaRecord[]>
   gachaStats(appId: string): Promise<GachaStats>
+  gachaPage(appId: string, group: string, showSecond: boolean, offset: number): Promise<GachaRecordPage>
   gachaClear(appId: string): Promise<void>
   gachaUpdateMiHoYo(appId: string, url: string): Promise<GachaUpdateResult>
   /** Opens the Hypergryph login page and fetches records automatically. */
   gachaLoginArknights(appId: string): Promise<GachaUpdateResult>
   gachaScanUrl(appId: string): Promise<string | null>
-  gachaExport(appId: string): Promise<string | null>
-  gachaImport(appId: string): Promise<number>
+  gachaExport(appId: string): Promise<{ path: string; format: 'uigf' | 'native' } | null>
+  gachaImport(appId: string): Promise<number | null>
 
   updateInfo(appId: string): Promise<UpdateInfo>
   updateStart(appId: string, mode: UpdateMode): Promise<void>
   updateCancel(appId: string): Promise<void>
   updateStatus(appId: string): Promise<UpdateStatus>
   /** Preview the download UI with a fake progress run. */
-  updateSimulate(appId: string, mode: UpdateMode): Promise<void>
 
   galleryList(appId: string): Promise<GalleryItem[]>
   galleryOpenViewer(paths: string[], index: number): Promise<void>
@@ -906,7 +960,7 @@ export interface KevinApi {
   installerNormalize(dir: string): Promise<string>
   installerRunning(): Promise<string[]>
   installerInspect(dir: string): Promise<InstallTarget>
-  installerFreeSpace(dir: string): Promise<number>
+  installerFreeSpace(dir: string): Promise<number | null>
   installerPickDirectory(current: string): Promise<string | null>
   /** Copies the payload into `dir`, writes shortcuts + the uninstall entry. */
   installerRun(dir: string, dataDir?: string): Promise<boolean>
@@ -928,9 +982,9 @@ export interface KevinApi {
   onDataDirProgress(callback: (progress: { step: string }) => void): () => void
 
   /** --- disk housekeeping (settings → 清理与占用) --- */
-  housekeepingUsage(): Promise<UsageReport>
+  housekeepingUsage(): Promise<DiskUsageReport>
   /** Cleans the requested caches and returns the new usage. */
-  housekeepingClean(kinds: ('staging' | 'thumbs' | 'logs')[]): Promise<UsageReport>
+  housekeepingClean(kinds: DiskCacheKind[]): Promise<DiskCleanupReport>
 
   windowMinimize(): Promise<void>
   windowToggleMaximize(): Promise<boolean>
@@ -941,9 +995,13 @@ export interface KevinApi {
   onRunningChanged(callback: () => void): () => void
   onPlayTimeChanged(callback: () => void): () => void
   onGachaProgress(callback: (progress: GachaProgress) => void): () => void
+  onGachaChanged(callback: (appId: string | null) => void): () => void
   onWindowMaximized(callback: (maximized: boolean) => void): () => void
   /** Fired whenever the main window becomes visible (startup / tray / re-open). */
   onWindowShown(callback: () => void): () => void
+  onShutdownFailed(callback: (message: string) => void): () => void
+  windowActivity(): Promise<boolean>
+  onWindowActivity(callback: (awake: boolean) => void): () => void
   onLauncherChanged(callback: () => void): () => void
   onUpdateProgress(callback: (status: UpdateStatus) => void): () => void
 }

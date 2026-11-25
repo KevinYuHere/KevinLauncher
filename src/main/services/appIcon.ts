@@ -4,8 +4,10 @@ import { existsSync, promises as fs, renameSync } from 'fs'
 import { join } from 'path'
 import { AppStore } from './appStore'
 import { BrandStore } from './brand'
+import { brandIcoName, openMediaDirectory } from './mediaFiles'
 import { setTrayImage } from './behavior'
 import { log } from './logger'
+import { trialBuild, trialShortcuts } from './buildIdentity'
 
 function bundledIcon(name: string): string {
   return app.isPackaged
@@ -22,6 +24,7 @@ function bundledIcon(name: string): string {
  * updated — which is exactly why the desktop icon did not change.
  */
 function shortcutCandidates(): string[] {
+  if (trialBuild) return Object.values(trialShortcuts())
   const paths: string[] = []
   const push = (path: string | undefined | null): void => {
     if (path) paths.push(path)
@@ -60,13 +63,13 @@ function shortcutCandidates(): string[] {
  * PNG (window / tray) and ICO (shortcuts / exe) of the current launcher icon.
  * Falls back to the icon bundled with the app.
  */
-export async function launcherIconPaths(): Promise<{ png: string; ico: string }> {
+export async function launcherIconPaths(iconFile?: string | null): Promise<{ png: string; ico: string }> {
   try {
-    const settings = await AppStore.launcherSettings()
-    if (settings.iconFile) {
-      const png = join(BrandStore.dir(), settings.iconFile)
-      await fs.access(png)
-      return { png, ico: join(BrandStore.dir(), settings.iconFile.replace(/\.png$/i, '.ico')) }
+    const file = iconFile === undefined ? (await AppStore.launcherSettings()).iconFile : iconFile
+    if (file) {
+      await openMediaDirectory(BrandStore.dir())
+      const png = join(BrandStore.dir(), file)
+      if ((await fs.lstat(png)).isFile()) return { png, ico: join(BrandStore.dir(), brandIcoName(file)) }
     }
   } catch {
     /* fall back to the bundled default */
@@ -165,9 +168,9 @@ function touchShortcut(path: string): void {
  * any Start Menu / Desktop shortcuts.
  */
 export async function applyLauncherIcon(
-  options: { refreshShell?: boolean } = {}
+  options: { refreshShell?: boolean; iconFile?: string | null; reportFailure?: boolean } = {}
 ): Promise<void> {
-  const { png, ico } = await launcherIconPaths()
+  const { png, ico } = await launcherIconPaths(options.iconFile)
 
   const image = nativeImage.createFromPath(png)
   if (!image.isEmpty()) {
@@ -176,25 +179,30 @@ export async function applyLauncherIcon(
   }
 
   const updated: string[] = []
+  const failed: string[] = []
   for (const path of shortcutCandidates()) {
     try {
       if (!existsSync(path)) continue
       const details = shell.readShortcutLink(path)
       // Re-create rather than update: `create` also succeeds when the file is in
       // a state `update` refuses, and it always rewrites the icon.
-      shell.writeShortcutLink(path, 'create', { ...details, icon: ico, iconIndex: 0 })
+      if (!shell.writeShortcutLink(path, 'create', { ...details, icon: ico, iconIndex: 0 })) {
+        throw new Error('无法写入快捷方式')
+      }
       touchShortcut(path)
       updated.push(path)
       const applied = shell.readShortcutLink(path)
       log(`icon: shortcut ${path} -> ${applied.icon}#${applied.iconIndex}`)
     } catch (error) {
+      failed.push(path)
       log(`icon: shortcut ${path} failed (${(error as Error).message})`)
     }
   }
 
-  notifyShell(updated, {
+  if (!trialBuild) notifyShell(updated, {
     iconCache: true,
     // Only a user-initiated change may restart the Start Menu host.
     restartStartMenu: options.refreshShell === true
   })
+  if (options.reportFailure && failed.length) throw new Error(`更新 ${failed.length} 个快捷方式的图标失败`)
 }

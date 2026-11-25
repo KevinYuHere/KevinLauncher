@@ -34,7 +34,7 @@ interface DownloadButtonProps {
   /** Bounds the popup stays within (e.g. the home stage). */
   boundsRef?: RefObject<HTMLElement>
   /** Long-press handler (opens the special launch-method picker). */
-  onLongPress?: (rect: DOMRect) => void
+  onLongPress?: (rect: DOMRect, pointerId?: number) => void
   /** Click on the cap circle (update / pre-download control); falls back to onButtonClick. */
   onCircleClick?: () => void
   /** Highlighted as the selected choice of the launch drawer (theme colour). */
@@ -68,19 +68,16 @@ export default function DownloadButton({
   const active = progress != null
   const hasCircle = active || !!idleIcon
   const suppressUntil = useRef(0)
-  const longPress = useLongPress((rect) => {
+  const pressedPointer = useRef<number | null>(null)
+  const longPress = useLongPress((rect, pointerId) => {
     // A long press opens the picker: swallow the release and the click after it.
     suppressUntil.current = performance.now() + 1000
-    onLongPress?.(rect)
+    onLongPress?.(rect, pointerId)
   })
   // Launch on pointerup as well as click: Windows can swallow the first click
   // after the launcher window gains focus, which used to make the first press
   // do nothing. Deduped, so a normal click never launches twice.
-  const lastLaunchAt = useRef(0)
   const fireLaunch = (): void => {
-    const now = performance.now()
-    if (now - lastLaunchAt.current < 700) return
-    lastLaunchAt.current = now
     pulseShield()
     onButtonClick()
   }
@@ -102,16 +99,33 @@ export default function DownloadButton({
       {launchTheme === 'starsnow' && <LaunchShield burst={shieldBurst} />}
       <button
         className={`start-btn${tone !== 'plain' ? ` ${tone}` : ''}${hasCircle ? ' has-circle' : ''}${selected ? ' selected' : ''}`}
-        onPointerDown={onLongPress ? longPress.onPointerDown : undefined}
+        aria-keyshortcuts={onLongPress ? 'Alt+ArrowDown' : undefined}
+        onKeyDown={(event) => {
+          if (event.altKey && event.key === 'ArrowDown' && onLongPress) {
+            event.preventDefault()
+            onLongPress(event.currentTarget.getBoundingClientRect())
+          }
+        }}
+        onPointerDown={(event) => {
+          if (event.button !== 0 || pressedPointer.current !== null) return
+          pressedPointer.current = event.pointerId
+          if (onLongPress) longPress.onPointerDown(event)
+        }}
+        onPointerLeave={() => { pressedPointer.current = null }}
+        onPointerCancel={(event) => {
+          if (pressedPointer.current === event.pointerId) pressedPointer.current = null
+        }}
         onPointerUp={(event) => {
           // Fallback launch: if the browser dropped the click (first press after
           // the window gained focus), the pointerup still arrives.
-          if (event.button !== 0) return
+          if (event.button !== 0 || pressedPointer.current !== event.pointerId) return
+          pressedPointer.current = null
           if (performance.now() < suppressUntil.current) return
           if (longPress.consumeClick()) return
           fireLaunch()
         }}
-        onClick={() => {
+        onClick={(event) => {
+          if (event.detail !== 0) return
           if (performance.now() < suppressUntil.current) return
           if (longPress.consumeClick()) return
           fireLaunch()
@@ -145,7 +159,10 @@ export default function DownloadButton({
               pulseShield()
               ;(onCircleClick ?? onButtonClick)()
             }}
-            title={active ? '点击暂停 / 继续' : '下载'}
+            aria-label={active ? (paused ? '继续下载' : '暂停下载') : '下载'}
+            title={active ? (paused ? '继续下载' : '暂停下载') : '下载'}
+            onFocus={() => setHover(true)}
+            onBlur={() => setHover(false)}
           >
             {active ? (
               <>

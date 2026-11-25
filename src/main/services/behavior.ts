@@ -5,6 +5,7 @@ let closeToTray = false
 let quitting = false
 let tray: Tray | null = null
 let trayImage: NativeImage | null = null
+let getMainWindow: (() => BrowserWindow) | undefined
 
 /** Update the tray icon image (applied now if the tray exists). */
 export function setTrayImage(image: NativeImage): void {
@@ -23,14 +24,22 @@ export function setCloseToTray(value: boolean): void {
 export function markQuitting(): void {
   quitting = true
 }
+export function cancelQuitting(): void {
+  quitting = false
+}
 export function isQuitting(): boolean {
   return quitting
 }
 
-/** Bring the main window to the foreground (creating it is the caller's job). */
+export function setMainWindowProvider(provider: () => BrowserWindow): void {
+  getMainWindow = provider
+}
+
+/** Bring the launcher window to the foreground, recreating it if needed. */
 export function showMainWindow(): void {
-  const win = BrowserWindow.getAllWindows()[0]
-  if (!win) return
+  if (quitting) return
+  const win = getMainWindow?.()
+  if (!win || win.isDestroyed()) return
   if (win.isMinimized()) win.restore()
   win.show()
   win.focus()

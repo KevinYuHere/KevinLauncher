@@ -1,139 +1,180 @@
 import { app } from 'electron'
 import { promises as fs } from 'fs'
 import { dirname, join } from 'path'
-import type {
-  AppEntry,
-  LinkedLaunch,
-  SpecialAreaId,
-  SpecialThemeId,
-  ThemePolicy
-} from '@shared/types'
+import type { AppEntry, AppSettingsPatch, LauncherSettings, LinkedLaunch, ThemePolicy } from '@shared/types'
+import { APP_SETTINGS_FIELDS, LAUNCHER_BEHAVIOR_FIELDS } from '@shared/types'
+import { currentWallpaper } from '@shared/appEntry'
+import { DataError } from '@shared/dataErrors'
+import { applyAppThemePolicy, applyThemePolicy, isSpecialAreaId, isSpecialThemeId } from '@shared/specialTheme'
 import { parseJsonLenient, writeFileAtomic } from './atomicFile'
-import {
-  applyAppThemePolicy,
-  isSpecialAreaId,
-  isSpecialThemeId
-} from '@shared/specialTheme'
 import { BACKUP_DIR_NAME, PREVIOUS_BACKUP_DIR_NAME } from './dataDir'
+import { ConfigValidationError, normalizeLauncherConfig, validateLauncherConfig, type LauncherConfig } from './configValidation'
+import { collectOrphanMedia, collectReplacedMedia } from './mediaFiles'
 import { openJsonStore } from './jsonStore'
 import { configureRateLimit } from './rateLimit'
 import { log } from './logger'
-import { CURRENT_VERSION, migrateConfig } from './appMigrations'
+import { CURRENT_VERSION } from './appMigrations'
 
-export interface LauncherConfig {
-  version: number
-  apps: AppEntry[]
-  /** Launcher-wide linked launches (one file starts several apps). */
-  linkedLaunches?: LinkedLaunch[]
-  /** Persisted UI preferences. */
-  ui?: {
-    gamesRowHidden?: boolean
-  }
-  /** Launcher-wide (global) appearance + behavior settings. */
-  launcher?: {
-    iconFile?: string | null
-    fontFamily?: string | null
-    closeAction?: 'close' | 'tray'
-    afterLaunch?: 'none' | 'minimize' | 'tray' | 'close'
-    autoStart?: 'off' | 'window' | 'tray'
-    sidebarMaterial?: boolean
-    updateChannel?: 'stable' | 'beta'
-    downloadLimitMbps?: number
-    themeAreas?: Partial<Record<SpecialAreaId, SpecialThemeId>>
-    themeLocks?: Partial<Record<SpecialAreaId, SpecialThemeId>>
-    themePolicyVersion?: string | null
+export type { LauncherConfig } from './configValidation'
+
+const DEFAULT_CONFIG: LauncherConfig = { version: CURRENT_VERSION, apps: [], linkedLaunches: [] }
+let queue = Promise.resolve()
+let state: { file: string; config: LauncherConfig } | undefined
+
+function enqueue<T>(action: (file: string) => Promise<T>): Promise<T> {
+  const file = AppStore.file()
+  const task = queue.then(() => {
+    if (AppStore.file() !== file) throw new DataError('DATA_MOVED', '数据目录已切换')
+    return action(file)
+  })
+  queue = task.then(() => undefined, () => undefined)
+  return task
+}
+
+async function writeConfig(file: string, config: LauncherConfig): Promise<void> {
+  validateLauncherConfig(config)
+  if (AppStore.file() !== file) throw new DataError('DATA_MOVED', '数据目录已切换')
+  try {
+    await writeFileAtomic(file, JSON.stringify(config, null, 2))
+  } catch (error) {
+    throw new DataError('SAVE_FAILED', '保存启动器配置失败', error)
   }
 }
 
-const DEFAULT_CONFIG: LauncherConfig = { version: CURRENT_VERSION, apps: [], linkedLaunches: [] }
+async function restoreConfig(file: string): Promise<LauncherConfig | undefined> {
+  const sources = [
+    `${file}.corrupt`,
+    join(dirname(file), BACKUP_DIR_NAME, 'config.json'),
+    join(dirname(file), PREVIOUS_BACKUP_DIR_NAME, 'config.json')
+  ]
+  for (const source of sources) {
+    let config: LauncherConfig
+    try {
+      config = normalizeLauncherConfig(parseJsonLenient(await fs.readFile(source, 'utf8')))
+    } catch {
+      continue
+    }
+    if (!config.apps.length) continue
+    log(`appStore: restoring ${config.apps.length} app(s) from ${source}`)
+    return config
+  }
+  return undefined
+}
 
-let cache: LauncherConfig | null = null
-/** Set when the config file could not be read — writes are refused for the session. */
-let saveBlocked = false
-/** In-flight load, so concurrent callers share one read (and one quarantine). */
-let loading: Promise<LauncherConfig> | null = null
+async function readConfig(file: string): Promise<LauncherConfig> {
+  if (state?.file === file) return state.config
+  const result = await openJsonStore<unknown>(file, () => structuredClone(DEFAULT_CONFIG), 'appStore')
+  if (!result.writable) throw new DataError('READ_FAILED', '启动器配置读取失败，已暂停写入', result.error)
+  let config: LauncherConfig
+  if (result.status === 'ok') {
+    config = normalizeLauncherConfig(result.data)
+  } else {
+    const restored = await restoreConfig(file)
+    if (restored) {
+      config = restored
+    } else {
+      const hasQuarantine = await fs.lstat(`${file}.corrupt`).then(() => true, (error: NodeJS.ErrnoException) => {
+        if (error.code !== 'ENOENT') throw error
+        return false
+      })
+      if (hasQuarantine) throw new ConfigValidationError('INVALID_CONFIG', '启动器配置损坏，已保留原文件')
+      config = normalizeLauncherConfig(result.data)
+    }
+  }
+  if (result.status !== 'ok' || (result.data as LauncherConfig).version !== CURRENT_VERSION ||
+      (result.data as LauncherConfig).launcher?.updateChannel === 'beta') {
+    await writeConfig(file, config)
+  }
+  state = { file, config }
+  configureRateLimit(config.launcher?.downloadLimitMbps ?? 0)
+  if (result.status === 'ok') await collectOrphanMedia(dirname(file), config)
+  return config
+}
 
-/** Persisted `config.json` store (apps + UI + global launcher settings). */
+export function requireApp(config: LauncherConfig, appId: string): AppEntry {
+  const entry = config.apps.find(({ id }) => id === appId)
+  if (!entry) throw new DataError('NOT_FOUND', '应用不存在')
+  return entry
+}
+
+export function reorderById<T extends { id: string }>(entries: T[], ids: string[]): T[] {
+  if (!Array.isArray(ids) || ids.some((id) => typeof id !== 'string')) throw new Error('排序格式无效')
+  const remaining = new Map(entries.map((entry) => [entry.id, entry]))
+  const ordered: T[] = []
+  for (const id of ids) {
+    const entry = remaining.get(id)
+    if (!entry) continue
+    ordered.push(entry)
+    remaining.delete(id)
+  }
+  return [...ordered, ...remaining.values()]
+}
+
+/** Authoritative persisted application settings. Readers always receive snapshots. */
 export class AppStore {
   static file(): string {
     return join(app.getPath('userData'), 'config.json')
   }
 
-  static async load(): Promise<LauncherConfig> {
-    if (loading) return loading
-    if (cache) return cache
-    loading ??= AppStore.readConfig().finally(() => {
-      loading = null
+  static load(): Promise<LauncherConfig> {
+    return enqueue(async (file) => structuredClone(await readConfig(file)))
+  }
+
+  static reload(): Promise<void> {
+    return enqueue(async (file) => {
+      state = undefined
+      await readConfig(file)
     })
-    return loading
   }
 
-  private static async readConfig(): Promise<LauncherConfig> {
-    const { data, writable } = await openJsonStore<LauncherConfig>(
-      this.file(),
-      () => structuredClone(DEFAULT_CONFIG),
-      'appStore'
-    )
-    data.apps = Array.isArray(data.apps) ? data.apps : []
-    data.linkedLaunches = Array.isArray(data.linkedLaunches) ? data.linkedLaunches : []
-    data.version = data.version ?? 1
-    configureRateLimit(data.launcher?.downloadLimitMbps ?? 0)
-    cache = data
-    saveBlocked = !writable
-    // A quarantined config holds the apps the 1.2.2 write race moved aside while
-    // an empty file took their place: restore them before anything else runs.
-    if (writable) await this.restoreQuarantined(data)
-    await this.migrate(cache)
-    return cache
+  /** A previous launcher ICO may still be referenced until the shell accepts the current icon. */
+  static synchronizeLauncherIcon(apply: (iconFile: string | null) => Promise<void>): Promise<void> {
+    return enqueue(async (file) => {
+      const current = await readConfig(file)
+      await apply(current.launcher?.iconFile ?? null)
+      await collectOrphanMedia(dirname(file), current, ['brand'])
+    })
   }
 
-  /**
-   * Restore apps when the live config lost them, trying the quarantined file and
-   * then the pre-update backup. Only a *salvageable* source (valid root JSON,
-   * e.g. the 1.2.2 trailing junk) with a non-empty app list is used, so an
-   * unrelated or truncated file can never resurrect stale data.
-   */
-  private static async restoreQuarantined(config: LauncherConfig): Promise<void> {
-    if (config.apps.length > 0) return
-    const sources = [
-      `${this.file()}.corrupt`,
-      join(dirname(this.file()), BACKUP_DIR_NAME, 'config.json'),
-      join(dirname(this.file()), PREVIOUS_BACKUP_DIR_NAME, 'config.json')
-    ]
-    for (const source of sources) {
-      let salvaged: LauncherConfig | undefined
+  static mutate<T>(
+    change: (draft: LauncherConfig) => T | Promise<T>,
+    afterCommit?: () => void | Promise<void>
+  ): Promise<T> {
+    return enqueue(async (file) => {
+      const previous = await readConfig(file)
+      const draft = structuredClone(previous)
+      let result: T
       try {
-        salvaged = parseJsonLenient<LauncherConfig>(await fs.readFile(source, 'utf-8'))
-      } catch {
-        continue
+        result = await change(draft)
+        if (JSON.stringify(previous) === JSON.stringify(draft)) return structuredClone(result)
+        await writeConfig(file, draft)
+      } catch (error) {
+        await collectReplacedMedia(dirname(file), draft, previous)
+        throw error
       }
-      if (!salvaged || !Array.isArray(salvaged.apps) || salvaged.apps.length === 0) continue
-      log(`appStore: restoring ${salvaged.apps.length} app(s) from ${source}`)
-      config.apps = salvaged.apps
-      if (Array.isArray(salvaged.linkedLaunches)) config.linkedLaunches = salvaged.linkedLaunches
-      if (salvaged.ui) config.ui = salvaged.ui
-      if (salvaged.launcher) config.launcher = salvaged.launcher
-      if (typeof salvaged.version === 'number') config.version = salvaged.version
-      await writeFileAtomic(this.file(), JSON.stringify(config, null, 2))
-      return
+      state = { file, config: draft }
+      configureRateLimit(draft.launcher?.downloadLimitMbps ?? 0)
+      await afterCommit?.()
+      await collectReplacedMedia(dirname(file), previous, draft)
+      return structuredClone(result)
+    })
+  }
+
+  static mutateApp(appId: string, change: (entry: AppEntry) => void | Promise<void>): Promise<AppEntry> {
+    return this.mutate(async (draft) => {
+      const entry = requireApp(draft, appId)
+      await change(entry)
+      entry.updatedAt = new Date().toISOString()
+      return entry
+    })
+  }
+
+  static patchApp(appId: string, patch: AppSettingsPatch): Promise<AppEntry> {
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch) ||
+        Object.keys(patch).some((key) => !(APP_SETTINGS_FIELDS as readonly string[]).includes(key))) {
+      throw new Error('应用设置字段无效')
     }
-  }
-
-  /** Runs version migrations and persists them once. */
-  private static async migrate(config: LauncherConfig): Promise<void> {
-    if (migrateConfig(config)) await this.save()
-  }
-
-  static async save(): Promise<void> {
-    if (!cache || saveBlocked) return
-    await writeFileAtomic(this.file(), JSON.stringify(cache, null, 2))
-  }
-
-  /** Drop the in-memory copy and read from disk again. */
-  static async reload(): Promise<void> {
-    await loading
-    cache = null
-    await this.load()
+    return this.mutateApp(appId, (entry) => { Object.assign(entry, patch) })
   }
 
   static async uiPrefs(): Promise<{ gamesRowHidden: boolean }> {
@@ -141,157 +182,79 @@ export class AppStore {
     return { gamesRowHidden: !!config.ui?.gamesRowHidden }
   }
 
-  static async launcherSettings(): Promise<{
-    iconFile: string | null
-    fontFamily: string | null
-    closeAction: 'close' | 'tray'
-    afterLaunch: 'none' | 'minimize' | 'tray' | 'close'
-    autoStart: 'off' | 'window' | 'tray'
-    sidebarMaterial: boolean
-    updateChannel: 'stable' | 'beta'
-    downloadLimitMbps: number
-    themeAreas: Partial<Record<SpecialAreaId, SpecialThemeId>>
-    themeLocks: Partial<Record<SpecialAreaId, SpecialThemeId>>
-    themePolicyVersion: string | null
-  }> {
-    const config = await this.load()
-    return {
-      iconFile: config.launcher?.iconFile ?? null,
-      fontFamily: config.launcher?.fontFamily ?? null,
-      closeAction: config.launcher?.closeAction ?? 'close',
-      afterLaunch: config.launcher?.afterLaunch ?? 'none',
-      autoStart: config.launcher?.autoStart ?? 'off',
-      sidebarMaterial: config.launcher?.sidebarMaterial ?? true,
-      // Validate on read: a hand-edited config must not reach the channel logic.
-      updateChannel: config.launcher?.updateChannel === 'beta' ? 'beta' : 'stable',
-      downloadLimitMbps: config.launcher?.downloadLimitMbps ?? 0,
-      themeAreas: config.launcher?.themeAreas ?? {},
-      themeLocks: config.launcher?.themeLocks ?? {},
-      themePolicyVersion: config.launcher?.themePolicyVersion ?? null
-    }
+  static async launcherSettings(): Promise<LauncherSettings> {
+    return launcherSettings((await this.load()).launcher)
   }
 
-  static async setLauncher(patch: {
-    iconFile?: string | null
-    fontFamily?: string | null
-    closeAction?: 'close' | 'tray'
-    afterLaunch?: 'none' | 'minimize' | 'tray' | 'close'
-    autoStart?: 'off' | 'window' | 'tray'
-    sidebarMaterial?: boolean
-    updateChannel?: 'stable' | 'beta'
-    downloadLimitMbps?: number
-    themeAreas?: Partial<Record<SpecialAreaId, SpecialThemeId>>
-  }): Promise<void> {
-    const config = await this.load()
-    const next = { ...config.launcher, ...patch }
-    if (next.updateChannel !== 'stable' && next.updateChannel !== 'beta') {
-      next.updateChannel = 'stable'
+  static setLauncher(patch: Partial<Omit<LauncherSettings, 'themeLocks' | 'themePolicyVersion'>>): Promise<void> {
+    const allowed: readonly string[] = [...LAUNCHER_BEHAVIOR_FIELDS, 'iconFile', 'fontFamily']
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch) ||
+        Object.keys(patch).some((key) => !allowed.includes(key))) {
+      throw new ConfigValidationError('INVALID_CONFIG', '启动器设置字段无效')
     }
-    if (patch.themeAreas) {
-      // A release policy only sets values once; it never locks them. Editing the
-      // theme also clears any stale locks left by older builds/policies.
-      // Drop unknown area ids (e.g. the removed scrollbar/tooltip areas).
-      const clean: Partial<Record<SpecialAreaId, SpecialThemeId>> = {}
-      for (const [area, themeId] of Object.entries(patch.themeAreas)) {
-        if (isSpecialAreaId(area) && isSpecialThemeId(themeId)) clean[area] = themeId
+    return this.mutate((config) => {
+      const next = { ...config.launcher, ...patch, updateChannel: 'stable' as const }
+      if (patch.themeAreas) {
+        next.themeAreas = Object.fromEntries(
+          Object.entries(patch.themeAreas).filter(([area, theme]) => isSpecialAreaId(area) && isSpecialThemeId(theme))
+        )
+        next.themeLocks = {}
       }
-      next.themeAreas = clean
-      next.themeLocks = {}
-    }
-    config.launcher = next
-    await this.save()
-    if (patch.downloadLimitMbps !== undefined) configureRateLimit(patch.downloadLimitMbps)
-  }
-
-  /**
-   * Persist the result of applying a release theme policy (assignments, locks and
-   * the applied policy version). Kept separate from `setLauncher` so policy state
-   * is never writable through the renderer IPC.
-   */
-  static async setThemePolicyState(state: {
-    themeAreas: Partial<Record<SpecialAreaId, SpecialThemeId>>
-    themeLocks: Partial<Record<SpecialAreaId, SpecialThemeId>>
-    themePolicyVersion: string
-  }): Promise<void> {
-    const config = await this.load()
-    config.launcher = {
-      ...config.launcher,
-      themeAreas: state.themeAreas,
-      themeLocks: state.themeLocks,
-      themePolicyVersion: state.themePolicyVersion
-    }
-    await this.save()
-  }
-
-  /**
-   * Apply the per-app part of a release policy (glass material / launch effect)
-   * to every app. Runs once, right after the theme assignments; later starts are
-   * skipped by the policy version gate, so the user keeps whatever they pick
-   * afterwards.
-   */
-  static async applyReleasePolicyToApps(policy: ThemePolicy): Promise<boolean> {
-    if (!policy.material && !policy.launchEffect) return false
-    const config = await this.load()
-    let changed = false
-    config.apps = config.apps.map((entry) => {
-      const result = applyAppThemePolicy(entry, policy)
-      if (result.changed) changed = true
-      return result.app
+      config.launcher = next
     })
-    if (changed) await this.save()
-    return changed
   }
 
-  static async setGamesRowHidden(hidden: boolean): Promise<void> {    const config = await this.load()
-    config.ui = { ...config.ui, gamesRowHidden: hidden }
-    await this.save()
-  }
-
-  /** Reorders apps to match the given id order (unknown ids keep their tail position). */
-  static async reorder(ids: string[]): Promise<AppEntry[]> {
-    const config = await this.load()
-    const byId = new Map(config.apps.map((entry) => [entry.id, entry]))
-    const ordered: AppEntry[] = []
-    for (const id of ids) {
-      const entry = byId.get(id)
-      if (entry) {
-        ordered.push(entry)
-        byId.delete(id)
+  /** Commit per-app effects, assignments and the one-time marker together. */
+  static applyReleasePolicy(policy: ThemePolicy): Promise<boolean> {
+    return this.mutate((config) => {
+      if (config.launcher?.themePolicyVersion === policy.version) return false
+      const settings = launcherSettings(config.launcher)
+      const { assignments } = applyThemePolicy(settings.themeAreas, settings.themeLocks, policy)
+      config.apps = config.apps.map((entry) => applyAppThemePolicy(entry, policy).app)
+      config.launcher = {
+        ...config.launcher, themeAreas: assignments, themeLocks: {}, themePolicyVersion: policy.version
       }
-    }
-    for (const entry of byId.values()) ordered.push(entry)
-    config.apps = ordered
-    await this.save()
-    return config.apps
+      return true
+    })
   }
 
-  /** Launcher-wide linked launches (global order preserved). */
+  static setGamesRowHidden(hidden: boolean): Promise<void> {
+    return this.mutate((config) => { config.ui = { ...config.ui, gamesRowHidden: hidden } })
+  }
+
+  static reorder(ids: string[]): Promise<AppEntry[]> {
+    return this.mutate((config) => config.apps = reorderById(config.apps, ids))
+  }
+
+  static reorderWallpapers(appId: string, ids: string[]): Promise<AppEntry> {
+    return this.mutateApp(appId, (entry) => {
+      const currentId = currentWallpaper(entry)?.id
+      entry.wallpapers = reorderById(entry.wallpapers, ids)
+      entry.wallpaperIndex = Math.max(0, entry.wallpapers.findIndex((wallpaper) => wallpaper.id === currentId))
+    })
+  }
+
   static async linkedLaunches(): Promise<LinkedLaunch[]> {
-    const config = await this.load()
-    return config.linkedLaunches ?? []
+    return (await this.load()).linkedLaunches ?? []
   }
 
-  static async setLinkedLaunches(list: LinkedLaunch[]): Promise<void> {
-    const config = await this.load()
-    config.linkedLaunches = list
-    await this.save()
+  static reorderLinkedLaunches(ids: string[]): Promise<LinkedLaunch[]> {
+    return this.mutate((config) => config.linkedLaunches = reorderById(config.linkedLaunches ?? [], ids))
   }
+}
 
-  /** Reorders linked launches to match the given id order. */
-  static async reorderLinkedLaunches(ids: string[]): Promise<LinkedLaunch[]> {
-    const config = await this.load()
-    const byId = new Map((config.linkedLaunches ?? []).map((entry) => [entry.id, entry]))
-    const ordered: LinkedLaunch[] = []
-    for (const id of ids) {
-      const entry = byId.get(id)
-      if (entry) {
-        ordered.push(entry)
-        byId.delete(id)
-      }
-    }
-    for (const entry of byId.values()) ordered.push(entry)
-    config.linkedLaunches = ordered
-    await this.save()
-    return ordered
+function launcherSettings(settings: LauncherConfig['launcher']): LauncherSettings {
+  return {
+    iconFile: settings?.iconFile ?? null,
+    fontFamily: settings?.fontFamily ?? null,
+    closeAction: settings?.closeAction ?? 'close',
+    afterLaunch: settings?.afterLaunch ?? 'none',
+    autoStart: settings?.autoStart ?? 'off',
+    sidebarMaterial: settings?.sidebarMaterial ?? true,
+    updateChannel: 'stable',
+    downloadLimitMbps: settings?.downloadLimitMbps ?? 0,
+    themeAreas: settings?.themeAreas ?? {},
+    themeLocks: settings?.themeLocks ?? {},
+    themePolicyVersion: settings?.themePolicyVersion ?? null
   }
 }

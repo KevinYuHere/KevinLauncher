@@ -1,0 +1,77 @@
+name: Windows Beta acceptance
+
+on:
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  installer:
+    name: Production Beta installer (${{ matrix.scenario }})
+    if: |
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       startsWith(github.event.pull_request.head.ref, 'verify/')) ||
+      (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/verify/'))
+    runs-on: windows-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [fresh, legacy-tray]
+    env:
+      npm_config_registry: https://registry.npmjs.org/
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - name: Restore the locked tools and Electron runtime
+        run: |
+          npm ci --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node node_modules/electron/install.js
+          exit $LASTEXITCODE
+      - name: Build the normal installer with a local Beta version
+        run: |
+          $canonicalTemp = node -p "require('node:fs').realpathSync.native(require('node:os').tmpdir())"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:TEMP = $env:TMP = $canonicalTemp
+          $betaVersion = node -p "const v=require('./package.json').version.split('.'); v[2]=String(BigInt(v[2])+1n); v.join('.')+'-beta.2'"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run package:test -- --version $betaVersion --keep-unpacked
+          exit $LASTEXITCODE
+      - name: Verify packaged parity and exercise the installer on disposable Windows
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+          KEVIN_BETA_SCENARIO: ${{ matrix.scenario }}
+        run: |
+          $batch = @(Get-ChildItem -LiteralPath . -Directory -Filter 'release-beta-*')
+          if ($batch.Count -ne 1) { throw 'Expected exactly one Beta build' }
+          node scripts/verify-beta-parity.mjs $batch[0].FullName
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # The v2.0.3 setup provides the legacy host for the verified v2.0.5 application payload.
+          node scripts/verify-windows-release.mjs $batch[0].FullName --beta-from-worktree v2.0.3 $env:KEVIN_BETA_SCENARIO
+          exit $LASTEXITCODE
+      - name: Show recent Windows application errors for setup
+        if: failure()
+        run: |
+          $integrity = ((whoami.exe /groups /fo csv /nh) -join "`n") | Select-String -Pattern 'S-1-16-\d+' -AllMatches
+          $integrity.Matches.Value
+          $criteria = @{ LogName = 'Application'; Id = 1000; StartTime = (Get-Date).AddMinutes(-10) }
+          Get-WinEvent -FilterHashtable $criteria -ErrorAction SilentlyContinue |
+            Where-Object { $_.Properties.Count -ge 7 -and $_.Properties[0].Value -like 'KevinLauncher*.exe' } |
+            Select-Object -First 6 -Property TimeCreated, @{N='Executable';E={$_.Properties[0].Value}},
+              @{N='FileVersion';E={$_.Properties[1].Value}}, @{N='Module';E={$_.Properties[3].Value}},
+              @{N='Exception';E={$_.Properties[6].Value}} | Format-List

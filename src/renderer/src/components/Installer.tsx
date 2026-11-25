@@ -2,6 +2,8 @@ import { useEffect, useState, type ReactElement } from 'react'
 import type { InstallerInfo, InstallerProgress, InstallTarget } from '@shared/types'
 import { directoriesOverlap } from '@shared/paths'
 import { formatBytes } from '../format'
+import { trialBuild } from '@shared/buildIdentity'
+import { isNewerVersion } from '@shared/version'
 
 type Step = 'location' | 'confirm' | 'progress' | 'done'
 
@@ -18,7 +20,7 @@ export default function Installer(): ReactElement | null {
   const [dir, setDir] = useState('')
   const [dataDir, setDataDir] = useState('')
   const [target, setTarget] = useState<InstallTarget | null>(null)
-  const [free, setFree] = useState(0)
+  const [free, setFree] = useState<number | null>(null)
   const [step, setStep] = useState<Step>('location')
   const [progress, setProgress] = useState<InstallerProgress | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -89,12 +91,12 @@ export default function Installer(): ReactElement | null {
       <header className="setup-top">
         <img className="setup-logo" src="kevin-media://default/icon.png" alt="" />
         <div className="setup-brand">
-          <div className="setup-brand-name">KevinLauncher</div>
+          <div className="setup-brand-name">{trialBuild ? 'KevinLauncher 本地试用' : 'KevinLauncher'}</div>
           <div className="setup-brand-sub">
             {info ? `安装程序 · ${info.version}` : '正在读取安装信息…'}
           </div>
         </div>
-        <button className="setup-close" title="取消安装" onClick={() => window.api.windowClose()}>
+        <button className="setup-close" title="取消安装" disabled={step === 'progress'} onClick={() => window.api.windowClose()}>
           ✕
         </button>
       </header>
@@ -118,14 +120,14 @@ export default function Installer(): ReactElement | null {
           <section className="setup-panel">
             <h1 className="setup-title-lg">选择安装位置</h1>
             <p className="setup-sub">
-              将安装到下面的目录，并创建开始菜单与桌面快捷方式。
+              {trialBuild ? '将安装到独立试用目录。' : '将安装到下面的目录，并创建开始菜单与桌面快捷方式。'}
             </p>
 
             <div className="setup-field">
               <label className="setup-field-label">安装位置</label>
               <div className="setup-path">
-                <input value={dir} spellCheck={false} onChange={(e) => setDir(e.target.value)} />
-                <button className="btn" onClick={() => void browse()}>
+                <input value={dir} spellCheck={false} readOnly={trialBuild} onChange={(e) => setDir(e.target.value)} />
+                <button className="btn" disabled={trialBuild} onClick={() => void browse()}>
                   浏览…
                 </button>
               </div>
@@ -137,9 +139,10 @@ export default function Installer(): ReactElement | null {
                 <input
                   value={dataDir}
                   spellCheck={false}
+                  readOnly={trialBuild}
                   onChange={(e) => setDataDir(e.target.value)}
                 />
-                <button className="btn" onClick={() => void browseDataDir()}>
+                <button className="btn" disabled={trialBuild} onClick={() => void browseDataDir()}>
                   浏览…
                 </button>
               </div>
@@ -149,7 +152,7 @@ export default function Installer(): ReactElement | null {
               <div className="setup-note">
                 检测到已安装 <b>{target.version ?? '旧版本'}</b>
                 ，将<b>覆盖安装</b>并<b>保留全部用户数据</b>。
-                {target.version && info && compare(target.version, info.version) > 0 && (
+                {target.version && info && isNewerVersion(target.version, info.version) && (
                   <div className="setup-warn">注意：本机版本更高，这是降级安装。</div>
                 )}
               </div>
@@ -173,7 +176,7 @@ export default function Installer(): ReactElement | null {
 
             <div className="setup-meta">
               <span>需要约 {formatBytes(info?.payloadSize ?? 0)}</span>
-              <span>可用 {formatBytes(free)}</span>
+              <span>{free === null ? '可用空间未知' : `可用 ${formatBytes(free)}`}</span>
             </div>
           </section>
         )}
@@ -187,22 +190,24 @@ export default function Installer(): ReactElement | null {
                 <span>安装到</span>
                 <em>{dir}</em>
               </li>
-              <li>
-                <span>开始菜单快捷方式</span>
-                <em>创建</em>
-              </li>
-              <li>
-                <span>桌面快捷方式</span>
-                <em>创建</em>
-              </li>
-              <li>
-                <span>卸载入口</span>
-                <em>写入</em>
-              </li>
-              <li>
-                <span>开机自启</span>
-                <em>默认开启</em>
-              </li>
+              {!trialBuild && <>
+                <li>
+                  <span>开始菜单快捷方式</span>
+                  <em>创建</em>
+                </li>
+                <li>
+                  <span>桌面快捷方式</span>
+                  <em>创建</em>
+                </li>
+                <li>
+                  <span>卸载入口</span>
+                  <em>写入</em>
+                </li>
+                <li>
+                  <span>开机自启</span>
+                  <em>默认开启</em>
+                </li>
+              </>}
               <li>
                 <span>用户数据</span>
                 <em>{dataDir || info?.dataDir}</em>
@@ -286,7 +291,6 @@ export default function Installer(): ReactElement | null {
     </div>
   )
 }
-
 /** Animated aurora built from the theme colour (brand + two complements). */
 function Aurora(): ReactElement {
   return (
@@ -297,16 +301,4 @@ function Aurora(): ReactElement {
       <div className="setup-grid" />
     </div>
   )
-}
-
-/** Minimal dotted comparator (only used to warn about a downgrade). */
-function compare(a: string, b: string): number {
-  const pa = a.split('.').map((n) => Number.parseInt(n, 10) || 0)
-  const pb = b.split('.').map((n) => Number.parseInt(n, 10) || 0)
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const x = pa[i] ?? 0
-    const y = pb[i] ?? 0
-    if (x !== y) return x < y ? -1 : 1
-  }
-  return 0
 }

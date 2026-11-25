@@ -6,6 +6,8 @@ export interface StoreLoad<T> {
   data: T
   /** False when the file could not be read — the caller must not save. */
   writable: boolean
+  status: 'ok' | 'missing' | 'parse-error' | 'read-error'
+  error?: unknown
 }
 
 /**
@@ -19,18 +21,18 @@ export interface StoreLoad<T> {
  */
 export async function openJsonStore<T>(file: string, empty: () => T, label: string): Promise<StoreLoad<T>> {
   const result = await loadJsonSafe<T>(file)
-  if (result.status === 'ok') return { data: result.value, writable: true }
+  if (result.status === 'ok') return { data: result.value, writable: true, status: result.status }
   if (result.status === 'parse-error') {
     const quarantined = await quarantineFile(file)
     log(
       `${label}: file is corrupt (${String(result.error)}) — kept as .corrupt` +
         (quarantined ? '' : ', saving disabled this session')
     )
-    return { data: empty(), writable: quarantined }
+    return { data: empty(), writable: quarantined, status: result.status, error: result.error }
   }
   if (result.status === 'read-error') {
     log(`${label}: file unreadable (${String(result.error)}) — saving disabled this session`)
-    return { data: empty(), writable: false }
+    return { data: empty(), writable: false, status: result.status, error: result.error }
   }
-  return { data: empty(), writable: true }
+  return { data: empty(), writable: true, status: result.status }
 }

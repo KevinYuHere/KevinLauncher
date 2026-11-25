@@ -1,5 +1,6 @@
 import { useRef, useState, type ReactElement } from 'react'
 import { useOpenOrigin } from './useOpenOrigin'
+import { useDialogFocus } from './useDialogFocus'
 import type { AppUpdateInfo } from '@shared/types'
 
 interface AppUpdateDialogProps {
@@ -32,10 +33,15 @@ export default function AppUpdateDialog({
     setClosing(true)
     window.setTimeout(fn, 180)
   }
+  useDialogFocus(modalRef, true, critical ? undefined : () => run(onDismiss))
   return (
     <div className={`modal-mask${closing ? ' closing' : ''}`}>
       <div
         ref={modalRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${critical ? '重要更新' : '检测到新版本'} ${info.version}`}
+        tabIndex={-1}
         className={`modal update-modal wallpaper-region${critical ? ' is-critical' : ''}${closing ? ' closing' : ''}`}
         onClick={(e) => e.stopPropagation()}
       >

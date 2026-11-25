@@ -16,11 +16,12 @@ export default function Uninstaller(): ReactElement {
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    void window.api.uninstallerInfo().then(setInfo)
+    void window.api.uninstallerInfo().then(setInfo).catch((failure: Error) => setError(failure.message))
     return window.api.onUninstallerProgress((progress) => setStatus(progress.step))
   }, [])
 
   const run = async (): Promise<void> => {
+    setError(null)
     setStep('progress')
     setStatus('正在准备…')
     try {
@@ -49,7 +50,7 @@ export default function Uninstaller(): ReactElement {
             {info ? `卸载程序 · ${info.version}` : '正在读取安装信息…'}
           </div>
         </div>
-        <button className="setup-close" title="取消" onClick={() => window.api.windowClose()}>
+        <button className="setup-close" title="取消" disabled={step === 'progress'} onClick={() => window.api.windowClose()}>
           ✕
         </button>
       </header>
@@ -59,7 +60,7 @@ export default function Uninstaller(): ReactElement {
           <section className="setup-panel">
             <h1 className="setup-title-lg">卸载 KevinLauncher</h1>
             <p className="setup-sub">
-              程序与快捷方式、注册表项、开机自启计划任务都会被移除。
+              将移除程序及其系统设置。安装目录里自行添加的文件会保留。
             </p>
 
             <ul className="setup-list">
@@ -112,7 +113,7 @@ export default function Uninstaller(): ReactElement {
             <button className="btn" onClick={() => window.api.windowClose()}>
               取消
             </button>
-            <button className="btn danger" onClick={() => void run()}>
+            <button className="btn danger" disabled={!info} onClick={() => void run()}>
               卸载
             </button>
           </>

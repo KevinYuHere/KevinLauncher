@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { liquidMapInputs } from '../src/renderer/src/liquidFilter'
 import {
   buildBezelProfile,
   buildDisplacementBytes,
@@ -61,4 +62,15 @@ describe('buildSpecularBytes', () => {
     expect(bytes[rim + 3]).toBeGreaterThan(0)
     expect(bytes[center + 3]).toBe(0)
   })
+})
+it('keeps independent displacement and specular cache identities', () => {
+  const base = { width: 1024, height: 768, radius: 16 }
+  const original = liquidMapInputs(base, 2)
+  const angle = liquidMapInputs({ ...base, highlightAngle: 92 }, 2)
+  expect(angle.displacementKey).toBe(original.displacementKey)
+  expect(angle.specularKey).not.toBe(original.specularKey)
+  const bezel = liquidMapInputs({ ...base, bezelWidth: 32 }, 2)
+  expect(bezel.specularKey).toBe(original.specularKey)
+  expect(bezel.displacementKey).not.toBe(original.displacementKey)
+  expect(base.width * original.dpr).toBe(400)
 })

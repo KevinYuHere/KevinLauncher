@@ -5,12 +5,13 @@ import { tmpdir } from 'os'
 import { createHash } from 'crypto'
 import {
   applyVfsManifest,
-  commitStage,
-  installConfig,
-  processDeleteList,
+  readDeleteList,
   stageStaticFiles,
   type PatchManifest
 } from '../src/main/update/arknightsPatch'
+import {
+  akStageFiles, arknightsRecoveryPending, createArknightsCommit, finishArknightsCommit
+} from '../src/main/update/arknightsCommit'
 
 const md5 = (data: string): string => createHash('md5').update(data).digest('hex')
 
@@ -18,7 +19,7 @@ async function makeDirs(): Promise<{ root: string; gameDir: string; extractDir: 
   const root = await fs.mkdtemp(join(tmpdir(), 'kl-akpatch-'))
   const gameDir = join(root, 'game')
   const extractDir = join(root, 'extract')
-  const stageDir = join(root, 'stage')
+  const stageDir = await akStageFiles(gameDir)
   const vfs = 'Arknights_Data/StreamingAssets/AB/Windows'
   await fs.mkdir(join(gameDir, ...vfs.split('/')), { recursive: true })
   await fs.mkdir(extractDir, { recursive: true })
@@ -81,9 +82,8 @@ describe('arknights delta patch', () => {
     // Still untouched on disk until the commit.
     expect(await fs.readFile(join(gameDir, ...vfs.split('/'), 'a.ab'), 'utf8')).toBe('BASE')
 
-    await commitStage(stageDir, gameDir)
-    await processDeleteList(extractDir, gameDir, stageDir)
-    await installConfig(extractDir, gameDir)
+    await createArknightsCommit(gameDir, '78.0.0', await readDeleteList(extractDir))
+    await finishArknightsCommit(gameDir)
 
     expect(await fs.readFile(join(gameDir, ...vfs.split('/'), 'a.ab'), 'utf8')).toBe('PATCHED')
     expect(await fs.readFile(join(gameDir, ...vfs.split('/'), 'new.ab'), 'utf8')).toBe('NEW')
@@ -119,5 +119,46 @@ describe('arknights delta patch', () => {
     // Nothing was written to the game directory.
     expect(await fs.readdir(join(gameDir, 'Arknights_Data', 'StreamingAssets', 'AB', 'Windows'))).toEqual([])
     await fs.rm(root, { recursive: true, force: true })
+  })
+
+  it('resumes an interrupted commit using staged outputs and updates the version marker last', async () => {
+    const { root, gameDir, stageDir } = await makeDirs()
+    try {
+      await fs.writeFile(join(gameDir, 'config.ini'), 'old version')
+      await fs.writeFile(join(gameDir, 'first.bin'), 'old content')
+      await fs.mkdir(join(gameDir, 'second.bin'))
+      await fs.writeFile(join(stageDir, 'first.bin'), 'updated content')
+      await fs.writeFile(join(stageDir, 'second.bin'), 'staged content')
+      await fs.writeFile(join(stageDir, 'config.ini'), 'new version')
+      await createArknightsCommit(gameDir, '78.0.0', [])
+      await expect(finishArknightsCommit(gameDir)).rejects.toThrow()
+      expect(await arknightsRecoveryPending(gameDir)).toBe(true)
+      expect(await fs.readFile(join(gameDir, 'first.bin'), 'utf8')).toBe('updated content')
+      expect(await fs.readFile(join(gameDir, 'config.ini'), 'utf8')).toBe('old version')
+      await fs.rmdir(join(gameDir, 'second.bin'))
+      await finishArknightsCommit(gameDir)
+      expect(await fs.readFile(join(gameDir, 'second.bin'), 'utf8')).toBe('staged content')
+      expect(await fs.readFile(join(gameDir, 'config.ini'), 'utf8')).toBe('new version')
+      expect(await arknightsRecoveryPending(gameDir)).toBe(false)
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('validates a replacement again when interrupted between rename and checkpoint', async () => {
+    const { root, gameDir, stageDir } = await makeDirs()
+    try {
+      await fs.writeFile(join(stageDir, 'file.bin'), 'prepared')
+      await fs.writeFile(join(stageDir, 'config.ini'), 'new marker')
+      await createArknightsCommit(gameDir, '1.2.3', [])
+      await fs.rename(join(stageDir, 'file.bin'), join(gameDir, 'file.bin'))
+      const pause = new AbortController()
+      await expect(finishArknightsCommit(gameDir, pause.signal, () => pause.abort())).rejects.toThrow()
+      expect(await arknightsRecoveryPending(gameDir)).toBe(true)
+      await finishArknightsCommit(gameDir)
+      expect(await fs.readFile(join(gameDir, 'config.ini'), 'utf8')).toBe('new marker')
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
   })
 })

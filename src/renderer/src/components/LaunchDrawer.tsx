@@ -9,6 +9,7 @@ export interface DrawerOption {
 interface LaunchDrawerProps {
   /** The button this drawer belongs to (viewport coords). */
   anchor: DOMRect
+  pointerId?: number
   /** Home stage (the drawer is positioned inside it, so it stays below the button). */
   bounds: DOMRect
   /** Corner radius matching the button (half its height). */
@@ -35,6 +36,7 @@ interface LaunchDrawerProps {
  */
 export default function LaunchDrawer({
   anchor,
+  pointerId,
   bounds,
   radius,
   options,
@@ -43,7 +45,7 @@ export default function LaunchDrawer({
   onClose,
   closing
 }: LaunchDrawerProps): ReactElement {
-  const panelRef = useRef<HTMLDivElement>(null)
+  const panelRef = useRef<HTMLDivElement | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const optionRefs = useRef<(HTMLButtonElement | null)[]>([])
   const [pos, setPos] = useState<{
@@ -88,6 +90,7 @@ export default function LaunchDrawer({
 
   // Follow the long-press pointer; auto-scroll the list near its edges.
   useEffect(() => {
+    if (pointerId === undefined) return
     const pointer = { x: anchor.left + anchor.width / 2, y: anchor.top + anchor.height / 2 }
     let done = false
     // Auto-scroll only near the list's edges; the edge nearest the button
@@ -175,11 +178,13 @@ export default function LaunchDrawer({
       raf = requestAnimationFrame(tick)
     }
     const onMove = (event: PointerEvent): void => {
+      if (event.pointerId !== pointerId) return
       pointer.x = event.clientX
       pointer.y = event.clientY
       setHighlight(hit())
     }
     const onUp = (event: PointerEvent): void => {
+      if (event.pointerId !== pointerId || event.button !== 0) return
       done = true
       cancelAnimationFrame(raf)
       remove()
@@ -189,14 +194,21 @@ export default function LaunchDrawer({
       if (id) onPick(id)
       else onClose()
     }
+    const cancel = (event: PointerEvent): void => {
+      if (event.pointerId !== pointerId) return
+      done = true
+      cancelAnimationFrame(raf)
+      remove()
+      onClose()
+    }
     function remove(): void {
       window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', onUp)
-      window.removeEventListener('pointercancel', onUp)
+      window.removeEventListener('pointercancel', cancel)
     }
     window.addEventListener('pointermove', onMove)
     window.addEventListener('pointerup', onUp)
-    window.addEventListener('pointercancel', onUp)
+    window.addEventListener('pointercancel', cancel)
     raf = requestAnimationFrame(tick)
     return () => {
       done = true
@@ -205,6 +217,14 @@ export default function LaunchDrawer({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  const positioned = pos !== null
+  useLayoutEffect(() => {
+    if (!positioned || pointerId !== undefined) return
+    const previous = document.activeElement
+    optionRefs.current[0]?.focus()
+    return () => { if (previous instanceof HTMLElement && previous.isConnected) previous.focus() }
+  }, [positioned, pointerId])
 
   // Outside click retracts (the button is not "outside").
   useEffect(() => {
@@ -226,8 +246,25 @@ export default function LaunchDrawer({
 
   return (
     <div
-      ref={panelRef}
+      ref={(el) => {
+        panelRef.current = el
+        if (el) el.inert = Boolean(closing)
+      }}
       className={`launch-drawer wallpaper-region${closing ? ' closing' : ''}`}
+      role="group"
+      aria-label="选择启动方式"
+      onKeyDown={(event) => {
+        if (event.key === 'Escape') {
+          event.preventDefault()
+          onClose()
+        }
+        const index = optionRefs.current.indexOf(document.activeElement as HTMLButtonElement)
+        const next = event.key === 'ArrowDown' ? index + 1 : event.key === 'ArrowUp' ? index - 1 : null
+        if (next !== null) {
+          event.preventDefault()
+          optionRefs.current[Math.max(0, Math.min(options.length - 1, next))]?.focus()
+        }
+      }}
       style={{
         left: pos ? `${pos.left}px` : '-9999px',
         top: pos ? `${pos.top}px` : '-9999px',

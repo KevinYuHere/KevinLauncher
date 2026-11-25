@@ -32,7 +32,7 @@ interface ModuleManagerViewProps {
   onResetModulePosition: (moduleId: HomeModuleId) => void
   onSetModuleLabel: (label: string | null) => void
   onSetLaunchEffect: (effect: LaunchEffect) => void
-  onSetLaunchMethods: (methods: LaunchMethod[], defaultId: string) => void
+  onSetLaunchMethods: (methods: LaunchMethod[], defaultId: string) => Promise<void>
   onWallpaperAdd: () => void
   onWallpaperRemove: (id: string) => void
   onWallpaperReorder: (ids: string[]) => void

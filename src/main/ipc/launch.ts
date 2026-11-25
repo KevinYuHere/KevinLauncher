@@ -1,12 +1,35 @@
 import { handleIpc } from './access'
-import { basename } from 'path'
+import { basename, dirname, isAbsolute } from 'path'
 import { defaultLaunchMethod, launchMethodById } from '@shared/appEntry'
+import type { LaunchResult } from '@shared/types'
 import { AppStore } from '../services/appStore'
 import { Launcher, type LaunchSpec } from '../services/launcher'
-import { playTime, runtime } from './context'
+import { gameInstallDirectory } from '../services/gameInstallDirectory'
+import { isFileSystemRoot, realDirectoryPath } from '../services/directoryPath'
+import { arknightsRecoveryPending } from '../update/arknightsCommit'
+import { playTime, runtime, updates } from './context'
 
 /** Runtime key for a linked-launch task (kept distinct from app ids). */
 export const linkedRunKey = (id: string): string => `linked:${id}`
+
+async function launchTracked(
+  key: string, name: string, spec: LaunchSpec, monitor: string[], monitorRoot: string | null, record = true
+): Promise<LaunchResult> {
+  const release = runtime.reserveLaunch(key)
+  if (!release) return { ok: false, pid: null, elevated: false, error: '已有启动请求或正在运行' }
+  try {
+    const { observation, ...result } = await Launcher.launch(spec, name)
+    if (!result.ok) return result
+    const directory = monitorRoot || dirname(observation.targetExecutable ?? spec.targetPath)
+    if (isAbsolute(directory) && !isFileSystemRoot(directory)) {
+      observation.monitorDirectory = await realDirectoryPath(directory).catch(() => undefined)
+    }
+    runtime.start(key, result.pid, result.elevated, monitor, record, observation)
+    return result
+  } finally {
+    release()
+  }
+}
 
 export function registerLaunchIpc(): void {
   handleIpc('apps:launch', async (_e, id: string, methodId?: string) => {
@@ -22,6 +45,17 @@ export function registerLaunchIpc(): void {
         error: '尚未配置启动文件，请在「模块管理 → 启动按钮」中设置'
       }
     }
+    if (entry.addonId === 'arknights') {
+      const directory = gameInstallDirectory(entry)
+      if (directory) {
+        try {
+          if (await updates.isUpdatingInstall(directory)) throw new Error('游戏正在更新，请等更新完成')
+          if (await arknightsRecoveryPending(directory)) throw new Error('请先完成上次中断的明日方舟更新')
+        } catch (error) {
+          return { ok: false, pid: null, elevated: false, error: (error as Error).message }
+        }
+      }
+    }
 
     const spec: LaunchSpec = {
       targetPath: method.targetPath,
@@ -30,17 +64,7 @@ export function registerLaunchIpc(): void {
       runAsAdmin: method.runAsAdmin,
       environmentVariables: entry.environmentVariables
     }
-    const result = await Launcher.launch(spec, entry.name)
-    if (result.ok) {
-      // Elevated launches (when the launcher itself is not elevated) cannot be
-      // tracked by pid; fall back to monitoring the target's own process name.
-      const monitor = [...entry.monitorProcessNames]
-      if (result.elevated && result.pid === null && monitor.length === 0) {
-        monitor.push(basename(method.targetPath))
-      }
-      runtime.start(entry.id, result.pid, result.elevated, monitor)
-    }
-    return result
+    return launchTracked(entry.id, entry.name, spec, entry.monitorProcessNames, entry.gameDirectory)
   })
 
   // Linked launch: one file that starts several apps. Tracked as its own task
@@ -64,19 +88,7 @@ export function registerLaunchIpc(): void {
       workingDirectory: entry.workingDirectory,
       runAsAdmin: entry.runAsAdmin
     }
-    const result = await Launcher.launch(spec, entry.name)
-    if (result.ok) {
-      // Tracked live (running state / stop) but never counted as play time:
-      // a linked launch is not one of the launcher's apps.
-      runtime.start(
-        linkedRunKey(entry.id),
-        result.pid,
-        result.elevated,
-        [basename(entry.targetPath)],
-        false
-      )
-    }
-    return result
+    return launchTracked(linkedRunKey(entry.id), entry.name, spec, [basename(entry.targetPath)], null, false)
   })
 
   handleIpc('runtime:list', () => runtime.list())
