@@ -76,6 +76,7 @@ if ($Action -eq 'integration') {
   $machine = [Microsoft.Win32.Registry]::LocalMachine
   $uninstall = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\KevinLauncher'
   $scheduled = Get-ScheduledTask -TaskPath '\' -ErrorAction Stop | Where-Object TaskName -EQ KevinLauncher
+  $autoStart = if ($scheduled) { Export-ScheduledTask -TaskName KevinLauncher -TaskPath '\' }
   $production = Join-Path $env:LOCALAPPDATA 'Programs\KevinLauncher'
   $productionMachine = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'KevinLauncher'
   [ordered]@{
@@ -83,7 +84,7 @@ if ($Action -eq 'integration') {
     uninstallUser = Get-ValueMap $user $uninstall
     uninstallMachine = Get-ValueMap $machine $uninstall
     run = Get-ValueMap $user 'Software\Microsoft\Windows\CurrentVersion\Run' @('KevinLauncher', 'KevinLauncherTrial', 'com.kevin.kevinlauncher', 'com.kevin.kevinlauncher.trial')
-    autoStart = if ($scheduled) { Export-ScheduledTask -TaskName KevinLauncher -TaskPath '\' }
+    autoStart = $autoStart
     userProgram = Test-Path -LiteralPath $production
     userProgramVersion = Get-FileDigest (Join-Path $production 'resources\app-version.txt')
     machineProgram = Test-Path -LiteralPath $productionMachine
