@@ -32,13 +32,34 @@ export function readReleaseVersion() {
   return { version, tag: 'v' + version, electron }
 }
 
-export function completedCodexReview(reviews, comments, sha, mergedAt) {
+/** @param {string} [issueUrl] */
+export function completedCodexReview(reviews, comments, sha, mergedAt, issueUrl) {
   const beforeMerge = time => Date.parse(time) <= Date.parse(mergedAt)
   const trusted = item => item.user?.login === codexLogin &&
     item.user.type === 'Bot' &&
     (!item.performed_via_github_app || item.performed_via_github_app.slug === 'chatgpt-codex-connector')
-  const clean = comments.flatMap(comment => {
-    if (!trusted(comment) || !beforeMerge(comment.created_at) || !beforeMerge(comment.updated_at)) return []
+  const trustedComments = comments.filter(comment => trusted(comment) &&
+    (!issueUrl || comment.issue_url === issueUrl))
+  const summaries = trustedComments.flatMap(comment => {
+    const data = (comment.body ?? '').match(/<!--\s*codex-review-state:v1\s+([\s\S]*?)\s*-->/)?.[1]
+    if (data === undefined) return []
+    let state
+    try { state = JSON.parse(data)?.code_review } catch { /* A malformed current state cannot authorize release. */ }
+    return [{ comment, state }]
+  }).sort((a, b) => Date.parse(b.comment.updated_at) - Date.parse(a.comment.updated_at) || b.comment.id - a.comment.id)
+  const latest = summaries[0]
+  if (latest) {
+    const { comment, state } = latest
+    if (state?.commit_sha !== sha || !shaPattern.test(state.commit_sha) || state.status !== 'completed' ||
+        typeof state.has_any_findings !== 'boolean' || state.has_unresolved_findings !== false ||
+        !beforeMerge(comment.created_at) || !beforeMerge(comment.updated_at)) return undefined
+    if (reviews.some(review => trusted(review) && review.commit_id === sha &&
+        ['CHANGES_REQUESTED', 'COMMENTED'].includes(review.state) &&
+        Date.parse(review.submitted_at) > Date.parse(comment.updated_at))) return undefined
+    return { id: comment.id, url: comment.html_url, submittedAt: comment.updated_at, reviewed: state.commit_sha }
+  }
+  const clean = trustedComments.flatMap(comment => {
+    if (!beforeMerge(comment.created_at) || !beforeMerge(comment.updated_at)) return []
     if (!/^Codex Review:\s+Didn't find any major issues\b/i.test(comment.body ?? '')) return []
     const reviewed = (comment.body ?? '').match(/(?:\*\*)?Reviewed commit:(?:\*\*)?\s*\x60([a-f0-9]{10,40})\x60/i)?.[1]
     if (!reviewed || !sha.startsWith(reviewed.toLowerCase())) return []
@@ -134,7 +155,8 @@ async function sourceEvidence(version) {
       pages('/issues/' + pr.number + '/comments'),
       pages('/actions/workflows/ci.yml/runs?event=pull_request&head_sha=' + head, 'workflow_runs')
     ])
-    const review = completedCodexReview(reviews, comments, head, pr.merged_at)
+    const issueUrl = 'https://api.github.com/repos/' + repo + '/issues/' + pr.number
+    const review = completedCodexReview(reviews, comments, head, pr.merged_at, issueUrl)
     if (!review) continue
     const resolvedReview = await github('/commits/' + review.reviewed)
     if (resolvedReview.sha !== head) continue

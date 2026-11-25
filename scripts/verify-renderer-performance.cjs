@@ -88,6 +88,7 @@ async function fixture() {
   }
   let apps = [entry]
   let failStartup = false
+  let failGallery = false
   let launched = 0
   let savedMethods
   const answers = {
@@ -97,13 +98,17 @@ async function fixture() {
     'housekeeping:usage': { staleStaging: 0, retainedStaging: 0, legacyThumbs: 0, logs: 0, gameCache: 0, media: 0, recovery: 0 },
     'housekeeping:clean': { diskBytes: 0, failures: [] }, 'appUpdate:status': {}, 'appUpdate:state': { phase: 'idle' },
     'window:isMaximized': false, 'window:activity': true, 'app:ready': undefined,
-    'gallery:list': items, 'gallery:openViewer': undefined,
+    'gallery:openViewer': undefined,
     'update:status': { appId: 'synthetic', phase: 'idle' }
   }
   for (const [channel, value] of Object.entries(answers)) ipcMain.handle(channel, () => value)
   ipcMain.handle('apps:list', () => {
     if (failStartup) { failStartup = false; throw new Error('synthetic load failure') }
     return apps
+  })
+  ipcMain.handle('gallery:list', () => {
+    if (failGallery) { failGallery = false; throw new Error('synthetic gallery refresh failure') }
+    return items
   })
   ipcMain.handle('apps:launch', () => { launched++; return { started: true } })
   ipcMain.handle('apps:setLaunchMethods', (_event, _id, methods) => { savedMethods = methods })
@@ -176,6 +181,20 @@ async function fixture() {
       button.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }))
     })()`)
     await until("document.activeElement?.dataset.tileIndex === '2999'", 'keyboard reaches the last image')
+    const refresh = `Array.from(document.querySelectorAll('.gallery-page .page-actions button')).find(button => button.textContent === '刷新').click()`
+    await run("document.querySelector('.gallery-grid').dataset.previousFixtureGrid = 'yes'")
+    failGallery = true
+    await run(refresh)
+    await until("document.querySelector('.gallery-page').innerText.includes('读取截图目录失败') && !document.querySelector('.gallery-grid[data-previous-fixture-grid]')", 'failed refresh unmounts the gallery')
+    await run(refresh)
+    await until("!!document.querySelector('.gallery-grid:not([data-previous-fixture-grid])')", 'retry remounts the gallery')
+    await run(`(() => {
+      document.querySelector('.gallery-grid').style.width = '320px'
+      const page = document.querySelector('.gallery-page')
+      page.scrollTop = 0
+      page.dispatchEvent(new Event('scroll'))
+    })()`)
+    await until("document.querySelector('.gallery-thumb')?.style.width === '320px'", 'retried gallery measures its new grid width')
   }
   await nav('主页', '.stage .home')
 

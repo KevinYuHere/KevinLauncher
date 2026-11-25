@@ -10,7 +10,7 @@ import { assetNames, mayBuildBatch, missingDraftAssets, verifyLocalAssets } from
 
 const temps: string[] = []
 async function temp(): Promise<string> {
-  const path = await fs.mkdtemp(join(tmpdir(), 'kl-release-tests-'))
+  const path = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'kl-release-tests-')))
   temps.push(path)
   return path
 }
@@ -42,6 +42,45 @@ test('requires a completed trusted current-head review separately from successfu
   expect(assertCiRun(ci, head, 'main')).toBe(true)
   expect(assertCiRun(ci, previous, 'main')).toBe(false)
   expect(assertCiRun({ ...ci, event: 'pull_request' }, head, 'main')).toBe(false)
+})
+
+test('uses the latest full-commit Codex status issued on the reviewed pull request', () => {
+  const head = '1234567890abcdef1234567890abcdef12345678'
+  const other = 'abcdef1234567890abcdef1234567890abcdef12'
+  const issue = 'https://api.github.com/repos/KevinYuHere/KevinLauncher/issues/3'
+  const merged = '2026-11-25T11:00:00Z'
+  const summary = (overrides = {}) => ({
+    id: 10, html_url: 'https://github.com/KevinYuHere/KevinLauncher/pull/3#issuecomment-10', issue_url: issue,
+    created_at: '2026-11-25T10:35:17Z', updated_at: '2026-11-25T10:42:00Z',
+    user: { login: 'chatgpt-codex-connector[bot]', type: 'Bot' },
+    performed_via_github_app: { slug: 'chatgpt-codex-connector' },
+    body: '<!-- codex-pull-request-review-summary -->\n<!-- codex-review-state:v1 ' + JSON.stringify({
+      code_review: {
+        commit_sha: head, has_any_findings: true, has_unresolved_findings: false, status: 'completed', ...overrides
+      },
+      security_review: {
+        commit_sha: head, has_any_findings: null, has_unresolved_findings: null, status: 'completed'
+      }
+    }) + ' -->'
+  })
+  const clean = summary()
+  const verdict = (comments: ReturnType<typeof summary>[]) => completedCodexReview([], comments, head, merged, issue)
+  expect(verdict([clean])).toMatchObject({ reviewed: head, submittedAt: clean.updated_at })
+  expect(verdict([summary({ commit_sha: other })])).toBeUndefined()
+  expect(verdict([summary({ commit_sha: head.slice(0, 12) })])).toBeUndefined()
+  expect(verdict([summary({ status: 'in_progress' })])).toBeUndefined()
+  expect(verdict([{ ...clean, issue_url: issue + '0' }])).toBeUndefined()
+  expect(verdict([{ ...clean, performed_via_github_app: { slug: 'other-reviewer' } }])).toBeUndefined()
+  expect(verdict([{ ...clean, updated_at: '2026-11-25T11:01:00Z' }])).toBeUndefined()
+  expect(verdict([clean, {
+    ...summary({ has_unresolved_findings: true }), id: 11, updated_at: '2026-11-25T10:43:00Z'
+  }])).toBeUndefined()
+  expect(verdict([clean, {
+    ...clean, body: '<!-- codex-review-state:v1 malformed -->', id: 11, updated_at: '2026-11-25T10:43:00Z'
+  }])).toBeUndefined()
+  expect(completedCodexReview([{
+    user: clean.user, commit_id: head, state: 'COMMENTED', submitted_at: '2026-11-25T10:43:00Z'
+  }], [clean], head, merged, issue)).toBeUndefined()
 })
 
 test('only an unbuilt push can build and retries never replace conflicting or published assets', () => {

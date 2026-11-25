@@ -63,6 +63,35 @@ describe('Windows process observation', () => {
       await runtime.dispose()
     }
   })
+
+  it('recognizes a launch started while a previous process scan is in flight', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    const now = Date.now()
+    const first = item(1000, 1, WRAPPER, now)
+    const second = item(2000, 1, PATH, now + 1)
+    let finishFirstScan!: (value: ProcessIdentity[]) => void
+    const inFlight = new Promise<ProcessIdentity[]>(resolve => { finishFirstScan = resolve })
+    const snapshot = vi.fn<() => Promise<ProcessIdentity[]>>()
+      .mockReturnValueOnce(inFlight).mockResolvedValue([first, second])
+    const runtime = new Runtime({ snapshot, dispose: async () => {} })
+    try {
+      runtime.start('first', first.pid, false, [], true, { requestedAt: now, rootExecutable: WRAPPER })
+      runtime.start('second', second.pid, false, [], true, { requestedAt: now + 1, rootExecutable: PATH })
+      expect(snapshot).toHaveBeenCalledOnce()
+      finishFirstScan([first])
+      await vi.waitFor(() => expect(runtime.list()).toMatchObject([
+        { appId: 'first', pids: [first.pid] }, { appId: 'second', confirmed: false }
+      ]))
+      await vi.advanceTimersByTimeAsync(4_000)
+      expect(runtime.list()).toMatchObject([
+        { appId: 'first', pids: [first.pid] }, { appId: 'second', pids: [second.pid], confirmed: true }
+      ])
+    } finally {
+      finishFirstScan([])
+      await runtime.dispose()
+      vi.useRealTimers()
+    }
+  })
 })
 
 describe('process scanner lifecycle', () => {

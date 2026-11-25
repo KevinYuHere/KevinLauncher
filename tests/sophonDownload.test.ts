@@ -175,7 +175,7 @@ afterEach(async () => {
 })
 
 async function tmpDir(): Promise<string> {
-  const dir = await fs.mkdtemp(join(tmpdir(), 'sophon-test-'))
+  const dir = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'sophon-test-')))
   temporaryDirs.add(dir)
   return dir
 }

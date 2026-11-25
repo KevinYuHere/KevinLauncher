@@ -6,6 +6,7 @@ import { UpdateManager } from '../src/main/update/updateManager'
 import * as jobs from '../src/main/update/hoyoJob'
 import { HoYoSteps } from '../src/main/update/hoyoSchedule'
 import { HoYoWorkerStopped } from '../src/main/update/hoyoWorker'
+import { runWithDataAccess, withShutdownDataAccess } from '../src/main/ipc/dataAccess'
 
 vi.mock('electron', () => ({ app: {
   isPackaged: false, getPath: () => '.', getAppPath: () => '.', getVersion: () => '2.0.5-beta.2'
@@ -21,6 +22,24 @@ function deferred() {
 }
 
 describe('HoYo game task ownership', () => {
+  it('does not admit updates during shutdown but accepts a new task when a failed flush keeps the app open', async () => {
+    const manager = new UpdateManager()
+    const prepare = vi.spyOn(jobs, 'prepareHoYoJob').mockResolvedValue(new HoYoSteps([], async () => {}))
+    const start = () => manager.start('retry', 'update', 'genshin', 'D:/game')
+    try {
+      await expect(withShutdownDataAccess(() => manager.stopTasks(), async () => {
+        await expect(start()).rejects.toThrow('退出')
+        await expect(runWithDataAccess('update:start', start)).rejects.toThrow('关闭')
+        throw new Error('disk full')
+      })).rejects.toThrow('disk full')
+      manager.resumeTasks()
+      await runWithDataAccess('update:start', start)
+      expect(manager.status('retry').phase).toBe('done')
+    } finally {
+      prepare.mockRestore()
+    }
+  })
+
   it('retains progress on a network error and creates a fresh worker on manual retry after a crash', async () => {
     const manager = new UpdateManager()
     const dispose = vi.fn().mockResolvedValue(undefined)

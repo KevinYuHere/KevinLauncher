@@ -38,6 +38,9 @@ jobs:
           node node_modules/electron/install.js
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build the isolated trial with a synthetic current policy
+        env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
         run: |
           $fixture = Join-Path $env:RUNNER_TEMP 'theme-policy-trial.json'
           node scripts/verify-theme-policy-trial.mjs --write-fixture $fixture
@@ -84,4 +87,17 @@ jobs:
       - name: Validate installation with the published 2.0.3 baseline and this build
         env:
           GH_TOKEN: ${{ github.token }}
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
         run: node scripts/verify-windows-release.mjs release --from-worktree v2.0.3
+      - name: Show recent Windows application errors for the setup executables
+        if: failure()
+        run: |
+          $integrity = ((whoami.exe /groups /fo csv /nh) -join "`n") | Select-String -Pattern 'S-1-16-\d+' -AllMatches
+          $integrity.Matches.Value
+          $criteria = @{ LogName = 'Application'; Id = 1000; StartTime = (Get-Date).AddMinutes(-10) }
+          Get-WinEvent -FilterHashtable $criteria -ErrorAction SilentlyContinue |
+            Where-Object { $_.Properties.Count -ge 7 -and $_.Properties[0].Value -like 'KevinLauncher*.exe' } |
+            Select-Object -First 6 -Property TimeCreated, @{N='Executable';E={$_.Properties[0].Value}},
+              @{N='FileVersion';E={$_.Properties[1].Value}}, @{N='Module';E={$_.Properties[3].Value}},
+              @{N='Exception';E={$_.Properties[6].Value}} | Format-List

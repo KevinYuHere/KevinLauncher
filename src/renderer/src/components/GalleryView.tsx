@@ -124,10 +124,12 @@ export default function GalleryView({ entry, active, onBack, onEdit }: GalleryVi
   }, [items])
 
   const hasItems = items.length > 0
+  const listingError = error?.scope === scope ? error : undefined
+  const showGrid = Boolean(dir && hasItems && !listingError)
   useLayoutEffect(() => {
     const page = pageRef.current
     const grid = gridRef.current
-    if (!page || !grid) return
+    if (!showGrid || !page || !grid) return
     let frame = 0
     const measure = (): void => {
       frame = 0
@@ -147,7 +149,7 @@ export default function GalleryView({ entry, active, onBack, onEdit }: GalleryVi
       observer.disconnect()
       cancelAnimationFrame(frame)
     }
-  }, [hasItems, scope])
+  }, [showGrid, scope])
 
   const layout = useMemo(() => masonryLayout(viewport.width,
     items.map((item) => aspects.get(galleryImageKey(item)) ?? 0)
@@ -202,17 +204,17 @@ export default function GalleryView({ entry, active, onBack, onEdit }: GalleryVi
             <div>在「设置 → 高级设置」中填写截图目录后即可浏览</div>
             <button className="btn primary" style={{ marginTop: 12 }} onClick={onEdit}>去设置</button>
           </div></div>
-        ) : error?.scope === scope ? (
+        ) : listingError ? (
           <div className="panel"><div className="empty" role="alert">
             <div className="empty-title">读取截图目录失败</div>
-            <div>{error.message}</div>
+            <div>{listingError.message}</div>
           </div></div>
         ) : !hasItems ? (
           <div className="panel"><div className="empty">
             <div className="empty-title">{loading || listing?.scope !== scope ? '正在读取…' : '没有找到图片'}</div>
           </div></div>
         ) : (
-          <div className="gallery-grid" ref={gridRef} style={{ height: layout.height }}
+          <div key="gallery-grid" className="gallery-grid" ref={gridRef} style={{ height: layout.height }}
             onBlur={(event) => {
               if (pendingFocus.current === null && !event.currentTarget.contains(event.relatedTarget)) setFocused(null)
             }}>

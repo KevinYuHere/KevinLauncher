@@ -65,7 +65,7 @@ it('rejects truncated manifest fields while skipping unknown fixed-width metadat
   expect([...fields(Buffer.from([13, 0, 0, 0, 0, 16, 2]))]).toEqual([{ field: 2, wire: 0, num: 2n }])
 })
 
-it.skipIf(typeof zlib.zstdCompressSync !== 'function').each(['original', 'empty-base-zstd'])(
+it.skipIf(process.platform !== 'win32' || typeof zlib.zstdCompressSync !== 'function').each(['original', 'empty-base-zstd'])(
   'resumes predownload and applies a real HDIFF13 in a fresh worker (%s)', async format => {
   const root = await fs.mkdtemp(join(tmpdir(), 'kl-worker-'))
   const fixture = await startHoyoHttpFixture()

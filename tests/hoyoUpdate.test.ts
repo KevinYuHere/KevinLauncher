@@ -149,8 +149,9 @@ describe('Starward 0.19.0 update preparation', () => {
   })
 })
 
-it.each(['ok', 'current', 'bad-sdk', 'resume-sdk', 'repair-corrupt', 'repair-failed', 'archive-corrupt'] as const)('keeps compressed predownload and component completion consistent (%s)', async scenario => {
-  const root = await fs.mkdtemp(join(tmpdir(), 'kl-hoyo-'))
+// The install stage runs KevinArchive.exe, including WPF and the channel SDK.
+it.skipIf(process.platform !== 'win32').each(['ok', 'current', 'bad-sdk', 'resume-sdk', 'repair-corrupt', 'repair-failed', 'archive-corrupt'] as const)('keeps compressed predownload and component completion consistent (%s)', async scenario => {
+  const root = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'kl-hoyo-')))
   clean.push(() => fs.rm(root, { recursive: true, force: true }))
   userData = join(root, 'user-data')
   const dir = join(root, 'game'), src = join(root, 'archives')
@@ -319,7 +320,7 @@ it('rejects a known wrong game, wrong region or channel before contacting HoYoPl
 
 it('keeps the original Sophon file when an applied patch fails target validation', async () => {
   const { runSophonPatch } = await import('../src/main/update/sophonPatch')
-  const dir = await fs.mkdtemp(join(tmpdir(), 'kl-ldiff-bad-output-'))
+  const dir = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'kl-ldiff-bad-output-')))
   clean.push(() => fs.rm(dir, { recursive: true, force: true }))
   const source = Buffer.from('old')
   const blob = Buffer.concat([Buffer.from('HDIFF13&\0'), Buffer.from([7, 3, 0, 0, 0, 1, 0, 0, 0, 7, 0, 6]), Buffer.from('changed')])
@@ -335,9 +336,15 @@ it('keeps the original Sophon file when an applied patch fails target validation
     originalFileName: 'base.bin', originalFileLength: source.length, originalFileMd5: md5(source)
   }
   const asset = { assetName: 'target.bin', size: 7, md5: md5(Buffer.from('valid!!')), infos: [] }
+  const native = process.platform === 'win32'
+  const patcher = native ? join(process.cwd(), 'resources', 'hpatchz.exe') : join(dir, 'patch-fixture')
+  if (!native) {
+    await fs.writeFile(patcher, '#!/bin/sh\nprintf changed > "$4"\nprintf ran > "$2.fixture"\n', { mode: 0o700 })
+  }
   await runSophonPatch({ patchId: 'patch', tag: '2.0', categories: [category] }, '1.0', dir, false,
-    join(process.cwd(), 'resources', 'hpatchz.exe'), [], () => {}, signal, undefined,
+    patcher, [], () => {}, signal, undefined,
     { tasks: [{ category, chunk, asset, mode: 0 }], deletes: [] })
+  if (!native) expect(await fs.readFile(join(dir, 'base.bin.fixture'), 'utf8')).toBe('ran')
   expect(await fs.readFile(join(dir, 'base.bin'), 'utf8')).toBe('old')
   await expect(fs.access(join(dir, 'target.bin'))).rejects.toMatchObject({ code: 'ENOENT' })
 })
@@ -345,7 +352,7 @@ it('keeps the original Sophon file when an applied patch fails target validation
 
 it.each(['cached', 'range', 'resume'])('applies a real patch manifest using %s', async mode => {
   const { runSophonPatch } = await import('../src/main/update/sophonPatch')
-  const dir = await fs.mkdtemp(join(tmpdir(), 'kl-hoyo-patch-'))
+  const dir = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'kl-hoyo-patch-')))
   clean.push(() => fs.rm(dir, { recursive: true, force: true }))
   const bytes = Buffer.from('live'), blob = Buffer.from('00live00')
   function uint(value: number): Buffer {

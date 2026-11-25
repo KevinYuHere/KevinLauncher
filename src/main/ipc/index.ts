@@ -65,6 +65,7 @@ export function registerIpc(mode: 'app' | 'install' | 'uninstall' = 'app'): void
         await Promise.all([gacha.dispose(), runtime.dispose()])
       })
     } catch (error) {
+      updates.resumeTasks()
       resumePolling()
       throw error
     }

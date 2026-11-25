@@ -28,14 +28,14 @@ npm run package:test
 ## 正式版本
 
 1. 本地试用验证通过后，核对 `AGENTS.md` 的发版阻断项，将 `package.json`、锁文件根包和 `CHANGELOG.md` 首段更新到相同的正式版本号。运行 `npm run release:prepare` 检查当前提交与版本，它输出版本、提交和源码树。
-2. 推送正式变更分支，关联到目标为 `main` 的 PR。仓库需要启用 Codex 自动审阅。同步最新 `main` 后等待普通 CI 与 Codex 对当前 PR head 的完整清洁结果。若 Codex 没有为最新 head 自动产生带提交标识的结果，在 PR 上发起 `@codex review`。
+2. 推送正式变更分支，关联到目标为 `main` 的 PR。仓库需要启用 Codex 自动审阅。同步最新 `main` 后等待普通 CI 和 Codex 对当前 PR head 的完成状态及未解决项归零。发布流程核对 GitHub Bot 身份、所属 PR 与审阅记录中的完整提交 SHA。若最新 head 没有触发审阅，在同一 PR 上发起 `@codex review`。
 3. 合并后在 `main` 上等待该最终提交的 push CI 成功，再把匹配版本的正式标签指向该提交并推送。发布门槛会重新校验正式标签、PR head、合并前 base、最终提交、相同源码树、Codex 的完成结果和两次 CI。
 4. GitHub Actions 在一次性的 Windows 环境中打包，验证同一份安装程序的全新安装、应用启动、上一正式版覆盖升级及数据保留，并逐文件对照更新 ZIP 与安装目录。通过后冻结安装程序、更新 ZIP、manifest 和各自哈希。公开 Release 只上传验证过的三个产物。
 5. 产物冻结前遇到暂时的失败，可重跑原始标签 push 的 workflow。已经冻结时，原工作流重跑与手动重试都复用原始批次。手动重试从同一标签触发，并提供原始标签 push 的 Actions 运行 ID。批次保留 30 天，重试逐个核对草稿资产并补传缺失项。已冻结批次到期或出现同版本哈希冲突时，准备新版本。
 
 GitHub 仓库可启用 [Immutable releases](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository) 锁定已公开资产。自动审阅的配置与触发方式见 [GitHub PR 的 Codex 审阅](https://learn.chatgpt.com/docs/third-party/github)。
 
-需要验收主题策略或 Electron 图形启动时，可为同仓库的 `verify/*` 分支开 PR。Windows trial acceptance 会在一次性托管机器上构建独立试用包，启动该包的应用两次，检查旧策略下首次应用及重启后保留手动设置。试用结果写入 Actions 摘要。
+同仓库 `verify/*` 分支的 PR 会触发 Windows trial acceptance。试用任务启动独立包两次，确认旧策略下首次应用及重启后保留手动设置。安装任务验证一次性 Windows 中的全新安装、上一正式版覆盖升级、启动和保留数据卸载。结果记录在 Actions 摘要，供审阅人员核对所测提交及工件哈希。
 
 调整启动壳、安装协议或持久化格式时，同步更新 `scripts/release-compatibility.json` 相应协议号。热更新会核对 Electron、宿主文件、协议和数据格式，遇到变化时使用完整安装程序。热更新启动连续两次失败会使用上一健康代码，保留同格式的用户数据和更新前备份。
 

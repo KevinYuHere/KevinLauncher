@@ -24,7 +24,7 @@ const cleanup: string[] = []
 const active: HardLinkService[] = []
 
 beforeEach(async () => {
-  root = await fs.mkdtemp(join(tmpdir(), 'kevin-hardlink-'))
+  root = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'kevin-hardlink-')))
   cleanup.push(root)
   catalog = new GameFileCatalog(root)
 })

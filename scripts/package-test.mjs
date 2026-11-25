@@ -55,9 +55,7 @@ const file = join(output, installer)
 try {
   await mkdir(temp)
   for (const command of ['npm.cmd run typecheck', 'npm.cmd test']) {
-    execFileSync('cmd.exe', ['/d', '/s', '/c', command], {
-      cwd: root, stdio: 'inherit', env: { ...process.env, TEMP: temp, TMP: temp }
-    })
+    execFileSync('cmd.exe', ['/d', '/s', '/c', command], { cwd: root, stdio: 'inherit' })
   }
   node('node_modules/electron-vite/bin/electron-vite.js', 'build', '--outDir', join(output, 'app'))
   node('scripts/build-windows-archive.mjs')

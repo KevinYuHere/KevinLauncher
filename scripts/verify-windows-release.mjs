@@ -4,7 +4,7 @@ import { once } from 'node:events'
 import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { basename, join, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { isNewerVersion } from '../src/shared/version.ts'
 import { downloadInstaller, releasedAssets } from './verify-release.mjs'
@@ -25,6 +25,7 @@ const assets = await verifyLocalAssets(dir, source.version, source.electron)
 const installer = join(dir, 'KevinLauncher-Installer-' + source.version + '.exe')
 const root = await mkdtemp(join(process.env.RUNNER_TEMP, 'kl-release-check-'))
 const children = new Set()
+let startupSequence = 0
 const sandboxData = name => join(root, name, 'KevinLauncherData')
 const sandboxInstall = name => join(root, name, 'KevinLauncher')
 
@@ -57,8 +58,13 @@ async function launch(file, ...args) {
   delete env.ELECTRON_RUN_AS_NODE
   delete env.PORTABLE_EXECUTABLE_DIR
   delete env.PORTABLE_EXECUTABLE_FILE
+  const startupLog = join(root, `chromium-startup-${++startupSequence}.log`)
   const child = spawn(file, [...args, '--remote-debugging-address=127.0.0.1',
-    '--remote-debugging-port=' + port], { env, windowsHide: true, stdio: 'ignore' })
+    '--remote-debugging-port=' + port, '--enable-logging=file', '--log-file=' + startupLog], {
+      env, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe']
+    })
+  let stderr = ''
+  child.stderr.on('data', chunk => { stderr = (stderr + String(chunk)).slice(-8192) })
   children.add(child)
   await once(child, 'spawn')
   const exited = once(child, 'exit')
@@ -67,8 +73,15 @@ async function launch(file, ...args) {
       signal: AbortSignal.timeout(1500)
     })
     return (await response.json()).find(item => item.type === 'page' && /^file:/.test(item.url))
-  }, 'Electron 页面就绪', 120_000, () => child.exitCode === null ? null :
-    new Error('程序提前退出，代码 ' + child.exitCode))
+  }, basename(file) + ' Electron 页面就绪', 120_000, () => {
+    if (child.exitCode === null) return null
+    const hex = (child.exitCode >>> 0).toString(16).padStart(8, '0')
+    return new Error(basename(file) + ' 提前退出，代码 0x' + hex + (stderr.trim() ? '\n' + stderr.trim() : ''))
+  }).catch(async error => {
+    const diagnostics = (await readFile(startupLog, 'utf8').catch(() => '')).trim().slice(-8_192)
+    if (diagnostics) console.error(basename(file) + ' Chromium 启动日志\n' + diagnostics)
+    throw error
+  })
   const socket = new WebSocket(target.webSocketDebuggerUrl)
   await Promise.race([
     once(socket, 'open'),
@@ -138,6 +151,18 @@ async function install(file, name, version, previousVersion) {
   await ui.close()
   assert.equal((await readFile(join(target, 'resources', 'app-version.txt'), 'utf8')).trim(), version)
   return target
+}
+
+async function diagnoseUnpackedSetup() {
+  try {
+    const unpacked = join(dir, 'win-unpacked', 'KevinLauncher.exe')
+    const ui = await launch(unpacked, '--install')
+    const info = await ui.run('window.api.installerInfo()')
+    console.log('Diagnostic production unpacked setup start: ' + info.version)
+    await ui.close()
+  } catch (error) {
+    console.error('Diagnostic production unpacked setup failed: ' + error.message)
+  }
 }
 
 async function startInstalled(target, version) {
@@ -216,7 +241,11 @@ try {
   const previousUi = await launch(join(existing, 'KevinLauncher.exe'))
   assert.equal(await previousUi.run('window.api.appVersion()'), previous.manifest.version)
   assert.ok(Array.isArray(await previousUi.run('window.api.listApps()')))
-  const covering = await install(installer, 'upgrade', source.version, previous.manifest.version)
+  console.log('Verified and started the published setup and launcher, v' + previous.manifest.version)
+  const covering = await install(installer, 'upgrade', source.version, previous.manifest.version).catch(async error => {
+    await diagnoseUnpackedSetup()
+    throw error
+  })
   await previousUi.waitForExit()
   assert.equal(existing, covering)
   assert.equal(await readFile(sentinel, 'utf8'), history)

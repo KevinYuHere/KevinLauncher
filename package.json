@@ -17,7 +17,7 @@
     "build": "electron-vite build",
     "start": "electron-vite preview",
     "test": "vitest run",
-    "test:core": "vitest run --exclude \"tests/{elevation,hoyoArchive,hoyoSteps,powershell,windowsExecutable}.test.ts\"",
+    "test:core": "vitest run --exclude \"tests/{elevation,hoyoArchive,powershell,windowsExecutable}.test.ts\"",
     "lint": "node scripts/lint.mjs",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",

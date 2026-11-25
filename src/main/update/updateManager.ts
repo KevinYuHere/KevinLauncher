@@ -138,6 +138,10 @@ export class UpdateManager {
     await this.clearHoYoContexts()
   }
 
+  resumeTasks(): void {
+    this.stopping = false
+  }
+
   async start(appId: string, mode: UpdateMode, game: GachaGame, gameDir: string): Promise<void> {
     if (this.stopping) throw new Error('启动器正在退出')
     let existing = this.jobs.get(appId)

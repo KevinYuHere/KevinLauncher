@@ -223,6 +223,7 @@ export class Runtime {
   }
 
   private async observe(generation: number): Promise<boolean> {
+    const tracked = [...this.running.values()]
     const snapshot = await this.scanner.snapshot().catch(() => null)
     if (!snapshot || generation !== this.observationGeneration || this.disposed) return false
     const now = Date.now()
@@ -231,7 +232,8 @@ export class Runtime {
       for (const pid of entry.processes.keys()) owners.set(pid, entry.appId)
     }
     let updated = false
-    for (const entry of this.running.values()) {
+    for (const entry of tracked) {
+      if (this.running.get(entry.appId) !== entry) continue
       const previous = entry.processes
       const active = observeLaunch(entry, snapshot, ({ pid }) => !owners.has(pid) || owners.get(pid) === entry.appId, now)
       entry.processes = active
