@@ -5,7 +5,7 @@ directories:
 # The packaged app is a tiny, version-independent entry point (shell/) plus a
 # versioned application directory (resources/app-<version>/, provided as
 # extraResources below). An update writes a new version directory while the app
-# is running and only flips resources/app-version.txt — see docs/INSTALLER.md.
+# is running and only flips resources/app-version.txt — see INSTALLATION.md.
 # asar is disabled so the entry point is plain files under resources/app/.
 asar: false
 files:

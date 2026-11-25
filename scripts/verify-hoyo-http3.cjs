@@ -18,9 +18,12 @@ async function supervise() {
   const onExit = proc => new Promise((resolve, reject) => {
     proc.once('error', reject).once('exit', resolve)
   })
-  const python = cp.spawn(process.env.PYTHON || 'python', ['-u', path.join(__dirname, 'verify-hoyo-http3-server.py'), root], {
+  const interpreter = process.env.PYTHON || path.join(repo, '.venv-hoyo',
+    ...(process.platform === 'win32' ? ['Scripts', 'python.exe'] : ['bin', 'python']))
+  if (!fs.existsSync(interpreter)) throw new Error('缺少 HTTP/3 验证环境，请按 INSTALLATION.md 创建')
+  const python = cp.spawn(interpreter, ['-u', path.join(__dirname, 'verify-hoyo-http3-server.py'), root], {
     windowsHide: true, stdio: ['ignore', 'ignore', 'inherit'],
-    env: { ...process.env, PYTHONPATH: [path.join(repo, 'docs/.http3-tools'), process.env.PYTHONPATH].filter(Boolean).join(path.delimiter) }
+    env: process.env
   })
   const serverExit = onExit(python)
   let success = false

@@ -37,6 +37,10 @@ if (start < 0) {
   console.error('（请先在 CHANGELOG.md 最上方添加该版本的内容，再发布。）')
   process.exit(1)
 }
+if (lines.slice(0, start).some(line => /^##\s+(?:\[?v?)?\d+\.\d+\.\d+/.test(line))) {
+  console.error('请把本次发布版本的更新日志移到最上方。')
+  process.exit(1)
+}
 
 let end = lines.length
 for (let i = start + 1; i < lines.length; i++) {

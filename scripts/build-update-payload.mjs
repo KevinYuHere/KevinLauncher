@@ -1,9 +1,9 @@
 import { promises as fs } from 'node:fs'
-import { createHash } from 'node:crypto'
-import { createReadStream } from 'node:fs'
 import { execFile } from 'node:child_process'
 import { join, relative, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
+import { identifyFile, assetNames, verifyLocalAssets } from './release-assets.mjs'
+import { parseUpdateCompatibility, STABLE_VERSION } from '../src/main/services/appUpdateManifest.ts'
 
 /**
  * Builds the update payload for a release.
@@ -23,9 +23,7 @@ import { promisify } from 'node:util'
  * itself when the **runtime** (Electron) changed — it downloads the installer
  * and opens it instead of swapping files.
  *
- * Usage: node scripts/build-update-payload.mjs [unpackedDir] [version] [electron]
- *        (the third argument overrides the recorded Electron version, which is
- *         useful to test a runtime upgrade end to end)
+ * Usage: node scripts/build-update-payload.mjs [unpackedDir] [version]
  */
 
 const exec = promisify(execFile)
@@ -36,10 +34,8 @@ const version =
 
 // The update check orders releases with a SemVer comparator; a version that is
 // not SemVer-shaped would be ordered as 0.0.0 and silently never offered again.
-if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) {
-  throw new Error(
-    `版本号 "${version}" 不是 SemVer（应为 1.2.3 或 1.2.3-beta.1）：更新检查将无法比较，已拒绝打包`
-  )
+if (!STABLE_VERSION.test(version) || process.argv.length > 4) {
+  throw new Error('正式更新包只接受正式版本和实际运行库')
 }
 /** Assets are written next to the unpacked directory (release/ by default). */
 const outDir = resolve(unpacked, '..')
@@ -51,12 +47,16 @@ if (!(await fs.stat(appSource).catch(() => null))) {
 }
 
 /** Electron version the app was built against (updates need a matching runtime). */
-const builtElectron = JSON.parse(
+const electron = JSON.parse(
   await fs.readFile(join(root, 'node_modules', 'electron', 'package.json'), 'utf8')
 ).version
-const electron = process.argv[4] ?? builtElectron
-if (electron !== builtElectron) {
-  console.log(`!! 记录为 Electron ${electron}（实际 ${builtElectron}）— 用于测试运行库升级路径`)
+const [installerName, payloadName, manifestName] = assetNames(version)
+const pointer = await fs.readFile(join(unpacked, 'resources', 'app-version.txt'), 'utf8')
+if (pointer.trim() !== version) throw new Error('打包目录版本指针和发布版本不同')
+const rootCompatibility = await fs.readFile(join(unpacked, 'resources', 'release-compatibility.json'), 'utf8')
+const compatibility = parseUpdateCompatibility(JSON.parse(rootCompatibility))
+if (!compatibility || rootCompatibility !== await fs.readFile(join(appSource, 'release-compatibility.json'), 'utf8')) {
+  throw new Error('安装程序与应用更新包的兼容信息不一致')
 }
 
 /** Recursively lists every file, relative to `base` (always `/` separated). */
@@ -75,53 +75,34 @@ const appSize = (
 ).reduce((sum, size) => sum + size, 0)
 
 // bsdtar (shipped with Windows) picks the format from the extension.
-const zipPath = join(outDir, `KevinLauncher-${version}-app.zip`)
+const zipPath = join(outDir, payloadName)
 await fs.rm(zipPath, { force: true })
-await exec('tar', ['-a', '-cf', zipPath, '-C', appSource, '.'], { maxBuffer: 32 * 1024 * 1024 })
+if (process.platform !== 'win32' || !process.env.SystemRoot) throw new Error('正式更新包需要 Windows 系统 tar.exe')
+const tar = join(process.env.SystemRoot, 'System32', 'tar.exe')
+await exec(tar, ['-a', '-cf', zipPath, '-C', appSource, '.'], { maxBuffer: 32 * 1024 * 1024 })
 
-const payloadSha256 = await new Promise((resolveHash, reject) => {
-  const hash = createHash('sha256')
-  const stream = createReadStream(zipPath)
-  stream.on('data', (chunk) => hash.update(chunk))
-  stream.on('end', () => resolveHash(hash.digest('hex')))
-  stream.on('error', reject)
-})
-const { size: payloadSize } = await fs.stat(zipPath)
+const { size: payloadSize, sha256: payloadSha256 } = await identifyFile(zipPath)
 
 // Full installer (produced by electron-builder's portable target) — used when the
 // runtime changed and the app cannot replace its own files while running.
-const installerName = `KevinLauncher-Installer-${version}.exe`
 const installerPath = join(outDir, installerName)
-let installerSize = 0
-let installerSha256 = null
-if (await fs.stat(installerPath).catch(() => null)) {
-  installerSize = (await fs.stat(installerPath)).size
-  installerSha256 = await new Promise((resolveHash, reject) => {
-    const hash = createHash('sha256')
-    const stream = createReadStream(installerPath)
-    stream.on('data', (chunk) => hash.update(chunk))
-    stream.on('end', () => resolveHash(hash.digest('hex')))
-    stream.on('error', reject)
-  })
-}
+const { size: installerSize, sha256: installerSha256 } = await identifyFile(installerPath)
+const unpackedFiles = await walk(unpacked)
+const installerUnpackedSize = (
+  await Promise.all(unpackedFiles.map(async file => (await fs.stat(join(unpacked, file))).size))
+).reduce((sum, size) => sum + size, 0)
 
-// Release notes (written by scripts/release.ps1) are embedded so the free
+// Release notes are embedded so the free
 // `releases/latest/download/update-manifest.json` path can show them without
 // calling the GitHub API.
-let notes = ''
-try {
-  notes = (await fs.readFile(join(outDir, 'RELEASE_NOTES.md'), 'utf8')).trim()
-} catch {
-  /* no notes for this build */
-}
+const notes = (await fs.readFile(join(outDir, 'RELEASE_NOTES.md'), 'utf8')).trim()
 
-/** 重要更新：`theme-policy.json` 的 `critical` 是随版本提交的发布标记（CI 也能读到）；
- *  `KL_CRITICAL_UPDATE=1` 仍可临时覆盖（本地 release.ps1 -Critical）。 */
+// Only the versioned policy may mark a release as critical.
 let policy = null
 try {
   policy = JSON.parse(await fs.readFile(join(root, 'theme-policy.json'), 'utf8'))
-} catch {
-  /* no release policy for this build */
+} catch (error) {
+  if (error.code !== 'ENOENT') throw error
 }
 if (policy && policy.version !== version) {
   // The client applies a policy only on the version it was written for, and
@@ -132,19 +113,21 @@ if (policy && policy.version !== version) {
       `请删除它；如果 ${version} 也需要调整用户设置，请把 version 改成 ${version}`
   )
 }
-const critical = process.env.KL_CRITICAL_UPDATE === '1' || policy?.critical === true
+const critical = policy?.critical === true
 
 await fs.writeFile(
-  join(outDir, 'update-manifest.json'),
+  join(outDir, manifestName),
   JSON.stringify(
     {
       version,
       electron,
+      compatibility,
       appSize,
       payloadSize,
       payloadSha256,
-      installerName: installerSize ? installerName : null,
+      installerName,
       installerSize,
+      installerUnpackedSize,
       installerSha256,
       notes,
       critical,
@@ -160,9 +143,6 @@ console.log(
   `KevinLauncher-${version}-app.zip  ${files.length} files, ${(payloadSize / 1048576).toFixed(2)} MB packed` +
     ` (${(appSize / 1048576).toFixed(2)} MB unpacked) · electron ${electron}`
 )
-console.log(
-  installerSize
-    ? `installer          ${installerName} (${(installerSize / 1048576).toFixed(1)} MB)`
-    : 'installer          （未找到，运行库升级将无法自动下载）'
-)
+await verifyLocalAssets(outDir, version, electron)
+console.log(`installer          ${installerName} (${(installerSize / 1048576).toFixed(1)} MB)`)
 console.log('update-manifest.json            written')

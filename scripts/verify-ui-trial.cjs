@@ -52,9 +52,10 @@ async function verify() {
   const settings = {themeAreas:{},themeLocks:{},sidebarMaterial:false,updateChannel:'stable',downloadLimitMbps:0}
   const answers = {
     'addons:list':[], 'ui:getPrefs':{},'apps:list':apps,'runtime:list':[], 'linked:list':[],
-    'playtime:totals':{},'launcher:getSettings':settings,'fonts:list':[],'app:version':'trial',
+    'playtime:totals':{},'launcher:getSettings':settings,'fonts:list':[],'app:version':'trial','app:ready':null,
     'wallpaper:desktop':null,'dataDir:get':{},'housekeeping:usage':{},'appUpdate:status':{},
-    'update:status':{phase:'idle'},'appUpdate:state':{phase:'idle'},'window:isMaximized':false
+    'update:status':{phase:'idle'},'appUpdate:state':{phase:'idle'},'window:isMaximized':false,
+    'window:activity':true,'app:ready':undefined
   }
   for (const [channel,value] of Object.entries(answers)) ipcMain.handle(channel,()=>value)
   ipcMain.handle('launcher:setBehavior',(event,patch)=>{

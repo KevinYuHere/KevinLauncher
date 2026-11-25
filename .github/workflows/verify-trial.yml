@@ -1,0 +1,87 @@
+name: Windows trial acceptance
+
+on:
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  theme-policy:
+    name: Bundled theme policy on two packaged starts
+    if: |
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       startsWith(github.event.pull_request.head.ref, 'verify/')) ||
+      (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/verify/'))
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      npm_config_registry: https://registry.npmjs.org/
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - name: Install the locked toolchain and Electron runtime
+        run: |
+          npm ci --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node node_modules/electron/install.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build the isolated trial with a synthetic current policy
+        run: |
+          $fixture = Join-Path $env:RUNNER_TEMP 'theme-policy-trial.json'
+          node scripts/verify-theme-policy-trial.mjs --write-fixture $fixture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run package:test -- --theme-policy $fixture --keep-unpacked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify the actual packaged app starts twice and retains manual choices
+        run: |
+          $batch = @(Get-ChildItem -LiteralPath . -Directory -Filter 'release-trial-*')
+          if ($batch.Count -ne 1) { throw 'Expected exactly one trial build' }
+          $record = Get-Content -LiteralPath (Join-Path $batch[0].FullName 'trial-verification.json') -Raw | ConvertFrom-Json
+          $installer = Join-Path $batch[0].FullName $record.installer
+          if ((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant() -ne $record.sha256) {
+            throw 'The local trial installer hash changed'
+          }
+          $app = Join-Path $batch[0].FullName 'win-unpacked\KevinLauncherTrial.exe'
+          node scripts/verify-theme-policy-trial.mjs $app $env:RUNNER_TEMP
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  installer:
+    name: Fresh install, overlay upgrade and managed uninstall
+    if: |
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       startsWith(github.event.pull_request.head.ref, 'verify/')) ||
+      (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/verify/'))
+    runs-on: windows-latest
+    timeout-minutes: 35
+    env:
+      npm_config_registry: https://registry.npmjs.org/
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - name: Restore the locked build toolchain
+        run: npm ci --no-audit --no-fund
+      - name: Build the production layout inside the disposable runner
+        run: powershell -ExecutionPolicy Bypass -File scripts/build-official-windows.ps1
+      - name: Validate installation with the published 2.0.3 baseline and this build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/verify-windows-release.mjs release --from-worktree v2.0.3

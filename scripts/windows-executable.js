@@ -24,19 +24,19 @@ function manifests(resources, file) {
   })
 }
 
-function assertElevated(file) {
+function assertExecutionLevel(file, expected = requiredLevel) {
   const exe = NtExecutable.from(fs.readFileSync(file), { ignoreCert: true })
   for (const { entry, level } of manifests(NtExecutableResource.from(exe), file)) {
-    if (level !== requiredLevel) throw new Error(`${file}: manifest language ${entry.lang} is ${level}, expected ${requiredLevel}`)
+    if (level !== expected) throw new Error(`${file}: manifest language ${entry.lang} is ${level}, expected ${expected}`)
   }
 }
 
-function prepareWindowsExecutable(file, iconFile) {
+function prepareWindowsExecutable(file, iconFile, level = requiredLevel) {
   const exe = NtExecutable.from(fs.readFileSync(file), { ignoreCert: true })
   const resources = NtExecutableResource.from(exe)
   for (const { entry, xml } of manifests(resources, file)) {
     const revised = xml.replace(executionTag, tag => tag.replace(levelAttribute,
-      (_original, key, quote) => `${key}${quote}${requiredLevel}${quote}`))
+      (_original, key, quote) => `${key}${quote}${level}${quote}`))
     entry.bin = Buffer.from(revised, 'utf8')
   }
 
@@ -57,13 +57,14 @@ function prepareWindowsExecutable(file, iconFile) {
   }
 }
 
-module.exports = { assertElevated, prepareWindowsExecutable }
+module.exports = { assertElevated: assertExecutionLevel, assertExecutionLevel, prepareWindowsExecutable }
 
 if (require.main === module) {
   const files = process.argv.slice(2)
+  const level = files[0] === '--trial' ? (files.shift(), 'asInvoker') : requiredLevel
   if (files.length === 0) throw new Error('Usage: node scripts/windows-executable.js <exe> [other.exe ...]')
   for (const file of files) {
-    assertElevated(file)
-    console.log(`Verified ${requiredLevel} in ${file}`)
+    assertExecutionLevel(file, level)
+    console.log(`Verified ${level} in ${file}`)
   }
 }
