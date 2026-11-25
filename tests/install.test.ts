@@ -168,18 +168,22 @@ describe('managed uninstall', () => {
     await writeTree(installDir, { 'KevinLauncher.exe': 'entry', 'install.json': '{}' })
     await fs.writeFile(other, 'unrelated')
     for (const link of links) await fs.mkdir(dirname(link))
-    const writeLinks = async (items: { path: string; target: string }[]) => runPowerShell(`
-$shell = New-Object -ComObject WScript.Shell
-foreach ($item in (ConvertFrom-Json -InputObject ${psDataLiteral(JSON.stringify(items))})) {
-  $link = $shell.CreateShortcut($item.path)
-  $link.TargetPath = $item.target
-  $link.Save()
+    const fixture = join(import.meta.dirname, 'fixtures', 'windows-shell-link.cs')
+    const writeLinks = async (items: { path: string; target: string }[]) => JSON.parse(await runPowerShell(`
+$ErrorActionPreference = 'Stop'
+Add-Type -LiteralPath ${psDataLiteral(fixture)}
+$links = foreach ($item in (ConvertFrom-Json -InputObject ${psDataLiteral(JSON.stringify(items))})) {
+  [SetupShellLink]::Write($item.path, $item.target)
+  $readBack = [SetupShellLink]::Read($item.path)
+  [pscustomobject]@{ path = $item.path; target = $readBack[0] }
 }
-`)
+ConvertTo-Json -InputObject @($links) -Compress
+`)) as { path: string; target: string }[]
     const entries = links.map((path, index) => ({ path, target: index === 2 ? other : executable }))
-    await writeLinks(entries)
+    const created = await writeLinks(entries)
+    expect(created).toEqual(entries)
     vi.mocked(shell.readShortcutLink).mockImplementation(path => ({
-      target: entries.find(entry => entry.path === path)!.target,
+      target: created.find(entry => entry.path === path)!.target,
       args: '', cwd: '', description: '', icon: '', iconIndex: 0, appUserModelId: '', toastActivatorClsid: ''
     }))
     const cleanup = await uninstallShortcutCleanup(executable, links)

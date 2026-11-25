@@ -181,41 +181,7 @@ public static class SetupFolderPicker {
 }
 
 if ($Action -eq 'links') {
-  Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-using System.Runtime.InteropServices.ComTypes;
-using System.Text;
-
-public static class SetupShellLink {
-    [ComImport, Guid("000214F9-0000-0000-C000-000000000046"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    interface IShellLinkW {
-        void GetPath([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder path, int size, IntPtr findData, uint flags);
-        void GetIDList(out IntPtr idList);
-        void SetIDList(IntPtr idList);
-        void GetDescription([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder description, int size);
-        void SetDescription([MarshalAs(UnmanagedType.LPWStr)] string description);
-        void GetWorkingDirectory([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder directory, int size);
-        void SetWorkingDirectory([MarshalAs(UnmanagedType.LPWStr)] string directory);
-        void GetArguments([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder arguments, int size);
-    }
-    public static string[] Read(string file) {
-        var type = Type.GetTypeFromCLSID(new Guid("00021401-0000-0000-C000-000000000046"));
-        object instance = Activator.CreateInstance(type);
-        try {
-            ((IPersistFile)instance).Load(file, 0);
-            var link = (IShellLinkW)instance;
-            var target = new StringBuilder(32768);
-            var directory = new StringBuilder(32768);
-            var arguments = new StringBuilder(32768);
-            link.GetPath(target, target.Capacity, IntPtr.Zero, 4); // SLGP_RAWPATH
-            link.GetWorkingDirectory(directory, directory.Capacity);
-            link.GetArguments(arguments, arguments.Capacity);
-            return new[] { target.ToString(), directory.ToString(), arguments.ToString() };
-        } finally { Marshal.ReleaseComObject(instance); }
-    }
-}
-'@
+  Add-Type -LiteralPath (Join-Path $PSScriptRoot '../tests/fixtures/windows-shell-link.cs')
   @('DesktopDirectory', 'Programs') | ForEach-Object {
     $path = Join-Path ([Environment]::GetFolderPath($_, 'DoNotVerify')) 'KevinLauncher.lnk'
     if (Test-Path -LiteralPath $path -PathType Leaf) {
