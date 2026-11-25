@@ -202,10 +202,22 @@ async function setupPath(ui, label, expected) {
     label + ' 显示 ' + expected, 10_000)
 }
 
-async function pickSetupPath(ui, label, selected) {
+async function pickSetupPath(ui, label, previous, selected) {
   await clickSetup(ui, `(${setupField(label)})?.querySelector('button')`, label + '可浏览')
-  assert.equal(await windows('choose-folder', '-ProcessId', String(ui.pid), '-Target', dirname(selected)), true)
+  const picked = await windows('choose-folder', '-ProcessId', String(ui.pid), '-Target', dirname(selected))
+  assert.equal(typeof picked, 'boolean')
+  if (!picked) {
+    await setupPath(ui, label, previous)
+    await ui.run(`(() => {
+      const input = (${setupField(label)})?.querySelector('input')
+      if (!input || input.disabled || input.readOnly) throw new Error('Setup path is not editable')
+      input.focus()
+      input.select()
+    })()`)
+    await ui.command('Input.insertText', { text: selected })
+  }
   await setupPath(ui, label, selected)
+  return picked ? 'native-selection' : 'typed-after-native-cancel'
 }
 
 async function clickPrimary(ui, text) {
@@ -217,8 +229,8 @@ async function installThroughSetup(ui, info, target, data) {
   await mkdir(dirname(target), { recursive: true })
   await setupPath(ui, '安装位置', info.prefillDir)
   await setupPath(ui, '用户数据目录', info.dataDir)
-  await pickSetupPath(ui, '安装位置', target)
-  await pickSetupPath(ui, '用户数据目录', data)
+  const programMethod = await pickSetupPath(ui, '安装位置', info.prefillDir, target)
+  const dataMethod = await pickSetupPath(ui, '用户数据目录', info.dataDir, data)
   await clickPrimary(ui, '下一步')
   const locations = await ui.run(`[...document.querySelectorAll('.setup-list em')].map(element => element.textContent)`)
   assert(locations.some(path => samePath(path, target)), '确认页显示选中的程序目录')
@@ -230,6 +242,7 @@ async function installThroughSetup(ui, info, target, data) {
     return document.querySelector('.setup-title-lg')?.textContent === '安装完成'
   })()`), 'Beta 安装完成')
   assert(samePath(await ui.run(`document.querySelector('.setup-panel .setup-sub b')?.textContent`), target))
+  return { programMethod, dataMethod }
 }
 
 async function install(file, name, version, previousVersion) {
@@ -238,20 +251,21 @@ async function install(file, name, version, previousVersion) {
   await mkdir(data, { recursive: true })
   const ui = await launch(file)
   const info = await ui.run('window.api.installerInfo()')
+  let selections
   assert.equal(info.version, version)
   if (previousVersion) {
     const inspection = await ui.run('window.api.installerInspect(' + JSON.stringify(target) + ')')
     assert.equal(inspection.version, previousVersion)
   }
   if (beta && name === 'fresh') {
-    await installThroughSetup(ui, info, target, data)
+    selections = await installThroughSetup(ui, info, target, data)
   } else {
     const call = 'window.api.installerRun(' + JSON.stringify(target) + ',' + JSON.stringify(data) + ')'
     assert.equal(await ui.run(call), true)
   }
   await ui.close()
   assert.equal((await readFile(join(target, 'resources', 'app-version.txt'), 'utf8')).trim(), version)
-  return target
+  return { target, selections }
 }
 
 async function diagnoseUnpackedSetup() {
@@ -295,7 +309,7 @@ async function startInstalled(target, version, fixture) {
   await ui.close()
 }
 
-async function verifyBetaIntegration(target, data) {
+async function verifyBetaIntegration(target, data, selections) {
   const entry = join(target, windowsLayout.entry)
   const runtime = join(target, windowsLayout.runtime)
   for (const executable of [windowsLayout.entry, windowsLayout.runtime]) {
@@ -330,7 +344,7 @@ async function verifyBetaIntegration(target, data) {
   await until(async () => !(await windows('processes', '-Target', target)).processes.length, '快捷方式启动的实例退出')
   await assert.rejects(access(join(process.env.LOCALAPPDATA, 'Programs', 'KevinLauncher')), { code: 'ENOENT' })
   return {
-    nativeFolderDialogs: 2, program: target, data,
+    nativeFolderDialogs: 2, ...selections, program: target, data,
     differentSystemVolume: !samePath(parse(target).root, parse(process.env.LOCALAPPDATA).root),
     defaultProgramUntouched: true, shortcutLaunched: true, productionRegistration: true,
     startupTask: task.level, runnerIntegrityRid: launched.runnerIntegrityRid,
@@ -415,7 +429,7 @@ try {
   assert.ok(isNewerVersion(source.version, previous.manifest.version), '候选版本必须高于已发布正式版本')
   const previousFile = join(root, previous.manifest.installerName)
   await downloadInstaller(previous, previousFile)
-  const existing = await install(previousFile, 'upgrade', previous.manifest.version)
+  const { target: existing } = await install(previousFile, 'upgrade', previous.manifest.version)
   const oldEntry = join(existing, windowsLayout.entry)
   const seeded = await launch(oldEntry)
   assert.equal(await seeded.run('window.api.appVersion()'), previous.manifest.version)
@@ -435,7 +449,7 @@ try {
   assert.ok((await previousUi.run('window.api.listApps()')).some(app => app.id === fixture.id))
   assert.equal((await previousUi.run('window.api.playTimeTotals()'))[fixture.id], 60)
   console.log('Verified and started the published setup and launcher, v' + previous.manifest.version)
-  const covering = await install(installer, 'upgrade', source.version, previous.manifest.version).catch(async error => {
+  const { target: covering } = await install(installer, 'upgrade', source.version, previous.manifest.version).catch(async error => {
     const launcherLog = (await readFile(join(sandboxData('upgrade'), 'launcher.log'), 'utf8').catch(() => ''))
       .split(/\r?\n/).filter(line => /\b(?:install:|app:|shutdown:)/.test(line)).slice(-25).join('\n')
     if (launcherLog) console.error('Installation and previous launcher log\n' + launcherLog)
@@ -448,12 +462,12 @@ try {
   await checkProfile(join(data, 'update-backup'), fixture, history)
   await startInstalled(covering, source.version, fixture)
   console.log('Verified overwrite upgrade, startup, saved history and previous profile backup')
-  const fresh = await install(installer, 'fresh', source.version)
+  const { target: fresh, selections } = await install(installer, 'fresh', source.version)
   await startInstalled(fresh, source.version, fixture)
   await comparePayload(fresh)
   console.log('Verified fresh install, startup and byte-for-byte app payload')
   const freshData = sandboxData('fresh')
-  const betaIntegration = beta ? await verifyBetaIntegration(fresh, freshData) : null
+  const betaIntegration = beta ? await verifyBetaIntegration(fresh, freshData, selections) : null
   const runningFresh = await launch(join(fresh, windowsLayout.entry))
   const tray = await runningFresh.run('window.api.setLauncherBehavior({ closeAction: "tray" })')
   assert.equal(tray.closeAction, 'tray')

@@ -94,13 +94,18 @@ public static class SetupFolderPicker {
         }
         if (!PostMessage(GetParent(button), 0x0111, new IntPtr(1), button)) throw new Win32Exception(); // WM_COMMAND / IDOK
     }
-    static void Choose(IntPtr dialog, IntPtr input, IntPtr confirm, string directory) {
+    static bool WaitForClose(IntPtr dialog, int timeout) {
+        DateTime expires = DateTime.UtcNow.AddMilliseconds(timeout);
+        while (IsWindowVisible(dialog) && DateTime.UtcNow < expires) Thread.Sleep(150);
+        return !IsWindowVisible(dialog);
+    }
+    static bool Choose(IntPtr dialog, IntPtr input, IntPtr confirm, string directory) {
         IntPtr result;
         if (SendMessageTimeout(input, 0x000C, IntPtr.Zero, directory, 2, 2000, out result) == IntPtr.Zero ||
             result == IntPtr.Zero) throw new Win32Exception(); // WM_SETTEXT
         Confirm(dialog, confirm);
         // Some Shell versions navigate into the typed folder before selecting it.
-        DateTime expires = DateTime.UtcNow.AddSeconds(8);
+        DateTime expires = DateTime.UtcNow.AddSeconds(4);
         while (IsWindowVisible(dialog) && DateTime.UtcNow < expires) {
             Thread.Sleep(150);
             var text = new StringBuilder(1024);
@@ -108,12 +113,16 @@ public static class SetupFolderPicker {
             if (string.Equals(text.ToString(), Path.GetFileName(directory), StringComparison.OrdinalIgnoreCase)) {
                 Thread.Sleep(300);
                 if (IsWindowVisible(dialog)) Confirm(dialog, confirm);
-                return;
+                break;
             }
         }
-        if (IsWindowVisible(dialog)) throw new InvalidOperationException("The native picker did not navigate into the fixture folder");
+        if (WaitForClose(dialog, 2000)) return true;
+        // A hosted desktop can expose the modal but decline synthetic confirmation.
+        if (!PostMessage(dialog, 0x0010, IntPtr.Zero, IntPtr.Zero) || !WaitForClose(dialog, 2000)) // WM_CLOSE
+            throw new InvalidOperationException("The native folder picker could not be dismissed");
+        return false;
     }
-    public static void Select(uint processId, string directory) {
+    public static bool Select(uint processId, string directory) {
         DateTime expires = DateTime.UtcNow.AddSeconds(12);
         var observed = new List<string>();
         do {
@@ -137,8 +146,7 @@ public static class SetupFolderPicker {
                         ClassName(window) == "Edit" && IsWindowVisible(window));
                 }
                 if (input != IntPtr.Zero && confirm != IntPtr.Zero) {
-                    Choose(dialog, input, confirm, directory);
-                    return;
+                    return Choose(dialog, input, confirm, directory);
                 }
                 observed = controls.FindAll(IsWindowVisible).ConvertAll(window => ClassName(window) + ":" + GetDlgCtrlID(window));
             }
@@ -148,8 +156,7 @@ public static class SetupFolderPicker {
     }
 }
 '@
-  [SetupFolderPicker]::Select([uint32]$runtime[0].ProcessId, $Target)
-  'true'
+  [SetupFolderPicker]::Select([uint32]$runtime[0].ProcessId, $Target) | ConvertTo-Json -Compress
   return
 }
 
@@ -170,21 +177,26 @@ if ($Action -eq 'integration') {
   $uninstall = $registry.OpenSubKey('Software\Microsoft\Windows\CurrentVersion\Uninstall\KevinLauncher')
   $app = $registry.OpenSubKey('Software\KevinLauncher')
   $task = Get-ScheduledTask -TaskPath '\' -ErrorAction Stop | Where-Object TaskName -EQ KevinLauncher
-  [ordered]@{
-    uninstall = if ($uninstall) {
-      [ordered]@{
-        name = $uninstall.GetValue('DisplayName'); version = $uninstall.GetValue('DisplayVersion')
-        path = $uninstall.GetValue('InstallLocation'); command = $uninstall.GetValue('UninstallString')
-      }
+  $uninstallInfo = $null
+  $program = $null
+  $dataPath = $null
+  $taskInfo = $null
+  if ($uninstall) {
+    $uninstallInfo = [ordered]@{
+      name = $uninstall.GetValue('DisplayName'); version = $uninstall.GetValue('DisplayVersion')
+      path = $uninstall.GetValue('InstallLocation'); command = $uninstall.GetValue('UninstallString')
     }
-    program = if ($app) { $app.GetValue('InstallLocation') }
-    data = if ($app) { $app.GetValue('DataDir') }
-    task = if ($task) {
-      [ordered]@{ target = $task.Actions.Execute; arguments = $task.Actions.Arguments; level = $task.Principal.RunLevel.ToString() }
-    }
-  } | ConvertTo-Json -Compress -Depth 5
-  if ($uninstall) { $uninstall.Dispose() }
-  if ($app) { $app.Dispose() }
+    $uninstall.Dispose()
+  }
+  if ($app) {
+    $program = $app.GetValue('InstallLocation')
+    $dataPath = $app.GetValue('DataDir')
+    $app.Dispose()
+  }
+  if ($task) {
+    $taskInfo = [ordered]@{ target = $task.Actions.Execute; arguments = $task.Actions.Arguments; level = $task.Principal.RunLevel.ToString() }
+  }
+  [ordered]@{ uninstall = $uninstallInfo; program = $program; data = $dataPath; task = $taskInfo } | ConvertTo-Json -Compress -Depth 5
   return
 }
 
