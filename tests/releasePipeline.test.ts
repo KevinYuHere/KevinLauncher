@@ -6,7 +6,7 @@ import { afterEach, expect, test } from 'vitest'
 import { completedCodexReview, assertCiRun } from '../scripts/release-source.mjs'
 import { betaPackageMetadata, copyBetaBuildInputs } from '../scripts/package-test.mjs'
 import { seedTrial } from '../scripts/seed-trial.mjs'
-import { verifyRemotePayload } from '../scripts/verify-release.mjs'
+import { downloadPayload, verifyRemotePayload } from '../scripts/verify-release.mjs'
 import { assetNames, mayBuildBatch, missingDraftAssets, verifyLocalAssets } from '../scripts/release-assets.mjs'
 
 const temps: string[] = []
@@ -61,6 +61,22 @@ test('Beta stages a source archive without Git and leaves out local-only configu
   await copyBetaBuildInputs(root, source)
   for (const file of files) expect(await fs.readFile(join(source, file), 'utf8')).toBe(file)
   for (const file of omitted) await expect(fs.access(join(source, file))).rejects.toMatchObject({ code: 'ENOENT' })
+})
+
+test('historical Windows fixtures verify the published application payload before extraction', async () => {
+  const dir = await temp()
+  const content = 'published application archive fixture'
+  const release = {
+    payload: { url: 'https://example.test/asset' },
+    manifest: { payloadSize: Buffer.byteLength(content), payloadSha256: createHash('sha256').update(content).digest('hex') }
+  }
+  const file = join(dir, 'legacy-app.zip')
+  await downloadPayload(release, file, async () => new Response(content))
+  expect(await fs.readFile(file, 'utf8')).toBe(content)
+  for (const [index, invalid] of [content.slice(1), 'x' + content.slice(1)].entries()) {
+    await expect(downloadPayload(release, join(dir, 'invalid-' + index), async () => new Response(invalid)))
+      .rejects.toThrow('历史正式应用载荷校验失败')
+  }
 })
 
 test('simple review text cannot substitute for both scoped reviews or exact push CI', () => {

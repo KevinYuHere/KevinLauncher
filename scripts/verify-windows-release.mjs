@@ -6,7 +6,7 @@ import { createServer } from 'node:net'
 import { basename, dirname, isAbsolute, join, parse, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { isNewerVersion } from '../src/shared/version.ts'
-import { downloadInstaller, releasedAssets } from './verify-release.mjs'
+import { downloadInstaller, downloadPayload, releasedAssets } from './verify-release.mjs'
 import { identifyFile, verifyLocalAssets } from './release-assets.mjs'
 import { readReleaseVersion } from './release-source.mjs'
 import windowsExecutable from './windows-executable.js'
@@ -593,20 +593,24 @@ async function verifyFreshBeta() {
 }
 
 async function verifyPublishedOverlay() {
-  const previous = await releasedAssets(process.argv[4] ?? 'latest')
+  const previousInstaller = await releasedAssets(process.argv[4] ?? 'latest')
+  const previous = beta ? await releasedAssets('v2.0.5') : previousInstaller
   assert.ok(isNewerVersion(source.version, previous.manifest.version), '候选版本必须高于已发布正式版本')
-  const previousFile = join(root, previous.manifest.installerName)
-  await downloadInstaller(previous, previousFile)
-  const { target: existing } = await install(previousFile, 'upgrade', previous.manifest.version)
+  const previousFile = join(root, previousInstaller.manifest.installerName)
+  await downloadInstaller(previousInstaller, previousFile)
+  const { target: existing } = await install(previousFile, 'upgrade', previousInstaller.manifest.version)
+  if (beta) await loadPublishedLegacyPayload(existing, previousInstaller, previous)
   const oldEntry = join(existing, windowsLayout.entry)
   const data = sandboxData('upgrade')
   const { fixture, history } = await seedProfile(existing, data, previous.manifest.version)
   const previousUi = await launch(oldEntry)
   assert.equal(await previousUi.run('window.api.appVersion()'), previous.manifest.version)
+  if (beta) assert.ok((await previousUi.run('navigator.userAgent')).includes('Electron/' + previous.manifest.electron))
   assert.ok((await previousUi.run('window.api.listApps()')).some(app => app.id === fixture.id))
   assert.equal((await previousUi.run('window.api.playTimeTotals()'))[fixture.id], 60)
   const checkUnrelated = beta ? await placeLegacyInTray(previousUi, existing, data) : null
-  console.log('Verified and started the published setup and launcher, v' + previous.manifest.version)
+  console.log('Verified and started the published application v' + previous.manifest.version +
+    ' on the installed v' + previousInstaller.manifest.version + ' host')
   const { target: covering } = await install(installer, 'upgrade', source.version, previous.manifest.version).catch(async error => {
     const launcherLog = (await readFile(join(sandboxData('upgrade'), 'launcher.log'), 'utf8').catch(() => ''))
       .split(/\r?\n/).filter(line => /\b(?:install:|app:|shutdown:)/.test(line)).slice(-25).join('\n')
@@ -627,7 +631,31 @@ async function verifyPublishedOverlay() {
   }
   await startInstalled(covering, source.version, fixture)
   console.log('Verified overwrite upgrade, startup, saved history and previous profile backup')
-  return { previousVersion: previous.manifest.version, previousInstallerSha256: previous.manifest.installerSha256, fixture, history }
+  return {
+    previousVersion: previous.manifest.version, previousInstallerSha256: previousInstaller.manifest.installerSha256,
+    ...(beta ? { previousInstallerVersion: previousInstaller.manifest.version,
+      previousPayloadSha256: previous.manifest.payloadSha256 } : {}),
+    fixture, history
+  }
+}
+
+async function loadPublishedLegacyPayload(installation, runtimeRelease, applicationRelease) {
+  const { electron, version, payloadSha256 } = applicationRelease.manifest
+  assert.equal(electron, runtimeRelease.manifest.electron, '旧应用和运行库必须来自同一 Electron 版本')
+  assert.ok(isNewerVersion(version, runtimeRelease.manifest.version), '旧应用载荷必须比夹具运行库壳更新')
+  const archive = join(root, 'legacy-app-' + version + '.zip')
+  await downloadPayload(applicationRelease, archive)
+  const resources = join(installation, 'resources')
+  const destination = join(resources, 'app-' + version)
+  await mkdir(destination)
+  execFileSync(join(process.env.SystemRoot, 'System32', 'tar.exe'), ['-xf', archive, '-C', destination], {
+    windowsHide: true, stdio: 'inherit'
+  })
+  assert.equal(JSON.parse(await readFile(join(destination, 'package.json'), 'utf8')).version, version)
+  await access(join(destination, 'out', 'main', 'index.js'))
+  await writeFile(join(resources, 'app-version.txt'), version + '\n')
+  console.log('Verified and loaded the published application payload v' + version + ' (SHA-256 ' + payloadSha256 +
+    ') on the installed v' + runtimeRelease.manifest.version + ' Electron ' + electron + ' runtime')
 }
 
 try {
@@ -655,8 +683,11 @@ try {
     runtimeMode: 'asInvoker',
     ...(beta ? { scenario } : {}),
     ...(betaIntegration ? { betaIntegration } : {}),
-    ...(scenario === 'legacy-tray' ? { legacyTrayOverlay: { hiddenBeforeUpgrade: true, foregroundInstaller: true, exitedNormally: true,
-      simultaneousActivityFlushed: true, activeApplicationContinued: true, unrelatedSameNamedProcessPreserved: true } } : {}),
+    ...(scenario === 'legacy-tray' ? { legacyTrayOverlay: {
+      previousInstallerVersion: overlay.previousInstallerVersion, previousPayloadSha256: overlay.previousPayloadSha256,
+      hiddenBeforeUpgrade: true, foregroundInstaller: true, exitedNormally: true,
+      simultaneousActivityFlushed: true, activeApplicationContinued: true, unrelatedSameNamedProcessPreserved: true
+    } } : {}),
     assets
   }
   await writeFile(join(dir, 'windows-verification.json'), JSON.stringify(verification, null, 2) + '\n')
@@ -669,6 +700,8 @@ try {
       'Version: ' + source.version + ' / Electron ' + source.electron,
       ...(overlay ? ['Previous verified release: ' + overlay.previousVersion, 'Previous installer SHA-256: ' + overlay.previousInstallerSha256,
         'Verified overwrite upgrade, startup, backup and application history.'] : []),
+      ...(overlay?.previousPayloadSha256 ? ['Legacy runtime installer version: ' + overlay.previousInstallerVersion,
+        'Historical application payload SHA-256: ' + overlay.previousPayloadSha256] : []),
       ...(!beta || betaIntegration ? ['Verified fresh install, launch and managed uninstall.'] : []),
       ...(betaIntegration ? ['Beta production integration: ' + JSON.stringify(betaIntegration)] : []),
       '',

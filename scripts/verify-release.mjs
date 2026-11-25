@@ -54,13 +54,23 @@ export async function releasedAssets(tag = 'latest') {
   return { manifest, payload, installer }
 }
 
-export async function downloadInstaller(release, file) {
-  const response = await download(release.installer.url)
+async function downloadVerifiedAsset(asset, file, size, sha256, description, fetchFile) {
+  const response = await fetchFile(asset.url)
   await pipeline(Readable.fromWeb(response.body), createWriteStream(file, { flags: 'wx' }))
   const actual = await identifyFile(file)
-  if (actual.size !== release.manifest.installerSize || actual.sha256 !== release.manifest.installerSha256) {
-    throw new Error('历史正式安装包校验失败')
+  if (actual.size !== size || actual.sha256 !== sha256) {
+    throw new Error(description + '校验失败')
   }
+}
+
+export async function downloadInstaller(release, file) {
+  await downloadVerifiedAsset(release.installer, file, release.manifest.installerSize,
+    release.manifest.installerSha256, '历史正式安装包', download)
+}
+
+export async function downloadPayload(release, file, fetchFile = download) {
+  await downloadVerifiedAsset(release.payload, file, release.manifest.payloadSize,
+    release.manifest.payloadSha256, '历史正式应用载荷', fetchFile)
 }
 
 export async function verifyRemotePayload(asset, manifest, dir, fetchRange = download) {

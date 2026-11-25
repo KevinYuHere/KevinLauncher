@@ -61,7 +61,7 @@ jobs:
           if ($batch.Count -ne 1) { throw 'Expected exactly one Beta build' }
           node scripts/verify-beta-parity.mjs $batch[0].FullName
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          # The published 2.0.5 exited before setup on the hosted runner. Use the verified 2.0.3 baseline.
+          # The v2.0.3 setup provides the legacy host for the verified v2.0.5 application payload.
           node scripts/verify-windows-release.mjs $batch[0].FullName --beta-from-worktree v2.0.3 $env:KEVIN_BETA_SCENARIO
           exit $LASTEXITCODE
       - name: Show recent Windows application errors for setup
