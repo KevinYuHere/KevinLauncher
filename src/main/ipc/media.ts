@@ -1,9 +1,12 @@
-import { dialog, shell } from 'electron'
+import { app, dialog, shell } from 'electron'
 import { handleIpc } from './access'
 import { promises as fs } from 'fs'
-import { extname } from 'path'
+import { dirname, extname } from 'path'
 import { currentAppVersion } from '../services/appVersion'
+import { confirmApplicationActivation } from '../services/appActivation'
 import { iconDataFromPath, imageDataUrl } from './util'
+import { appUpdate } from './context'
+import { syncInstalledVersion } from '../services/install'
 
 export function registerMediaIpc(): void {
   handleIpc('image:read', async (_e, path: string) => {
@@ -17,6 +20,17 @@ export function registerMediaIpc(): void {
   handleIpc('image:iconFromPath', (_e, path: string) => iconDataFromPath(path))
 
   handleIpc('app:version', () => currentAppVersion())
+  let activation: Promise<void> | undefined
+  handleIpc('app:ready', () => {
+    activation ??= confirmApplicationActivation().then(async () => {
+      if (app.isPackaged) await syncInstalledVersion(dirname(process.execPath), currentAppVersion())
+      await appUpdate.cleanupOldVersions()
+    }).catch(error => {
+      activation = undefined
+      throw error
+    })
+    return activation
+  })
 
   handleIpc('dialog:pickExecutable', async () => {
     const result = await dialog.showOpenDialog({

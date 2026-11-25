@@ -1,7 +1,9 @@
 import { ipcMain } from 'electron'
 import { senderRole, type WindowRole } from '../services/windowRole'
 import { runWithDataAccess } from './dataAccess'
+import { trialBuild } from '../services/buildIdentity'
 const viewerActions = new Set(['gallery:viewerNav', 'gallery:contextMenu', 'window:close'])
+const trialBlocked = new Set(['apps:launch', 'linked:launch', 'runtime:stop', 'shell:openPath', 'gacha:scanUrl'])
 
 export function allowsChannel(role: WindowRole, channel: string): boolean {
   if (role === 'viewer') return viewerActions.has(channel)
@@ -16,6 +18,7 @@ export function handleIpc(channel: string, handler: Parameters<typeof ipcMain.ha
     if (!role || !allowsChannel(role, channel)) {
       throw new Error('此窗口无权执行该操作')
     }
+    if (trialBuild && trialBlocked.has(channel)) throw new Error('本地试用版已隔离外部程序操作')
     return runWithDataAccess(channel, () => handler(event, ...args))
   })
 }

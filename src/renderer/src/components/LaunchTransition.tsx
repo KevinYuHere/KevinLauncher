@@ -175,10 +175,15 @@ const FS = `
     gl_FragColor = vec4(col, 1.0);
   }`
 
-function compile(gl: WebGLRenderingContext, type: number, src: string): WebGLShader {
-  const s = gl.createShader(type)!
+function compile(gl: WebGLRenderingContext, type: number, src: string): WebGLShader | null {
+  const s = gl.createShader(type)
+  if (!s) return null
   gl.shaderSource(s, src)
   gl.compileShader(s)
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    gl.deleteShader(s)
+    return null
+  }
   return s
 }
 
@@ -190,9 +195,6 @@ function compile(gl: WebGLRenderingContext, type: number, src: string): WebGLSha
  */
 export default function LaunchTransition({ trigger, onDone }: LaunchTransitionProps): ReactElement {
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  const glRef = useRef<WebGLRenderingContext | null>(null)
-  const uRef = useRef<Record<string, WebGLUniformLocation | null>>({})
-  const themeRef = useRef<[number, number, number]>([0.4, 0.36, 0.9])
   // These are ordinary launch effects, independent of the visual theme.
   const atomShatter = trigger?.effect === 'gravity'
   const outwardShatter = trigger?.effect === 'shatter'
@@ -204,53 +206,59 @@ export default function LaunchTransition({ trigger, onDone }: LaunchTransitionPr
   onDoneRef.current = onDone
 
   useEffect(() => {
+    if (!trigger || trigger.effect === 'gravity' || trigger.effect === 'shatter') return
     const canvas = canvasRef.current
-    if (!canvas) return
-    const gl = canvas.getContext('webgl', { antialias: true, alpha: false })
-    if (!gl) return
-    glRef.current = gl
-    const prog = gl.createProgram()!
-    gl.attachShader(prog, compile(gl, gl.VERTEX_SHADER, VS))
-    gl.attachShader(prog, compile(gl, gl.FRAGMENT_SHADER, FS))
-    gl.linkProgram(prog)
-    gl.useProgram(prog)
+    const gl = canvas?.getContext('webgl', { antialias: true, alpha: false })
+    if (!canvas || !gl) {
+      onDoneRef.current()
+      return
+    }
+    const prog = gl.createProgram()
+    const vertex = compile(gl, gl.VERTEX_SHADER, VS)
+    const fragment = compile(gl, gl.FRAGMENT_SHADER, FS)
     const buf = gl.createBuffer()
+    const tex = gl.createTexture()
+    let raf = 0
+    const finish = (): void => onDoneRef.current()
+    const cleanup = (): void => {
+      cancelAnimationFrame(raf)
+      canvas.removeEventListener('webglcontextlost', finish)
+      gl.deleteTexture(tex)
+      gl.deleteBuffer(buf)
+      gl.deleteProgram(prog)
+      gl.deleteShader(vertex)
+      gl.deleteShader(fragment)
+      // StrictMode reuses the same canvas during its setup/cleanup rehearsal.
+      queueMicrotask(() => {
+        if (!canvas.isConnected) gl.getExtension('WEBGL_lose_context')?.loseContext()
+      })
+    }
+    if (!prog || !vertex || !fragment || !buf || !tex) {
+      finish()
+      return cleanup
+    }
+    gl.attachShader(prog, vertex)
+    gl.attachShader(prog, fragment)
+    gl.linkProgram(prog)
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+      finish()
+      return cleanup
+    }
+    gl.useProgram(prog)
     gl.bindBuffer(gl.ARRAY_BUFFER, buf)
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW)
     const aPos = gl.getAttribLocation(prog, 'aPos')
     gl.enableVertexAttribArray(aPos)
     gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0)
-    for (const n of ['uTex', 'uRes', 'uTime', 'uOrigin', 'uProgress', 'uMode', 'uTheme']) {
-      uRef.current[n] = gl.getUniformLocation(prog, n)
-    }
-    const tex = gl.createTexture()
-    gl.bindTexture(gl.TEXTURE_2D, tex)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
-    glRef.current = gl
-    return () => {
-      gl.getExtension('WEBGL_lose_context')?.loseContext()
-      glRef.current = null
-    }
-  }, [])
+    const U = Object.fromEntries(['uTex', 'uRes', 'uTime', 'uOrigin', 'uProgress', 'uMode', 'uTheme']
+      .map((name) => [name, gl.getUniformLocation(prog, name)]))
 
-  useEffect(() => {
-    if (!trigger) return
-    if (trigger.effect === 'gravity' || trigger.effect === 'shatter') {
-      return
-    }
-    if (trigger.effect === 'none') return
-    const gl = glRef.current
-    const canvas = canvasRef.current
-    if (!gl || !canvas) return
-
+    let themeColor = [0.4, 0.36, 0.9]
     const theme = getComputedStyle(document.documentElement).getPropertyValue('--brand').trim()
     const hex = /^#?([0-9a-f]{6})$/i.exec(theme)
     if (hex) {
       const v = parseInt(hex[1], 16)
-      themeRef.current = [((v >> 16) & 255) / 255, ((v >> 8) & 255) / 255, (v & 255) / 255]
+      themeColor = [((v >> 16) & 255) / 255, ((v >> 8) & 255) / 255, (v & 255) / 255]
     }
 
     const dpr = Math.min(window.devicePixelRatio || 1, 2)
@@ -260,20 +268,24 @@ export default function LaunchTransition({ trigger, onDone }: LaunchTransitionPr
 
     const src = captureWallpaperBackground(dpr)
     gl.activeTexture(gl.TEXTURE0)
-    // (re)create texture content
-    const tex = gl.createTexture()
     gl.bindTexture(gl.TEXTURE_2D, tex)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
-    if (src) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src)
-    const U = uRef.current
+    try {
+      if (src) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src)
+      else gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE,
+        new Uint8Array([0, 0, 0, 255]))
+    } catch {
+      finish()
+      return cleanup
+    }
+    canvas.addEventListener('webglcontextlost', finish)
     const mode = MODE[trigger.effect]
     const duration = 1450
     const origin: [number, number] = [trigger.originX ?? 0.5, trigger.originY ?? 0.5]
     const start = performance.now()
-    let raf = 0
     const tick = (now: number): void => {
       const k = Math.min(1, (now - start) / duration)
       const p = k < 0.5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2
@@ -282,19 +294,19 @@ export default function LaunchTransition({ trigger, onDone }: LaunchTransitionPr
       gl.uniform2f(U.uOrigin!, origin[0], origin[1])
       gl.uniform1f(U.uProgress!, p)
       gl.uniform1i(U.uMode!, mode)
-      gl.uniform3f(U.uTheme!, themeRef.current[0], themeRef.current[1], themeRef.current[2])
+      gl.uniform3f(U.uTheme!, themeColor[0], themeColor[1], themeColor[2])
       gl.uniform1i(U.uTex!, 0)
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
       if (k < 1) raf = requestAnimationFrame(tick)
-      else onDoneRef.current()
+      else finish()
     }
     raf = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(raf)
+    return cleanup
   }, [trigger])
 
   return (
     <>
-      <canvas ref={canvasRef} className={`launch-fx${active ? ' on' : ''}`} />
+      {active && <canvas ref={canvasRef} className="launch-fx on" aria-hidden="true" />}
       {atomShatter && trigger && (
         <WallpaperShatter
           originX={trigger.originX ?? 0.5}

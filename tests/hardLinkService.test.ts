@@ -191,7 +191,7 @@ describe('Starward file index and hard links', () => {
     expect(native.fileIdentity).not.toHaveBeenCalled()
     const anotherConnection = new DatabaseSync(catalog.path)
     try {
-      expect(anotherConnection.prepare('PRAGMA user_version').get()?.user_version).toBe(1)
+      expect(anotherConnection.prepare('PRAGMA user_version').get()?.user_version).toBe(2)
       expect(anotherConnection.prepare('PRAGMA journal_mode').get()?.journal_mode).toBe('wal')
       expect(catalog.path).toBe(join(root, GAME_FILE_CATALOG_NAME))
       expect(await fs.readFile(unrelatedDatabase, 'utf8')).toBe('unrelated file')

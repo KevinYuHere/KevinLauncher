@@ -1,5 +1,6 @@
 import { psQuote, runPowerShell } from './powershell'
 import { log } from './logger'
+import { windowsCommandLine } from './windowsArguments'
 
 let cached: Promise<boolean> | null = null
 const REQUESTED = '--kevin-elevation-requested'
@@ -23,13 +24,6 @@ function tokenIsElevated(): Promise<boolean> {
   return cached
 }
 
-// Start-Process joins ArgumentList into a single Windows command line.
-// Escape quotes and trailing backslashes before passing that line as a PS literal.
-function quoteWindowsArgument(arg: string): string {
-  const quoted = arg.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1')
-  return '"' + quoted + '"'
-}
-
 /** Only the process with the elevated token may continue into the packaged UI. */
 export async function ensureAdministrator(mode: 'app' | 'install'): Promise<boolean> {
   try {
@@ -39,7 +33,7 @@ export async function ensureAdministrator(mode: 'app' | 'install'): Promise<bool
     // A legacy portable session must restart the outer file. Its extracted
     // executable is removed by NSIS as soon as the original instance exits.
     const file = mode === 'install' ? process.env.PORTABLE_EXECUTABLE_FILE || process.execPath : process.execPath
-    const commandLine = [...args, REQUESTED].map(quoteWindowsArgument).join(' ')
+    const commandLine = windowsCommandLine([...args, REQUESTED])
     await runPowerShell(
       'Start-Process -Verb RunAs -ErrorAction Stop -FilePath ' + psQuote(file) +
       ' -ArgumentList ' + psQuote(commandLine),

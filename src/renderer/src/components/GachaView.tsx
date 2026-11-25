@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react'
-import type { AddonDescriptor, AppEntry, GachaRecord, GachaStats } from '@shared/types'
+import { useCallback, useEffect, useState, type ReactElement } from 'react'
+import type { AddonDescriptor, AppEntry, GachaPoolStat, GachaRecordPage, GachaStats } from '@shared/types'
 import { displayRank, rankClass } from '../format'
 import { confirm } from './confirm'
 import Switch from './Switch'
@@ -26,21 +26,31 @@ export default function GachaView({
 }: GachaViewProps): ReactElement {
   const isArknights = entry.addonId === 'arknights'
   const locked = (): boolean => busy || updating
-  const [records, setRecords] = useState<GachaRecord[]>([])
   const [stats, setStats] = useState<GachaStats | null>(null)
+  const [revision, setRevision] = useState(0)
+  const [error, setError] = useState('')
   const [url, setUrl] = useState('')
   const [busy, setBusy] = useState(false)
   // Per-app (persisted): whether the second-highest rarity is shown.
   const showSecond = entry.gachaShowSecond ?? true
 
-  const refresh = useCallback(async (): Promise<void> => {
-    setRecords(await window.api.gachaList(entry.id))
-    setStats(await window.api.gachaStats(entry.id))
+  useEffect(() => {
+    return window.api.onGachaChanged((appId) => {
+      if (appId === null || appId === entry.id) setRevision((value) => value + 1)
+    })
   }, [entry.id])
 
   useEffect(() => {
-    void refresh()
-  }, [refresh])
+    let active = true
+    void window.api.gachaStats(entry.id).then((next) => {
+      if (!active) return
+      setStats(next)
+      setError('')
+    }).catch((failure: unknown) => {
+      if (active) setError(failure instanceof Error ? failure.message : String(failure))
+    })
+    return () => { active = false }
+  }, [entry.id, entry.addonId, revision])
 
   const updateMiHoYo = useCallback(
     async (source: string): Promise<void> => {
@@ -51,15 +61,14 @@ export default function GachaView({
       setBusy(true)
       try {
         const result = await window.api.gachaUpdateMiHoYo(entry.id, source.trim())
-        onToast(`更新完成：新增 ${result.added} 条，共 ${result.total} 条`)
-        await refresh()
+        onToast(result.message ?? `更新完成：新增 ${result.added} 条，共 ${result.total} 条`)
       } catch (error) {
         onToast(`更新失败：${(error as Error).message}`)
       } finally {
         setBusy(false)
       }
     },
-    [entry.id, onToast, refresh]
+    [entry.id, onToast]
   )
 
   const scanAndUpdate = useCallback(async (): Promise<void> => {
@@ -72,6 +81,8 @@ export default function GachaView({
       } else {
         onToast('未找到链接：请在游戏内打开一次抽卡记录后重试，或粘贴链接')
       }
+    } catch (error) {
+      onToast(`扫描失败：${(error as Error).message}`)
     } finally {
       setBusy(false)
     }
@@ -81,48 +92,47 @@ export default function GachaView({
     setBusy(true)
     try {
       const result = await window.api.gachaLoginArknights(entry.id)
-      onToast(`更新完成：新增 ${result.added} 条，共 ${result.total} 条`)
-      await refresh()
+      onToast(result.message ?? `更新完成：新增 ${result.added} 条，共 ${result.total} 条`)
     } catch (error) {
       onToast(`获取失败：${(error as Error).message}`)
     } finally {
       setBusy(false)
     }
-  }, [entry.id, onToast, refresh])
+  }, [entry.id, onToast])
 
   const doExport = useCallback(async (): Promise<void> => {
-    const path = await window.api.gachaExport(entry.id)
-    if (path) onToast('已导出到 ' + path)
+    try {
+      const result = await window.api.gachaExport(entry.id)
+      if (result) onToast(`已导出${result.format === 'uigf' ? ' UIGF v4.2' : ' KevinLauncher 备份'}到 ${result.path}`)
+    } catch (error) {
+      onToast(`导出失败：${(error as Error).message}`)
+    }
   }, [entry.id, onToast])
 
   const doImport = useCallback(async (): Promise<void> => {
-    const added = await window.api.gachaImport(entry.id)
-    onToast(`导入完成：新增 ${added} 条`)
-    await refresh()
-  }, [entry.id, onToast, refresh])
+    setBusy(true)
+    try {
+      const added = await window.api.gachaImport(entry.id)
+      if (added !== null) onToast(`导入完成：新增 ${added} 条`)
+    } catch (error) {
+      onToast(`导入失败：${(error as Error).message}`)
+    } finally {
+      setBusy(false)
+    }
+  }, [entry.id, onToast])
 
   const doClear = useCallback(async (): Promise<void> => {
     if (!(await confirm('确定清空该应用的抽卡记录吗？'))) return
-    await window.api.gachaClear(entry.id)
-    await refresh()
-    onToast('已清空')
-  }, [entry.id, onToast, refresh])
+    try {
+      await window.api.gachaClear(entry.id)
+      onToast('已清空')
+    } catch (error) {
+      onToast(`清空失败：${(error as Error).message}`)
+    }
+  }, [entry.id, onToast])
 
   const topRank = stats?.topRank ?? 5
   const secondRank = stats?.secondRank ?? null
-  const minRank = showSecond ? secondRank ?? Math.max(0, topRank - 1) : topRank
-
-  const byGroup = useMemo(() => {
-    const map = new Map<string, GachaRecord[]>()
-    for (const record of records) {
-      if (record.rankType < minRank) continue
-      const group = record.group ?? record.gachaType
-      const list = map.get(group)
-      if (list) list.push(record)
-      else map.set(group, [record])
-    }
-    return map
-  }, [records, minRank])
 
   return (
     <div className="page">
@@ -130,7 +140,7 @@ export default function GachaView({
         <div>
           <h1 className="page-title">{entry.name} · 抽卡记录</h1>
           <p className="page-subtitle">
-            {stats && stats.total > 0 ? `共 ${stats.total} 条记录` : '尚未获取记录'}
+            {error || (stats && stats.total > 0 ? `共 ${stats.total} 条记录` : stats ? '尚未获取记录' : '加载中…')}
           </p>
         </div>
         <div className="page-actions">
@@ -174,6 +184,11 @@ export default function GachaView({
             <button className="btn" disabled={locked()} onClick={() => void doExport()}>
               导出
             </button>
+            {!isArknights && (
+              <button className="btn ghost" onClick={() => void window.api.openExternal('https://uigf.org/zh/standards/uigf.html')}>
+                UIGF 格式
+              </button>
+            )}
             <button className="btn ghost" disabled={locked()} onClick={() => void doClear()}>
               清空
             </button>
@@ -223,52 +238,88 @@ export default function GachaView({
         ) : (
           <div className="pools">
             {stats?.pools.map((pool) => {
-              const poolRecords = byGroup.get(pool.group) ?? []
               return (
                 <div className="pool-col" key={pool.group}>
                   <div className="pool-col-head">
                     <div className="pool-col-name">{pool.bannerName}</div>
-                    <div className="pool-col-count">{pool.count} 抽</div>
+                    <div className="pool-col-count">{pool.uid ? `UID ${pool.uid}` : '账号未记录'} · {pool.count} 抽</div>
                   </div>
 
                   <div className="pool-pity">
                     <div className="pool-pity-line">
                       <span className="pp-tier">最高 {displayRank(entry.addonId, pool.topRank)}</span>
-                      <span className="pp-val">已 {pool.topPity} 抽未出</span>
+                      <span className="pp-val">{pool.pityKnown ? `已 ${pool.topPity} 抽未出` : '缺少历史信息'}</span>
                     </div>
                     {showSecond && pool.secondRank != null && (
                       <div className="pool-pity-line">
                         <span className="pp-tier">
                           次高 {displayRank(entry.addonId, pool.secondRank)}
                         </span>
-                        <span className="pp-val">已 {pool.secondPity ?? 0} 抽未出</span>
+                        <span className="pp-val">{pool.pityKnown ? `已 ${pool.secondPity ?? 0} 抽未出` : '缺少历史信息'}</span>
                       </div>
                     )}
                   </div>
 
-                  <div className="pool-records">
-                    {poolRecords.length === 0 ? (
-                      <div className="pool-empty">无符合品级的记录</div>
-                    ) : (
-                      poolRecords.map((record) => (
-                        <div className="pool-row" key={record.id}>
-                          <span className={`rank ${rankClass(record.rankType, topRank)}`}>
-                            {displayRank(entry.addonId, record.rankType)}
-                          </span>
-                          <span className="pool-row-name">{record.itemName}</span>
-                          <span className="pool-row-pity">
-                            {record.pityAtPull != null ? `${record.pityAtPull}` : '—'}
-                          </span>
-                        </div>
-                      ))
-                    )}
-                  </div>
+                  <PoolRecords
+                    key={String(showSecond)}
+                    appId={entry.id} pool={pool} showSecond={showSecond} revision={revision}
+                  />
                 </div>
               )
             })}
           </div>
         )}
       </div>
+    </div>
+  )
+}
+
+function PoolRecords({
+  appId, pool, showSecond, revision
+}: { appId: string; pool: GachaPoolStat; showSecond: boolean; revision: number }): ReactElement {
+  const [page, setPage] = useState<GachaRecordPage | null>(null)
+  const [offset, setOffset] = useState(0)
+  const [error, setError] = useState('')
+  useEffect(() => {
+    let active = true
+    void window.api.gachaPage(appId, pool.group, showSecond, offset).then((next) => {
+      if (!active) return
+      if (next.offset > 0 && next.offset >= next.matched) {
+        setOffset(Math.max(0, Math.floor((next.matched - 1) / next.limit) * next.limit))
+        return
+      }
+      setPage(next)
+      setError('')
+    }).catch((failure: unknown) => {
+      if (active) setError(failure instanceof Error ? failure.message : String(failure))
+    })
+    return () => { active = false }
+  }, [appId, pool.group, showSecond, offset, revision])
+
+  return (
+    <div className="pool-records">
+      {error && <div className="pool-empty">{error}</div>}
+      {page?.records.map((record) => (
+        <div className="pool-row" key={record.id}>
+          <span className={`rank ${rankClass(record.rankType, pool.topRank)}`}>
+            {displayRank(pool.game, record.rankType)}
+          </span>
+          <span className="pool-row-name">{record.itemName || record.itemId}</span>
+          <span className="pool-row-pity">{record.pityAtPull ?? '—'}</span>
+        </div>
+      ))}
+      {page?.matched === 0 && <div className="pool-empty">无符合品级的记录</div>}
+      {page && page.matched > page.limit && (
+        <div className="pool-col-head">
+          <button className="btn sm ghost" disabled={page.offset === 0 || offset !== page.offset} onClick={() => setOffset(page.offset - page.limit)}>
+            上一页
+          </button>
+          <span className="pool-col-count">{page.offset + 1}–{page.offset + page.records.length} / {page.matched}</span>
+          <button className="btn sm ghost" disabled={page.offset + page.limit >= page.matched || offset !== page.offset} onClick={() => setOffset(page.offset + page.limit)}>
+            下一页
+          </button>
+        </div>
+      )}
     </div>
   )
 }

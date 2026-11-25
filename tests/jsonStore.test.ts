@@ -17,7 +17,7 @@ const empty = (): Doc => ({ version: 1, items: [] })
 describe('openJsonStore', () => {
   it('starts empty (and writable) when the file is missing', async () => {
     const file = join(await tempDir(), 'doc.json')
-    expect(await openJsonStore(file, empty, 'test')).toEqual({ data: empty(), writable: true })
+    expect(await openJsonStore(file, empty, 'test')).toEqual({ data: empty(), writable: true, status: 'missing' })
   })
 
   it('returns the parsed value', async () => {
@@ -25,7 +25,8 @@ describe('openJsonStore', () => {
     await fs.writeFile(file, '{"version":1,"items":["a"]}')
     expect(await openJsonStore<Doc>(file, empty, 'test')).toEqual({
       data: { version: 1, items: ['a'] },
-      writable: true
+      writable: true,
+      status: 'ok'
     })
   })
 
@@ -33,7 +34,7 @@ describe('openJsonStore', () => {
     const file = join(await tempDir(), 'doc.json')
     await fs.writeFile(file, '{not json')
     const result = await openJsonStore<Doc>(file, empty, 'test')
-    expect(result).toEqual({ data: empty(), writable: true })
+    expect(result).toMatchObject({ data: empty(), writable: true, status: 'parse-error' })
     expect(await fs.readFile(`${file}.corrupt`, 'utf8')).toBe('{not json')
   })
 
@@ -43,5 +44,6 @@ describe('openJsonStore', () => {
     const result = await openJsonStore<Doc>(dir, empty, 'test')
     expect(result.data).toEqual(empty())
     expect(result.writable).toBe(false)
+    expect(result.status).toBe('read-error')
   })
 })

@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
+import { promises as fs } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { UpdateManager } from '../src/main/update/updateManager'
 import * as jobs from '../src/main/update/hoyoJob'
 import { HoYoSteps } from '../src/main/update/hoyoSchedule'
@@ -49,9 +52,12 @@ describe('HoYo game task ownership', () => {
     const listener = vi.fn()
     manager.onProgress(listener)
     const first = manager.start('first', 'preDownload', 'genshin', 'D:/game')
+    await vi.waitFor(() => expect(run).toHaveBeenCalledOnce())
     const second = manager.start('second', 'preDownload', 'genshin', 'd:/GAME')
+    await vi.waitFor(() => expect(manager.status('second')).toMatchObject({
+      appId: 'second', phase: 'downloading', taskId: manager.status('first').taskId
+    }))
     expect(run).toHaveBeenCalledOnce()
-    expect(manager.status('second')).toMatchObject({ appId: 'second', phase: 'downloading' })
     done.resolve()
     await Promise.all([first, second])
     for (const appId of ['first', 'second']) {
@@ -70,6 +76,7 @@ describe('HoYo game task ownership', () => {
       }).mockResolvedValueOnce(undefined)
     const first = manager.start('first', 'update', 'genshin', 'D:/game')
     const second = manager.start('second', 'update', 'genshin', 'D:/game')
+    await vi.waitFor(() => expect(manager.status('second').phase).toBe('downloading'))
     manager.cancel('second')
     hold.resolve()
     await Promise.all([first, second])
@@ -93,18 +100,93 @@ describe('HoYo game task ownership', () => {
         controller.signal.throwIfAborted()
       })
     const first = manager.start('one', 'preDownload', 'zzz', 'D:/A')
+    await vi.waitFor(() => expect(signals).toHaveLength(1))
     const next = manager.start('two', 'update', 'zzz', 'D:/B')
+    await vi.waitFor(() => expect(signals[0].aborted).toBe(true))
     expect(signals).toHaveLength(1)
-    expect(signals[0].aborted).toBe(true)
     firstDone.resolve()
     await first
     await vi.waitFor(() => expect(signals).toHaveLength(2))
-    const stopped = manager.stopHoYoTasks()
+    const stopped = manager.stopTasks()
     expect(signals[1].aborted).toBe(true)
     await expect(manager.start('three', 'update', 'starrail', 'D:/C')).rejects.toThrow('退出')
     secondDone.resolve()
     await Promise.all([next, stopped])
     expect(manager.status('one').phase).toBe('paused')
     expect(manager.status('two').phase).toBe('paused')
+  })
+
+  it('coordinates real directory aliases across games and drains Arknights before shutdown finishes', async () => {
+    const root = await fs.mkdtemp(join(tmpdir(), 'kl-directory-lock-'))
+    const real = join(root, 'game')
+    let alias = join(root, 'linked')
+    const manager = new UpdateManager()
+    const hold = deferred()
+    let signal: AbortSignal | undefined
+    type Run = (mode: string, dir: string, controller: AbortController) => Promise<void>
+    const run = vi.spyOn(manager as unknown as { runArknights: Run }, 'runArknights')
+      .mockImplementation(async (_mode, _dir, controller) => {
+        signal = controller.signal
+        await hold.promise
+        signal.throwIfAborted()
+      })
+    try {
+      await fs.mkdir(real)
+      try { await fs.symlink(real, alias, process.platform === 'win32' ? 'junction' : 'dir') }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EPERM') throw error
+        alias = process.platform === 'win32' ? real.toUpperCase() : real
+      }
+      const started = manager.start('original', 'update', 'arknights', real)
+      await vi.waitFor(() => expect(run).toHaveBeenCalledOnce())
+      const shared = manager.start('alias', 'update', 'arknights', alias)
+      await vi.waitFor(() => expect(manager.status('alias').taskId).toBe(manager.status('original').taskId))
+      await expect(manager.start('other-game', 'update', 'genshin', alias)).rejects.toThrow('重叠')
+      let stopped = false
+      const stopping = manager.stopTasks().then(() => { stopped = true })
+      expect(signal?.aborted).toBe(true)
+      expect(stopped).toBe(false)
+      hold.resolve()
+      await Promise.all([started, shared, stopping])
+      expect(manager.status('original').phase).toBe('paused')
+      expect(manager.status('alias').phase).toBe('paused')
+    } finally {
+      hold.resolve()
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('releases preparation after a five-minute pause and resumes the staged operation', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const manager = new UpdateManager()
+    const atUpdate = deferred()
+    const held = deferred()
+    const first = vi.fn(async () => undefined)
+    const apply = vi.fn(async ({ signal }: { signal: AbortSignal }) => {
+      atUpdate.resolve()
+      await held.promise
+      signal.throwIfAborted()
+    })
+    const park = vi.fn(async () => undefined)
+    const prepare = vi.spyOn(jobs, 'prepareHoYoJob')
+      .mockResolvedValue(new HoYoSteps([first, apply], async () => {}, park))
+    try {
+      const task = manager.start('parked', 'update', 'genshin', 'D:/game')
+      await atUpdate.promise
+      manager.cancel('parked')
+      held.resolve()
+      await task
+      await vi.advanceTimersByTimeAsync(300_000)
+      expect(park).toHaveBeenCalledOnce()
+      await manager.start('parked', 'update', 'genshin', 'D:/game')
+      expect(first).toHaveBeenCalledOnce()
+      expect(apply).toHaveBeenCalledTimes(2)
+      expect(prepare).toHaveBeenCalledOnce()
+      expect(manager.status('parked').phase).toBe('done')
+    } finally {
+      held.resolve()
+      prepare.mockRestore()
+      vi.useRealTimers()
+    }
   })
 })

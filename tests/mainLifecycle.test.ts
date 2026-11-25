@@ -45,19 +45,24 @@ async function start(mode: 'app' | 'install' | 'uninstall', ownsLock = true, pac
     path: { join },
     '@electron-toolkit/utils': { electronApp: { setAppUserModelId() {} }, is: { dev: true } },
     './services/windowRole': { bindWindowRole() {} },
+    './services/windowActivity': { observeWindowActivity() {} },
     './ipc': {
       registerIpc: (role: string) => events.push(role), warmUpFonts() {},
       appUpdate: { start() {}, cleanupOldVersions() {} }
     },
-    './services/appStore': { AppStore: { launcherSettings: () => ({ autoStart: 'off' }) } },
+    './services/appStore': { AppStore: { launcherSettings: async () => ({ autoStart: 'off' }) } },
     './services/appIcon': { applyLauncherIcon() {}, launcherIconPaths: loadIcon },
-    './services/behavior': { markQuitting() {}, setCloseToTray() {}, ensureTray() {} },
-    './services/autostart': { startedHidden: () => false, applyAutoStart() {} },
+    './services/behavior': { markQuitting() {}, setCloseToTray() {}, setMainWindowProvider() {}, ensureTray() {} },
+    './services/autostart': { startedHidden: () => false, applyAutoStart: async () => {} },
     './services/dataDir': { applyDataDir() {} },
+    './services/dataMoveJournal': { recoverDataMove: async () => {} },
     './services/themePolicy': { applyThemePolicyOnStartup: policy },
     './services/shutdown': { flushBeforeShutdown: flush },
+    './services/setupTask': { setupTaskActive: () => false },
+    './services/appActivation': { recordApplicationStartup() {} },
+    './services/install': { SETUP_EXIT_ARGUMENT: '--kevin-exit-for-setup' },
     './services/settingsBackup': { recoverSettingsImport: () => events.push('recover') },
-    './services/housekeeping': { cleanUpdateStaging() {}, cleanArknightsStaging() {} },
+    './services/housekeeping': { cleanUpdateStaging() {}, cleanArknightsStaging: async () => {} },
     './services/elevation': { isElevated: async () => elevated, ensureAdministrator },
     './services/logger': { log() {} }
   }

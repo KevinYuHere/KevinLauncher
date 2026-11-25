@@ -1,12 +1,16 @@
 import { app } from 'electron'
 import { execFile } from 'child_process'
 import { promises as fs } from 'fs'
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'path'
+import { isAbsolute, join, relative } from 'path'
 import { directoriesOverlap, GAME_FILE_CATALOG_NAME } from '@shared/paths'
 import { loadJsonSafe, writeFileAtomic } from './atomicFile'
-import { createSiblingWorkspace, isFileSystemRoot } from './directoryPath'
+import { createSiblingWorkspace, isFileSystemRoot, realDirectoryPath, sameDirectoryPath } from './directoryPath'
+import { normalizeLauncherConfig } from './configValidation'
+import { clearDataMoveJournal, DATA_MOVE_PREFIX, DataDirectoryRecoveryError, recordDataMove, recoverDataMove } from './dataMoveJournal'
+import { hasPersistedSettings, verifySnapshot } from './settingsBackup'
 import { log } from './logger'
 import { runPowerShellSync } from './powershell'
+import { trialBuild, trialDirectory } from './buildIdentity'
 
 /**
  * Where the launcher keeps its data (`config.json`, playtime, gacha, icons …).
@@ -22,12 +26,14 @@ import { runPowerShellSync } from './powershell'
 const APP_KEY = 'HKCU\\Software\\KevinLauncher'
 export const BACKUP_DIR_NAME = 'update-backup'
 export const PREVIOUS_BACKUP_DIR_NAME = `${BACKUP_DIR_NAME}.previous`
+export { realDirectoryPath } from './directoryPath'
 // The index is a regenerable cache, but can be kept when moving a quiescent
 // data directory. An update backup must not copy the database and WAL apart.
 const GAME_FILE_INDEX = new Set([GAME_FILE_CATALOG_NAME, `${GAME_FILE_CATALOG_NAME}-wal`])
 
 /** Default data directory (`%APPDATA%\kevin-launcher`). */
 export function defaultDataDir(): string {
+  if (trialBuild) return trialDirectory('data')
   return join(app.getPath('appData'), 'kevin-launcher')
 }
 
@@ -38,6 +44,7 @@ export function currentDataDir(): string {
 
 /** Reads the configured directory from the registry (synchronous, pre-ready). */
 export function storedDataDir(): string | null {
+  if (trialBuild) return null
   try {
     const value = runPowerShellSync(
       `$key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\\KevinLauncher'); if ($key) { $key.GetValue('DataDir') }`
@@ -50,18 +57,11 @@ export function storedDataDir(): string | null {
 
 /** Points Electron at the configured directory. Call before the app is ready. */
 export function applyDataDir(): void {
-  // Sandbox override (used for local trials): takes priority over the registry
-  // so a test build can run against a throwaway copy of the user's data without
-  // touching the real data directory or the stored setting.
-  const sandbox = process.env.KEVIN_LAUNCHER_DATA_DIR
-  if (sandbox && sandbox.trim()) {
-    try {
-      app.setPath('userData', sandbox.trim())
-      log(`dataDir: sandbox ${sandbox.trim()}`)
-      return
-    } catch (error) {
-      log(`dataDir: cannot use sandbox ${sandbox} (${(error as Error).message})`)
-    }
+  if (trialBuild) {
+    const data = trialDirectory('data')
+    app.setPath('userData', data)
+    app.setPath('sessionData', data)
+    return
   }
   const custom = storedDataDir()
   if (!custom) return
@@ -76,6 +76,7 @@ export function applyDataDir(): void {
 
 /** Persists the configured directory (used by the installer and the settings). */
 export function writeDataDir(dir: string): Promise<void> {
+  if (trialBuild) throw new Error('测试版使用固定的隔离数据目录')
   return new Promise((resolve, reject) => {
     execFile(
       'reg',
@@ -114,7 +115,8 @@ const TRANSIENT_ENTRIES = new Set([
   'update-staging',
   'thumbs',
   'hoyo-cache',
-  'predownload'
+  'predownload',
+  'data-move.json'
 ])
 
 /** True for entries a migration/backup must skip. */
@@ -123,6 +125,7 @@ export function isTransientEntry(name: string): boolean {
   return (
     TRANSIENT_ENTRIES.has(lower) ||
     lower.endsWith('.log') ||
+    lower === 'launcher.log.1' ||
     lower.startsWith('simulate.') ||
     lower.startsWith('singleton') ||
     lower.startsWith('import-staging') ||
@@ -191,21 +194,13 @@ export async function migrateData(
 
 /** A reachable config must also be readable and structurally usable. */
 export async function hasData(dir: string): Promise<boolean> {
-  const result = await loadJsonSafe<{ apps?: unknown } | null>(join(dir, 'config.json'))
-  return result.status === 'ok' && Array.isArray(result.value?.apps)
-}
-
-/** Resolve existing ancestors too, so junctions cannot disguise overlapping paths. */
-export async function realDirectoryPath(path: string): Promise<string> {
-  if (!isAbsolute(path)) throw new Error('请选择绝对路径')
-  const canonical = resolve(path)
+  const result = await loadJsonSafe<unknown>(join(dir, 'config.json'))
+  if (result.status !== 'ok') return false
   try {
-    return await fs.realpath(canonical)
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-    if (isFileSystemRoot(canonical)) throw error
-    const parent = dirname(canonical)
-    return join(await realDirectoryPath(parent), basename(canonical))
+    normalizeLauncherConfig(result.value)
+    return true
+  } catch {
+    return false
   }
 }
 
@@ -230,12 +225,14 @@ export async function migrateDataDirectory(
   preparation: {
     beforeCopy?: () => Promise<void>
     beforePublish?: (stage: string) => Promise<void>
+    recoverable?: boolean
   } = {}
 ): Promise<number> {
   const source = await movableDataPath(from)
   const target = await movableDataPath(to)
   if (directoriesOverlap(source, target)) throw new Error('新旧数据目录不能相同或互相包含')
-  const canCleanSource = resolve(from).toLowerCase() === source.toLowerCase()
+  const canCleanSource = sameDirectoryPath(from, source)
+  if (preparation.recoverable) await recoverDataMove(source)
   const targetExists = await fs.stat(target).then((stat) => {
     if (!stat.isDirectory()) throw new Error('目标路径不是目录')
     return true
@@ -244,12 +241,13 @@ export async function migrateDataDirectory(
     return false
   })
   await preparation.beforeCopy?.()
-  const work = await createSiblingWorkspace(target, '.kevin-data-move-')
+  const work = await createSiblingWorkspace(target, DATA_MOVE_PREFIX)
   const stage = join(work, 'next')
   const previous = join(work, 'previous')
   let originalSaved = false
   let stagedPublished = false
   let preserveWork = false
+  let journalArmed = false
   try {
     if (!(await hasData(source))) {
       throw new Error('源配置读取失败，已保留原数据目录')
@@ -267,6 +265,13 @@ export async function migrateDataDirectory(
       throw new Error('数据复制不完整或配置读取失败，已保留原数据目录')
     }
     await preparation.beforePublish?.(stage)
+    await verifySnapshot(stage)
+    if (!sameDirectoryPath(await realDirectoryPath(source), source) ||
+        !sameDirectoryPath(await realDirectoryPath(target), target)) throw new Error('数据目录的实际路径已变化')
+    if (preparation.recoverable) {
+      journalArmed = true
+      await recordDataMove({ source, target, work, hadTarget: targetExists }, stage)
+    }
     if (targetExists) {
       await fs.rename(target, previous)
       originalSaved = true
@@ -274,11 +279,20 @@ export async function migrateDataDirectory(
     await fs.rename(stage, target)
     stagedPublished = true
     await commit(target)
-    if (canCleanSource) {
+    if (journalArmed) {
+      try {
+        await clearDataMoveJournal(source)
+        await clearDataMoveJournal(target)
+      } catch (error) {
+        preserveWork = true
+        log(`dataDir: switched directories, recovery files retained at ${work} (${String(error)})`)
+      }
+    }
+    if (canCleanSource && !preserveWork) {
       await fs.rm(source, { recursive: true, force: true }).catch((error) => {
         log(`dataDir: could not remove the old directory (${String(error)})`)
       })
-    } else {
+    } else if (!canCleanSource) {
       log('dataDir: retained the original data behind a reparse point')
     }
     return copied
@@ -286,11 +300,12 @@ export async function migrateDataDirectory(
     try {
       if (stagedPublished) await fs.rename(target, stage)
       if (originalSaved) await fs.rename(previous, target)
+      if (journalArmed) await clearDataMoveJournal(source)
     } catch (rollback) {
       preserveWork = true
       log(`dataDir: could not roll back ${target} (${String(rollback)})`)
       const retained = originalSaved ? previous : target
-      throw new Error(`无法立即恢复目标目录，已保留文件于 ${retained}。迁移失败原因：${String(error)}`)
+      throw new DataDirectoryRecoveryError(`无法立即恢复目标目录，已保留文件于 ${retained}。迁移失败原因：${String(error)}`)
     }
     throw error
   } finally {
@@ -322,11 +337,7 @@ export async function seedDataDir(
     return null
   })
   if (!config) {
-    const files = await fs.readdir(source).catch((error: NodeJS.ErrnoException) => {
-      if (error.code !== 'ENOENT') throw error
-      return []
-    })
-    if (files.some((name) => !isTransientEntry(name))) {
+    if (await hasPersistedSettings(source)) {
       throw new Error('当前目录有数据但缺少配置，已保留原目录')
     }
     await fs.mkdir(destination, { recursive: true })
@@ -338,7 +349,7 @@ export async function seedDataDir(
     await commit(destination)
     return { copied: 0, failed: 0, keptExisting: false }
   }
-  const copied = await migrateDataDirectory(fallback, destination, commit)
+  const copied = await migrateDataDirectory(fallback, destination, commit, { recoverable: true })
   return { copied, failed: 0, keptExisting: false }
 }
 
@@ -350,16 +361,16 @@ export async function seedDataDir(
 export async function switchDataDir(
   target: string,
   checkpoint: () => Promise<void>,
-  onProgress?: (step: string) => void
+  onProgress?: (step: string) => void,
+  onCommitted?: () => void
 ): Promise<void> {
   const from = currentDataDir()
-  if (resolve(from).toLowerCase() === resolve(target).toLowerCase()) return
+  if (sameDirectoryPath(await realDirectoryPath(from), await realDirectoryPath(target))) return
   onProgress?.(`正在迁移数据到 ${target}…`)
   await migrateDataDirectory(from, target, async (destination) => {
     await writeDataDir(destination)
-    log(`dataDir: switched to ${destination}`)
-    onProgress?.('正在清理旧目录…')
   }, {
+    recoverable: true,
     beforeCopy: checkpoint,
     beforePublish: async (stage) => {
       // A large wallpaper copy can take time. Capture the last segment before
@@ -382,6 +393,8 @@ export async function switchDataDir(
       }
     }
   })
+  onCommitted?.()
+  log(`dataDir: switched to ${target}`)
   app.relaunch()
   app.exit(0)
 }

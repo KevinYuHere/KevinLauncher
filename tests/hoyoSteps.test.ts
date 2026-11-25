@@ -9,6 +9,8 @@ import { HoYoSteps } from '../src/main/update/hoyoSchedule'
 import { HoYoWorker, HoYoWorkerStopped, type SophonSetup } from '../src/main/update/hoyoWorker'
 import { fields } from '../src/main/update/sophonProto'
 import { hoyoPortBudget } from '../src/main/update/hoyoNetwork'
+import { gameWorkKey, temporaryGameFile } from '../src/main/update/hoyoTemp'
+import { openSophonCacheOwnership } from '../src/main/update/sophonCacheOwnership'
 import { startHoyoHttpFixture } from './fixtures/hoyoHttpFixture'
 
 const md5 = (bytes: Buffer) => createHash('md5').update(bytes).digest('hex')
@@ -74,7 +76,7 @@ it.skipIf(typeof zlib.zstdCompressSync !== 'function').each(['original', 'empty-
     const script = join(root, 'sophon-worker.mjs')
     await build({ entryPoints: ['src/main/workers/sophonWorker.ts'], outfile: script, format: 'esm', platform: 'node', bundle: true,
       alias: { '@shared': resolve('src/shared') }, external: ['electron', 'node:sqlite'], logLevel: 'silent' })
-    const game = join(root, '游戏文件')
+    const game = join(await fs.realpath(root), '游戏文件')
     await fs.mkdir(game)
     const source = Buffer.from('old'), output = Buffer.from('changed')
     // A hand-encoded literal HDIFF13. The single RLE instruction describes unmodified literal output bytes.
@@ -92,9 +94,11 @@ it.skipIf(typeof zlib.zstdCompressSync !== 'function').each(['original', 'empty-
     const manifest = Buffer.concat([data(1, item), num(3, 2)])
     fixture.route('/manifest', { body: manifest })
     fixture.route('/blob', { body: blob, interrupt: { after: 9, mode: 'wait' } }, { body: blob })
+    const cacheTarget = gameWorkKey('test', '1.0', '2.0', 'sophon-cache')
+    const work = gameWorkKey('test', '1.0', '2.0', 'preDownload')
     const setup: SophonSetup = {
       launcherVersion: '2.0.5', gameId: 'test', userData: join(root, 'user'), dir: game, version: '1.0', predownload: true,
-      hpatchz: resolve('resources/hpatchz.exe'), blacklist: [], plan: {
+      hpatchz: resolve('resources/hpatchz.exe'), blacklist: [], work, cacheTarget, plan: {
         kind: 'patch', mainBuild: { buildId: 'm', tag: '2.0', categories: [] },
         patch: { patchId: 'p', tag: '2.0', categories: [{ categoryId: 'game', matchingField: 'game', manifestId: 'manifest',
           manifestMd5: md5(manifest), manifestSize: manifest.length, manifestCompression: 0, manifestSuffix: '', manifestUrlPrefix: fixture.url,
@@ -106,7 +110,7 @@ it.skipIf(typeof zlib.zstdCompressSync !== 'function').each(['original', 'empty-
     await worker.run({ type: 'prepare', setup }, ctx)
     const controller = new AbortController()
     await expect(worker.run({ type: 'update' }, { ...silent, signal: controller.signal, progress(n) { if (n >= 9) controller.abort() } })).rejects.toThrow()
-    expect((await fs.stat(join(game, 'ldiff', 'blob.tmp'))).size).toBe(9)
+    expect((await fs.stat(temporaryGameFile(game, work, 'cache-downloads', join(game, 'ldiff', 'blob')))).size).toBe(9)
     await worker.run({ type: 'update' }, ctx)
     await worker.close()
     await fs.writeFile(join(game, 'previous.bin'), source)
@@ -114,12 +118,26 @@ it.skipIf(typeof zlib.zstdCompressSync !== 'function').each(['original', 'empty-
     await fs.writeFile(donor, 'unrelated')
     await fs.link(donor, join(game, 'patched.bin.tmp'))
     await fs.link(donor, join(game, 'ldiff', 'blob_2'))
+    const foreign = join(game, 'ldiff', 'foreign.tmp')
+    const next = join(game, 'ldiff', 'next-version-blob')
+    await fs.writeFile(foreign, 'third-party data')
+    await fs.writeFile(next, 'next version')
+    const nextCache = await openSophonCacheOwnership(game, gameWorkKey('test', '2.0', '3.0', 'sophon-cache'))
+    await nextCache.record(next, true)
+    await nextCache.save()
     worker = new HoYoWorker(script)
-    await worker.run({ type: 'prepare', setup: { ...setup, predownload: false } }, ctx)
+    await worker.run({ type: 'prepare', setup: { ...setup, predownload: false, work: gameWorkKey('test', '1.0', '2.0', 'update') } }, ctx)
     await worker.run({ type: 'update' }, ctx)
     await worker.run({ type: 'verify' }, ctx)
     expect(await fs.readFile(join(game, 'patched.bin'))).toEqual(output)
     expect(await fs.readFile(donor, 'utf8')).toBe('unrelated')
+    const cache = await openSophonCacheOwnership(game, cacheTarget)
+    await cache.release()
+    await cache.save()
+    await expect(fs.stat(join(game, 'ldiff', 'blob'))).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await fs.readFile(foreign, 'utf8')).toBe('third-party data')
+    expect(await fs.readFile(next, 'utf8')).toBe('next version')
+    expect(await fs.readFile(join(game, 'ldiff', 'blob_2'), 'utf8')).toBe('unrelated')
     if (noBase) expect(await fs.readFile(join(game, 'previous.bin'))).toEqual(source)
     else await expect(fs.stat(join(game, 'previous.bin'))).rejects.toThrow()
     expect(fixture.requests.filter(r => r.path === '/blob').map(r => r.range)).toEqual([null, 'bytes=9-'])

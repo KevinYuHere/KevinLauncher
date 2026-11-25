@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactElement } from 'react'
 import { useOpenOrigin } from './useOpenOrigin'
+import { useDialogFocus } from './useDialogFocus'
 
 interface ConfirmState {
   message: string
@@ -24,33 +25,54 @@ export function ConfirmHost(): ReactElement | null {
   const [state, setState] = useState<ConfirmState | null>(null)
   const [closing, setClosing] = useState(false)
   const modalRef = useRef<HTMLDivElement>(null)
+  const active = useRef<ConfirmState | null>(null)
+  const queued = useRef<ConfirmState[]>([])
+  const timer = useRef(0)
   useOpenOrigin(modalRef)
 
   useEffect(() => {
     show = (next) => {
+      if (!next) return
+      if (active.current) {
+        queued.current.push(next)
+        return
+      }
+      active.current = next
       setClosing(false)
       setState(next)
     }
     return () => {
       show = null
+      window.clearTimeout(timer.current)
+      active.current?.resolve(false)
+      active.current = null
+      for (const pending of queued.current.splice(0)) pending.resolve(false)
     }
   }, [])
 
-  if (!state) return null
-
   const close = (value: boolean): void => {
-    if (closing) return
+    if (!state || closing) return
     setClosing(true)
-    window.setTimeout(() => {
+    timer.current = window.setTimeout(() => {
+      active.current = queued.current.shift() ?? null
       state.resolve(value)
-      setState(null)
+      setState(active.current)
+      setClosing(false)
     }, 180)
   }
+  useDialogFocus(modalRef, state !== null, () => close(false))
+
+  if (!state) return null
 
   return (
     <div className={`modal-mask${closing ? ' closing' : ''}`}>
       <div
         ref={modalRef}
+        role="alertdialog"
+        aria-modal="true"
+        aria-label="确认"
+        aria-describedby="confirm-message"
+        tabIndex={-1}
         className={`modal confirm-modal wallpaper-region${closing ? ' closing' : ''}`}
         onClick={(e) => e.stopPropagation()}
       >
@@ -59,10 +81,10 @@ export function ConfirmHost(): ReactElement | null {
           <h2>确认</h2>
         </div>
         <div className="modal-body">
-          <p className="confirm-text">{state.message}</p>
+          <p className="confirm-text" id="confirm-message">{state.message}</p>
         </div>
         <div className="modal-footer">
-          <button className="btn" onClick={() => close(false)}>
+          <button className="btn" data-dialog-first onClick={() => close(false)}>
             取消
           </button>
           <button className="btn primary" onClick={() => close(true)}>

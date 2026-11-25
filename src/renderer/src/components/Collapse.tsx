@@ -12,7 +12,8 @@ interface CollapseProps {
  */
 export default function Collapse({ open, children }: CollapseProps): ReactElement {
   return (
-    <div className={`collapse${open ? ' open' : ''}`}>
+    <div className={`collapse${open ? ' open' : ''}`}
+      ref={(el) => { if (el) el.inert = !open }}>
       <div className="collapse-inner">{children}</div>
     </div>
   )

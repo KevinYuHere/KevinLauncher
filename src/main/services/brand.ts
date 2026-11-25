@@ -1,7 +1,7 @@
 import { app } from 'electron'
 import { join } from 'path'
-import { promises as fs } from 'fs'
 import { randomUUID } from 'crypto'
+import { brandIcoName, saveMedia } from './mediaFiles'
 
 /** Wrap a PNG buffer as a single-image 256×256 ICO (for shortcuts). */
 function pngToIco(png: Buffer): Buffer {
@@ -27,30 +27,12 @@ export class BrandStore {
     return join(app.getPath('userData'), 'brand')
   }
 
-  static async ensure(): Promise<void> {
-    await fs.mkdir(this.dir(), { recursive: true })
-  }
-
   static async savePng(buffer: Buffer): Promise<string> {
-    await this.ensure()
-    const name = `${randomUUID()}.png`
-    await fs.writeFile(join(this.dir(), name), buffer)
-    return name
+    return saveMedia(this.dir(), `${randomUUID()}.png`, buffer)
   }
 
   /** Save an .ico (derived from the same PNG) next to `pngFile`. */
   static async saveIcoFor(pngFile: string, png: Buffer): Promise<string> {
-    await this.ensure()
-    const name = `${pngFile.replace(/\.png$/i, '')}.ico`
-    await fs.writeFile(join(this.dir(), name), pngToIco(png))
-    return name
-  }
-
-  static async remove(file: string): Promise<void> {
-    try {
-      await fs.unlink(join(this.dir(), file))
-    } catch {
-      /* ignore missing file */
-    }
+    return saveMedia(this.dir(), brandIcoName(pngFile), pngToIco(png))
   }
 }

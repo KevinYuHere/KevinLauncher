@@ -3,6 +3,8 @@ import { promises as fs } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { applyPayload, listFiles, normalizeInstallDir, staleFiles } from '../src/main/services/install'
+import { managedUninstallPaths, uninstallHelperScript } from '../src/main/services/uninstall'
+import { psQuote, runPowerShellFile, startDetachedPowerShellFile } from '../src/main/services/powershell'
 
 vi.mock('electron', () => ({ app: { isPackaged: false, getVersion: () => '2.0.5' } }))
 
@@ -16,7 +18,7 @@ async function temp(): Promise<string> {
 
 afterEach(async () => {
   vi.restoreAllMocks()
-  await Promise.all([...temporaryDirs].map(dir => fs.rm(dir, { recursive: true, force: true })))
+  await Promise.all([...temporaryDirs].map(dir => fs.rm(dir, { recursive: true, force: true, maxRetries: 5 })))
   temporaryDirs.clear()
 })
 
@@ -32,6 +34,87 @@ describe('staleFiles', () => {
   it('returns nothing when the file set is unchanged', () => {
     expect(staleFiles(['a', 'b'], ['a', 'b'])).toEqual([])
   })
+})
+
+describe('managed uninstall', () => {
+  it('uses only the validated recorded file set', () => {
+    expect(managedUninstallPaths(['KevinLauncher.exe', 'resources/app/main.js', 'INSTALL.JSON']))
+      .toEqual(['KevinLauncher.exe', 'resources/app/main.js', 'INSTALL.JSON'])
+    expect(() => managedUninstallPaths(['KevinLauncher.exe', '../other.txt'])).toThrow('无效路径')
+    expect(() => managedUninstallPaths(['KevinLauncher.exe', 'C:/shared.exe'])).toThrow('无效路径')
+    expect(() => managedUninstallPaths(['KevinLauncher.exe', 'notes.txt '])).toThrow('无效路径')
+  })
+
+  it.skipIf(process.platform !== 'win32')('removes managed files from a Chinese path and preserves unknown files', async () => {
+    const root = await fs.realpath(await temp())
+    const installDir = join(root, '安装 甲')
+    await writeTree(installDir, {
+      'KevinLauncher.exe': 'installed',
+      'resources/中文 模块.dll': 'component',
+      'my files/私有记录.txt': 'keep',
+      'install.json': '{}'
+    })
+    const report = join(root, '卸载结果.txt')
+    const ready = join(root, '准备完成')
+    const commit = join(root, '确认卸载')
+    const backup = join(root, '保留的程序')
+    const script = join(root, '卸载程序.ps1')
+    await fs.writeFile(commit, 'commit')
+    await fs.writeFile(script, '\uFEFF' + uninstallHelperScript({
+      installDir, dataDir: undefined, backup, report, ready, commit,
+      files: managedUninstallPaths(['KevinLauncher.exe', 'resources/中文 模块.dll'])
+    }))
+    await startDetachedPowerShellFile(script)
+    await vi.waitFor(async () => {
+      expect((await fs.readFile(report, 'utf8')).replace(/^\uFEFF/, '')).toBe('complete')
+    }, { timeout: 10000 })
+    expect(await listFiles(installDir)).toEqual(['my files/私有记录.txt'])
+  }, 12000)
+
+  it.skipIf(process.platform !== 'win32')('keeps system entries on file rollback and resumes cleanup after commit', async () => {
+    const root = await fs.realpath(await temp())
+    const installDir = join(root, '运行位置')
+    const file = join(installDir, 'KevinLauncher.exe')
+    const failurePoint = join(installDir, 'locked.dll')
+    const report = join(root, 'result.txt')
+    const ready = join(root, 'ready')
+    const commit = join(root, 'commit')
+    const backup = join(root, 'quarantine')
+    const script = join(root, 'helper.ps1')
+    const systemEntry = join(root, 'system-entry')
+    const allowCleanup = join(root, 'allow-cleanup')
+    await writeTree(installDir, { 'KevinLauncher.exe': 'program', 'install.json': '{}' })
+    await fs.mkdir(failurePoint)
+    await fs.writeFile(systemEntry, 'keep until committed')
+    const stage = async () => {
+      await fs.writeFile(commit, 'commit')
+      await fs.writeFile(script, '\uFEFF' + uninstallHelperScript({
+        installDir, dataDir: undefined, backup, report, ready, commit,
+        files: managedUninstallPaths(['KevinLauncher.exe', 'locked.dll']),
+        cleanup: `if (!(Test-Path -LiteralPath ${psQuote(allowCleanup)})) { throw 'cleanup fixture' }
+Remove-Item -LiteralPath ${psQuote(systemEntry)} -ErrorAction Stop`
+      }))
+    }
+
+    await stage()
+    await expect(runPowerShellFile(script, 10000)).rejects.toThrow()
+    expect((await fs.readFile(report, 'utf8')).replace(/^\uFEFF/, '')).toMatch(/^failed: Expected file/)
+    expect(await fs.readFile(file, 'utf8')).toBe('program')
+    expect(await fs.readFile(systemEntry, 'utf8')).toBe('keep until committed')
+
+    await fs.rmdir(failurePoint)
+    await fs.rmdir(backup)
+    await stage()
+    await expect(runPowerShellFile(script, 10000)).rejects.toThrow()
+    expect((await fs.readFile(report, 'utf8')).replace(/^\uFEFF/, '')).toMatch(/^cleanup pending: cleanup fixture/)
+    await expect(fs.access(file)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await fs.readFile(systemEntry, 'utf8')).toBe('keep until committed')
+
+    await fs.writeFile(allowCleanup, 'yes')
+    await runPowerShellFile(script, 10000, ['-ResumeCleanup'])
+    expect((await fs.readFile(report, 'utf8')).replace(/^\uFEFF/, '')).toBe('complete')
+    await expect(fs.access(systemEntry)).rejects.toMatchObject({ code: 'ENOENT' })
+  }, 30000)
 })
 
 describe('listFiles', () => {
@@ -113,6 +196,23 @@ async function expectOldVersion(target: string): Promise<void> {
 }
 
 describe('applyPayload', () => {
+  it('preserves the old tree on system setup failure and resumes the post-commit phase', async () => {
+    const { root, source, target } = await installFixture()
+    const afterCommit = vi.fn<() => Promise<void>>(async () => { throw new Error('shortcut write denied') })
+    const lifecycle = { beforeStage: async () => {}, afterCommit }
+    await expect(applyPayload(source, target, undefined, lifecycle)).rejects.toThrow('系统设置尚未完成')
+    const saved = (await fs.readdir(root)).find(name => name.startsWith('.kevin-install-retired-'))
+    expect(saved).toBeDefined()
+    await expectOldVersion(join(root, saved!, 'previous'))
+    expect(await fs.readFile(join(target, 'KevinLauncher.exe'), 'utf8')).toBe('new executable')
+    afterCommit.mockResolvedValueOnce(undefined)
+    const onProgress = vi.fn()
+    await applyPayload(source, target, onProgress, lifecycle)
+    expect(afterCommit).toHaveBeenCalledTimes(2)
+    expect(onProgress).not.toHaveBeenCalled()
+    expect(await fs.readdir(root)).not.toContain(saved)
+    expect(await fs.readFile(join(target, 'my own data.txt'), 'utf8')).toBe('preserve this')
+  })
   it('stages next to the target even when mkdir rejects its existing parent like a Windows root', async () => {
     const { root, source, target } = await installFixture()
     const mkdir = fs.mkdir.bind(fs)

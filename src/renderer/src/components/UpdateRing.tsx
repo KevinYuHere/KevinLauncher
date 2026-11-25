@@ -37,7 +37,8 @@ export default function UpdateRing({
 
   const installing = state.phase === 'installing' || state.phase === 'done'
   const paused = state.phase === 'paused'
-  const critical = state.critical === true || info?.critical === true
+  const failed = state.phase === 'error'
+  const critical = state.phase === 'idle' ? info?.critical === true : state.critical === true
   const active =
     state.phase === 'downloading' || paused || installing || state.phase === 'error'
   if (!info && !active) return null
@@ -49,7 +50,7 @@ export default function UpdateRing({
       ? (state.total - state.transferred) / state.bytesPerSecond
       : null
   const shownBytes = installing
-    ? (state.installPercent / 100) * (info?.installSize ?? 0)
+    ? (state.installPercent / 100) * (state.installTotal ?? 0)
     : state.transferred
 
   const label = installing
@@ -74,8 +75,11 @@ export default function UpdateRing({
       className={`rail-update${critical ? ' is-critical' : ''}`}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
+      onFocus={() => setHover(true)}
+      onBlur={() => setHover(false)}
     >
-      <button className="rail-item rail-update-btn" title={label} onClick={click}>
+      <button className="rail-item rail-update-btn" aria-label={label} onClick={click}
+        aria-disabled={installing || (critical && !['idle', 'error'].includes(state.phase))}>
         {state.phase === 'idle' || state.phase === 'error' ? (
           <span className="rail-update-icon">
             {themedRing && <RailShield />}
@@ -113,13 +117,13 @@ export default function UpdateRing({
           <span className="wp-region-layer" aria-hidden="true" />
           <div className="rail-pop-head">
             {critical ? '重要更新 · ' : ''}
-            {installing ? '正在安装更新' : paused ? '已暂停' : '正在下载更新'}
+            {failed ? state.message || '更新失败' : installing ? '正在安装更新' : paused ? '已暂停' : '正在下载更新'}
           </div>
           <div className="rail-pop-percent">{percent}%</div>
           <div className="rail-pop-row">
             <span>
               {installing ? '安装' : '下载'} {formatBytes(shownBytes)} /{' '}
-              {formatBytes(installing ? (info?.installSize ?? 0) : state.total)}
+              {formatBytes(installing ? (state.installTotal ?? 0) : state.total)}
             </span>
             <span>{installing ? '请勿关闭' : critical ? '不可暂停' : formatEta(remaining)}</span>
           </div>

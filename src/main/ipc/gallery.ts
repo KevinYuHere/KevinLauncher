@@ -1,15 +1,10 @@
 import { BrowserWindow, ClipboardItem, clipboard, Menu, nativeImage, shell } from 'electron'
 import { handleIpc } from './access'
-import { promises as fs } from 'fs'
-import { extname, join } from 'path'
-import type { GalleryItem } from '@shared/types'
+import { extname } from 'path'
 import { AppStore } from '../services/appStore'
+import { collectGalleryImages, IMAGE_EXT } from '../services/gallery'
 import { log } from '../services/logger'
 import { openViewer, permitsViewerFile, viewerNav } from '../services/viewer'
-
-const IMAGE_EXT = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.avif'])
-const MAX_IMAGES = 3000
-const MAX_DEPTH = 6
 
 type NativeImageType = ReturnType<typeof nativeImage.createFromPath>
 
@@ -28,40 +23,13 @@ function copyImage(image: NativeImageType): void {
   }
 }
 
-async function collectImages(dir: string, out: GalleryItem[], depth = 0): Promise<void> {
-  if (depth > MAX_DEPTH || out.length >= MAX_IMAGES) return
-  let entries: import('fs').Dirent[]
-  try {
-    entries = await fs.readdir(dir, { withFileTypes: true })
-  } catch {
-    return
-  }
-  for (const entry of entries) {
-    if (out.length >= MAX_IMAGES) return
-    const full = join(dir, entry.name)
-    if (entry.isDirectory()) {
-      await collectImages(full, out, depth + 1)
-    } else if (IMAGE_EXT.has(extname(entry.name).toLowerCase())) {
-      try {
-        const stat = await fs.stat(full)
-        out.push({ path: full, name: entry.name, mtimeMs: stat.mtimeMs, size: stat.size })
-      } catch {
-        /* skip unreadable file */
-      }
-    }
-  }
-}
-
 export function registerGalleryIpc(): void {
   handleIpc('gallery:list', async (_e, appId: string) => {
     const store = await AppStore.load()
     const entry = store.apps.find((a) => a.id === appId)
     const dir = entry?.screenshotDirectory
     if (!dir) return []
-    const items: GalleryItem[] = []
-    await collectImages(dir, items)
-    items.sort((a, b) => b.mtimeMs - a.mtimeMs)
-    return items
+    return collectGalleryImages(dir)
   })
 
   handleIpc('gallery:openViewer', (_e, paths: string[] | string, index: number) => {

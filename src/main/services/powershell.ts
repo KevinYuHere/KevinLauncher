@@ -1,5 +1,7 @@
 import { execFile, execFileSync, spawn, type ChildProcessWithoutNullStreams } from 'child_process'
 import { promisify } from 'util'
+import { once } from 'events'
+import { dirname } from 'path'
 
 const execFileAsync = promisify(execFile)
 
@@ -57,4 +59,20 @@ export function runPowerShellSync(script: string): string {
 /** Starts a Windows API helper with a private UTF-8 request/reply pipe. */
 export function startPowerShell(script: string): ChildProcessWithoutNullStreams {
   return spawn('powershell.exe', powerShellArgs(script), { windowsHide: true })
+}
+
+function fileArguments(file: string): string[] {
+  return ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', file]
+}
+
+export async function runPowerShellFile(file: string, timeout: number, args: string[] = []): Promise<string> {
+  return (await execFileAsync('powershell.exe', [...fileArguments(file), ...args], { windowsHide: true, timeout })).stdout
+}
+
+export async function startDetachedPowerShellFile(file: string): Promise<void> {
+  const child = spawn('powershell.exe', fileArguments(file), {
+    cwd: dirname(file), windowsHide: true, stdio: 'ignore'
+  })
+  await once(child, 'spawn')
+  child.unref()
 }

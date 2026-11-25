@@ -1,205 +1,227 @@
 import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ReactElement
+  useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState,
+  type KeyboardEvent, type ReactElement
 } from 'react'
 import type { AppEntry, GalleryItem } from '@shared/types'
-import { getThumb, observeTile, type Thumb } from '../gallery/thumbs'
+import { galleryImageKey, subscribeThumbnail, type Thumb } from '../gallery/thumbs'
+import { masonryLayout, visibleTiles, type TileBox } from '../gallery/masonry'
 
-// Masonry: tiles are placed into the shortest column, in order, so columns pack
-// independently while the reading order stays left→right, then next row.
-const TILE_GAP = 12
-const MIN_COL = 220
-const FALLBACK_ASPECT = 16 / 9
+const OVERSCAN = 420
+const NO_ITEMS: GalleryItem[] = []
 
-interface TileBox {
-  x: number
-  y: number
-  w: number
-  h: number
-}
-
-// Screenshot browser for one app. Thumbnails are generated lazily as tiles
-// scroll into view and cached; clicking opens the full image in a viewer
-// window, right-click shows the file actions menu.
 interface GalleryViewProps {
   entry: AppEntry
+  active: boolean
   onBack: () => void
   onEdit: () => void
 }
 
-// One tile: absolutely positioned by the parent's masonry layout; registers with
-// the shared IntersectionObserver so the JPEG is produced on demand and reports
-// its aspect ratio back so the layout can settle.
 function GalleryTile({
-  item,
-  paths,
-  index,
-  box,
-  onAspect
+  item, paths, index, box, active, onAspect, onFocus, onKeyDown
 }: {
   item: GalleryItem
   paths: string[]
   index: number
   box: TileBox
-  onAspect: (path: string, aspect: number) => void
+  active: boolean
+  onAspect: (key: string, aspect: number) => void
+  onFocus: () => void
+  onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => void
 }): ReactElement {
-  const ref = useRef<HTMLButtonElement>(null)
-  const [thumb, setThumb] = useState<Thumb | undefined>(() => getThumb(item.path))
-  const onAspectRef = useRef(onAspect)
-  onAspectRef.current = onAspect
-
+  const [thumb, setThumb] = useState<Thumb | null>(null)
+  const [failed, setFailed] = useState(false)
   useEffect(() => {
-    const el = ref.current
-    if (!el) return
-    return observeTile(el, item.path, (loaded) => {
-      setThumb(loaded)
-      onAspectRef.current(item.path, loaded.aspect)
+    if (!active) {
+      setThumb(null)
+      return
+    }
+    return subscribeThumbnail(item, (result) => {
+      setThumb(result)
+      setFailed(!result)
+      if (result) onAspect(galleryImageKey(item), result.aspect)
     })
-  }, [item.path])
-
+  }, [item, onAspect, active])
+  const openActions = (): void => { void window.api.galleryContextMenu(item.path) }
   return (
     <button
-      ref={ref}
+      type="button"
       className="gallery-thumb"
+      data-tile-index={index}
       style={{ position: 'absolute', left: box.x, top: box.y, width: box.w, height: box.h }}
+      aria-label={item.name}
       title={item.name}
-      onClick={() => void window.api.galleryOpenViewer(paths, index)}
-      onContextMenu={(e) => {
-        e.preventDefault()
-        void window.api.galleryContextMenu(item.path)
+      onFocus={onFocus}
+      onKeyDown={(event) => {
+        if (event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)) {
+          event.preventDefault()
+          openActions()
+        } else onKeyDown(event)
       }}
+      onClick={() => void window.api.galleryOpenViewer(paths, index)}
+      onContextMenu={(event) => { event.preventDefault(); openActions() }}
     >
-      {thumb ? (
-        <img src={thumb.url} alt={item.name} draggable={false} />
-      ) : (
-        <span className="thumb-skeleton" />
-      )}
+      {thumb ? <img src={thumb.url} alt="" draggable={false} />
+        : <span className={failed ? 'thumb-placeholder' : 'thumb-skeleton'} />}
     </button>
   )
 }
 
-export default function GalleryView({ entry, onBack, onEdit }: GalleryViewProps): ReactElement {
-  const [items, setItems] = useState<GalleryItem[]>([])
+export default function GalleryView({ entry, active, onBack, onEdit }: GalleryViewProps): ReactElement {
+  const dir = entry.screenshotDirectory
+  const scope = JSON.stringify([entry.id, dir])
+  const [listing, setListing] = useState<{ scope: string; items: GalleryItem[] }>()
+  const [error, setError] = useState<{ scope: string; message: string }>()
   const [loading, setLoading] = useState(false)
-  const [width, setWidth] = useState(0)
-  const [aspects, setAspects] = useState<Record<string, number>>({})
-  const observerRef = useRef<ResizeObserver | null>(null)
-
-  // Column count / size from the container width. A callback ref (rather than a
-  // mount effect) because the grid only mounts once the screenshots are read.
-  const bindGrid = useCallback((el: HTMLDivElement | null): void => {
-    observerRef.current?.disconnect()
-    observerRef.current = null
-    if (!el) return
-    const measure = (): void => setWidth(el.clientWidth)
-    measure()
-    const observer = new ResizeObserver(measure)
-    observer.observe(el)
-    observerRef.current = observer
-  }, [])
-
-  useEffect(() => () => observerRef.current?.disconnect(), [])
-
-  const onAspect = useCallback((path: string, aspect: number): void => {
-    setAspects((prev) => (prev[path] === aspect ? prev : { ...prev, [path]: aspect }))
-  }, [])
-
-  const cols = Math.max(1, Math.floor((width + TILE_GAP) / (MIN_COL + TILE_GAP)))
-  const colWidth = width > 0 ? (width - (cols - 1) * TILE_GAP) / cols : MIN_COL
-
-  const { boxes, height } = useMemo(() => {
-    const colHeights = new Array<number>(cols).fill(0)
-    const boxes: TileBox[] = items.map((item) => {
-      const aspect = aspects[item.path] ?? FALLBACK_ASPECT
-      const h = colWidth / aspect
-      let col = 0
-      for (let i = 1; i < cols; i++) if (colHeights[i] < colHeights[col]) col = i
-      const box: TileBox = { x: col * (colWidth + TILE_GAP), y: colHeights[col], w: colWidth, h }
-      colHeights[col] += h + TILE_GAP
-      return box
-    })
-    return { boxes, height: colHeights.length ? Math.max(...colHeights) - TILE_GAP : 0 }
-  }, [items, aspects, cols, colWidth])
-
+  const [refreshNumber, setRefreshNumber] = useState(0)
+  const pageRef = useRef<HTMLDivElement>(null)
+  const gridRef = useRef<HTMLDivElement>(null)
+  const [viewport, setViewport] = useState({ width: 0, top: 0, height: 0 })
+  const [aspects, setAspects] = useState(new Map<string, number>())
+  const pendingAspects = useRef(new Map<string, number>())
+  const frame = useRef(0)
+  const [focused, setFocused] = useState<number | null>(null)
+  const pendingFocus = useRef<number | null>(null)
+  const items = listing?.scope === scope ? listing.items : NO_ITEMS
   const paths = useMemo(() => items.map((item) => item.path), [items])
 
-  // Re-read the screenshot directory for this app.
-  const refresh = useCallback(async (): Promise<void> => {
+  useEffect(() => {
+    if (!dir) return
+    let current = true
     setLoading(true)
-    try {
-      setItems(await window.api.galleryList(entry.id))
-    } finally {
-      setLoading(false)
-    }
-  }, [entry.id])
+    setError(undefined)
+    void window.api.galleryList(entry.id).then(
+      (next) => { if (current) setListing({ scope, items: next }) },
+      (reason: unknown) => {
+        if (current) setError({ scope, message: reason instanceof Error ? reason.message : String(reason) })
+      }
+    ).finally(() => { if (current) setLoading(false) })
+    return () => { current = false }
+  }, [entry.id, dir, scope, refreshNumber])
+
+  const onAspect = useCallback((key: string, aspect: number): void => {
+    pendingAspects.current.set(key, aspect)
+    if (frame.current) return
+    frame.current = requestAnimationFrame(() => {
+      frame.current = 0
+      const pending = pendingAspects.current
+      pendingAspects.current = new Map()
+      setAspects((prev) => {
+        if ([...pending].every(([key, value]) => prev.get(key) === value)) return prev
+        return new Map([...prev, ...pending])
+      })
+    })
+  }, [])
+
+  useEffect(() => () => {
+    cancelAnimationFrame(frame.current)
+    frame.current = 0
+    pendingAspects.current.clear()
+  }, [])
 
   useEffect(() => {
-    void refresh()
-  }, [refresh])
+    const keys = new Set(items.map(galleryImageKey))
+    setAspects((prev) => new Map([...prev].filter(([key]) => keys.has(key))))
+  }, [items])
 
-  const dir = entry.screenshotDirectory
+  const hasItems = items.length > 0
+  useLayoutEffect(() => {
+    const page = pageRef.current
+    const grid = gridRef.current
+    if (!page || !grid) return
+    let frame = 0
+    const measure = (): void => {
+      frame = 0
+      const top = page.getBoundingClientRect().top - grid.getBoundingClientRect().top
+      const next = { width: grid.clientWidth, top, height: page.clientHeight }
+      setViewport((prev) => prev.width === next.width && prev.top === next.top &&
+        prev.height === next.height ? prev : next)
+    }
+    const queue = (): void => { if (!frame) frame = requestAnimationFrame(measure) }
+    measure()
+    const observer = new ResizeObserver(queue)
+    observer.observe(page)
+    observer.observe(grid)
+    page.addEventListener('scroll', queue, { passive: true })
+    return () => {
+      page.removeEventListener('scroll', queue)
+      observer.disconnect()
+      cancelAnimationFrame(frame)
+    }
+  }, [hasItems, scope])
+
+  const layout = useMemo(() => masonryLayout(viewport.width,
+    items.map((item) => aspects.get(galleryImageKey(item)) ?? 0)
+  ), [items, aspects, viewport.width])
+  const visible = visibleTiles(layout, viewport.top - OVERSCAN, viewport.top + viewport.height + OVERSCAN)
+  if (focused !== null && layout.boxes[focused] && !visible.includes(focused)) {
+    visible.push(focused)
+    visible.sort((a, b) => a - b)
+  }
+  useLayoutEffect(() => {
+    if (pendingFocus.current === null) return
+    const target = gridRef.current?.querySelector<HTMLButtonElement>(`[data-tile-index="${pendingFocus.current}"]`)
+    if (target) {
+      pendingFocus.current = null
+      target.focus()
+    }
+  }, [focused])
+
+  const navigate = (event: KeyboardEvent<HTMLButtonElement>, index: number): void => {
+    const next = {
+      ArrowRight: index + 1, ArrowLeft: index - 1,
+      ArrowDown: index + layout.columns.length, ArrowUp: index - layout.columns.length,
+      Home: 0, End: items.length - 1
+    }[event.key]
+    if (next === undefined) return
+    event.preventDefault()
+    const target = Math.max(0, Math.min(items.length - 1, next))
+    if (target !== index) {
+      pendingFocus.current = target
+      setFocused(target)
+    }
+  }
 
   return (
-    <div className="page gallery-page">
+    <div className="page gallery-page" ref={pageRef}>
       <div className="page-header">
         <div>
           <h1 className="page-title">图库 · {entry.name}</h1>
-          <p className="page-subtitle">{dir ? `${items.length} 张图片` : '未设置截图目录'}</p>
+          <p className="page-subtitle" aria-live="polite">{dir ? `${items.length} 张图片` : '未设置截图目录'}</p>
         </div>
         <div className="page-actions">
-          {dir && (
-            <button className="btn" onClick={() => void window.api.openPath(dir)}>
-              打开文件夹
-            </button>
-          )}
-          <button className="btn" disabled={!dir || loading} onClick={() => void refresh()}>
-            刷新
-          </button>
-          <button className="btn ghost" onClick={onBack}>
-            返回主页
-          </button>
+          {dir && <button className="btn" onClick={() => void window.api.openPath(dir)}>打开文件夹</button>}
+          <button className="btn" disabled={!dir || loading} onClick={() => setRefreshNumber((n) => n + 1)}>刷新</button>
+          <button className="btn ghost" onClick={onBack}>返回主页</button>
         </div>
       </div>
-
-      <div className="page-body">
+      <div className="page-body" aria-busy={loading}>
         {!dir ? (
-          <div className="panel">
-            <div className="empty">
-              <div className="empty-icon">▣</div>
-              <div className="empty-title">未设置截图目录</div>
-              <div>在「设置 → 高级设置」中填写截图目录后即可浏览</div>
-              <button className="btn primary" style={{ marginTop: 12 }} onClick={onEdit}>
-                去设置
-              </button>
-            </div>
-          </div>
-        ) : items.length === 0 ? (
-          <div className="panel">
-            <div className="empty">
-              <div className="empty-icon">▣</div>
-              <div className="empty-title">{loading ? '正在读取…' : '没有找到图片'}</div>
-            </div>
-          </div>
+          <div className="panel"><div className="empty">
+            <div className="empty-icon" aria-hidden="true">▣</div>
+            <div className="empty-title">未设置截图目录</div>
+            <div>在「设置 → 高级设置」中填写截图目录后即可浏览</div>
+            <button className="btn primary" style={{ marginTop: 12 }} onClick={onEdit}>去设置</button>
+          </div></div>
+        ) : error?.scope === scope ? (
+          <div className="panel"><div className="empty" role="alert">
+            <div className="empty-title">读取截图目录失败</div>
+            <div>{error.message}</div>
+          </div></div>
+        ) : !hasItems ? (
+          <div className="panel"><div className="empty">
+            <div className="empty-title">{loading || listing?.scope !== scope ? '正在读取…' : '没有找到图片'}</div>
+          </div></div>
         ) : (
-          <div
-            className="gallery-grid"
-            ref={bindGrid}
-            style={{ height: height > 0 ? `${Math.round(height)}px` : undefined }}
-          >
-            {items.map((item, index) => (
-              <GalleryTile
-                key={item.path}
-                item={item}
-                paths={paths}
-                index={index}
-                box={boxes[index]}
-                onAspect={onAspect}
-              />
-            ))}
+          <div className="gallery-grid" ref={gridRef} style={{ height: layout.height }}
+            onBlur={(event) => {
+              if (pendingFocus.current === null && !event.currentTarget.contains(event.relatedTarget)) setFocused(null)
+            }}>
+            {visible.map((index) => <GalleryTile
+              key={galleryImageKey(items[index])}
+              item={items[index]} paths={paths} index={index} box={layout.boxes[index]}
+              active={active} onAspect={onAspect}
+              onFocus={() => setFocused(index)} onKeyDown={(event) => navigate(event, index)}
+            />)}
           </div>
         )}
       </div>

@@ -24,6 +24,7 @@ interface JellyOptions {
 
 export function useJelly(ref: RefObject<HTMLElement | null>, options: JellyOptions): void {
   const opts = useRef(options)
+  const stop = useRef<(() => void) | undefined>()
   opts.current = options
   const s = useRef({
     pos: makeSpring(options.x ?? 0),
@@ -38,7 +39,7 @@ export function useJelly(ref: RefObject<HTMLElement | null>, options: JellyOptio
     const st = s.current
     if (st.task) return
     st.task = true
-    addTask((dt) => {
+    stop.current = addTask((dt) => {
       const o = opts.current
       st.pos.target = o.x ?? 0
       st.posy.target = o.y ?? 0
@@ -81,6 +82,10 @@ export function useJelly(ref: RefObject<HTMLElement | null>, options: JellyOptio
 
   const mounted = useRef(false)
   const prevPressed = useRef(false)
+  useEffect(() => () => {
+    stop.current?.()
+    s.current.task = false
+  }, [])
   useEffect(() => {
     if (!mounted.current) {
       // First appearance: jump straight to the target position (no slide-in when

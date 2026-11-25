@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path'
 // Only our own small executable goes into the versioned application payload.
 if (process.platform === 'win32') {
   const root = resolve(import.meta.dirname, '..')
-  const output = join(root, 'out', 'native')
+  const output = process.env.KEVIN_NATIVE_OUTPUT ?? join(root, 'out', 'native')
   const exe = join(output, 'KevinArchive.exe')
   const source = join(root, 'scripts', 'hoyo-archive', 'WindowsArchive.cs')
   const manifest = join(root, 'scripts', 'hoyo-archive', 'long-path.manifest')

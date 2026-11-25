@@ -1,9 +1,10 @@
 import { promises as fs, createReadStream, createWriteStream } from 'fs'
-import { join, dirname, relative, isAbsolute } from 'path'
+import { join, dirname } from 'path'
 import { createCipheriv, createHmac, pbkdf2Sync, type Hmac } from 'crypto'
 import { Transform, PassThrough } from 'stream'
 import { pipeline } from 'stream/promises'
-import { createInflateRaw } from 'zlib'
+import { createInflateRaw, crc32 } from 'zlib'
+import { arknightsRelativePath } from './arknightsPaths'
 
 /**
  * Minimal reader for the AES-encrypted (WinZip / PKWARE "AE-2") ZIP archives
@@ -19,6 +20,7 @@ import { createInflateRaw } from 'zlib'
 const EOCD_SIG = 0x06054b50
 const CENTRAL_SIG = 0x02014b50
 const AES_EXTRA_ID = 0x9901
+const MAX_CENTRAL_BYTES = 128 * 1024 * 1024
 
 interface ZipEntry {
   name: string
@@ -30,6 +32,7 @@ interface ZipEntry {
   compressedSize: number
   uncompressedSize: number
   localHeaderOffset: number
+  crc: number
 }
 
 /** Increment a 16-byte little-endian counter in place (WinZip AES CTR). */
@@ -101,7 +104,12 @@ type FileHandle = Awaited<ReturnType<typeof fs.open>>
 /** Read `length` bytes at `position` from an open file handle. */
 async function readAt(handle: FileHandle, length: number, position: number): Promise<Buffer> {
   const buffer = Buffer.alloc(length)
-  await handle.read(buffer, 0, length, position)
+  let read = 0
+  while (read < length) {
+    const { bytesRead } = await handle.read(buffer, read, length - read, position + read)
+    if (!bytesRead) throw new Error('游戏补丁包截断')
+    read += bytesRead
+  }
   return buffer
 }
 
@@ -122,6 +130,9 @@ async function readEntries(path: string): Promise<ZipEntry[]> {
     if (eocd < 0) throw new Error('游戏补丁包格式异常（未找到 ZIP 目录）')
     const centralSize = tail.readUInt32LE(eocd + 12)
     const centralOffset = tail.readUInt32LE(eocd + 16)
+    if (centralSize > MAX_CENTRAL_BYTES || centralOffset + centralSize > size - tailLength + eocd) {
+      throw new Error('游戏补丁包 ZIP 目录越界')
+    }
     const central = await readAt(handle, centralSize, centralOffset)
 
     const entries: ZipEntry[] = []
@@ -129,12 +140,15 @@ async function readEntries(path: string): Promise<ZipEntry[]> {
     while (pos + 46 <= central.length && central.readUInt32LE(pos) === CENTRAL_SIG) {
       const flags = central.readUInt16LE(pos + 8)
       const method = central.readUInt16LE(pos + 10)
+      const crc = central.readUInt32LE(pos + 16)
       const compressedSize = central.readUInt32LE(pos + 20)
       const uncompressedSize = central.readUInt32LE(pos + 24)
       const nameLength = central.readUInt16LE(pos + 28)
       const extraLength = central.readUInt16LE(pos + 30)
       const commentLength = central.readUInt16LE(pos + 32)
       const localHeaderOffset = central.readUInt32LE(pos + 42)
+      if (pos + 46 + nameLength + extraLength + commentLength > central.length ||
+          localHeaderOffset + 30 + compressedSize > centralOffset) throw new Error('补丁文件目录越界')
       const name = central.toString('utf8', pos + 46, pos + 46 + nameLength)
       const extra = central.subarray(pos + 46 + nameLength, pos + 46 + nameLength + extraLength)
 
@@ -143,11 +157,16 @@ async function readEntries(path: string): Promise<ZipEntry[]> {
       for (let i = 0; i + 4 <= extra.length; ) {
         const id = extra.readUInt16LE(i)
         const len = extra.readUInt16LE(i + 2)
+        if (i + 4 + len > extra.length) throw new Error('补丁 ZIP 扩展字段越界')
         if (id === AES_EXTRA_ID) {
+          if (len !== 7) throw new Error('补丁 ZIP 加密信息无效')
           aesStrength = extra[i + 8]
           realMethod = extra.readUInt16LE(i + 9)
         }
         i += 4 + len
+      }
+      if ((realMethod !== 0 && realMethod !== 8) || ((flags & 1) && (aesStrength < 1 || aesStrength > 3))) {
+        throw new Error('游戏补丁包使用不受支持的压缩方式')
       }
 
       entries.push({
@@ -157,9 +176,13 @@ async function readEntries(path: string): Promise<ZipEntry[]> {
         aesStrength,
         compressedSize,
         uncompressedSize,
-        localHeaderOffset
+        localHeaderOffset,
+        crc
       })
       pos += 46 + nameLength + extraLength + commentLength
+    }
+    if (pos !== central.length || entries.length !== tail.readUInt16LE(eocd + 10)) {
+      throw new Error('游戏补丁包 ZIP 目录不完整')
     }
     return entries
   } finally {
@@ -168,18 +191,12 @@ async function readEntries(path: string): Promise<ZipEntry[]> {
 }
 
 /** Resolve an archive entry name inside `base`, rejecting path traversal. */
-function safeJoin(base: string, name: string): string {
-  const full = join(base, ...name.split('/'))
-  const rel = relative(base, full)
-  if (rel.startsWith('..') || isAbsolute(rel)) throw new Error(`补丁包含非法路径：${name}`)
-  return full
-}
-
 export interface ExtractOptions {
   zipPath: string
   destDir: string
   password?: string
   signal?: AbortSignal
+  beforeExtract?: (bytes: number) => Promise<void>
   /** Called with cumulative extracted (uncompressed) bytes and the total. */
   onProgress?: (extracted: number, total: number) => void
 }
@@ -191,18 +208,25 @@ export interface ExtractOptions {
 export async function extractZip(options: ExtractOptions): Promise<void> {
   const entries = await readEntries(options.zipPath)
   const total = entries.reduce((sum, entry) => sum + entry.uncompressedSize, 0)
+  await options.beforeExtract?.(total)
   let extracted = 0
+  const paths = new Map<string, boolean>()
 
   const handle = await fs.open(options.zipPath, 'r')
   try {
     for (const entry of entries) {
       if (options.signal?.aborted) throw new Error('已取消')
-      if (entry.name.endsWith('/')) {
-        await fs.mkdir(safeJoin(options.destDir, entry.name), { recursive: true })
+      const directory = /[\\/]$/.test(entry.name)
+      const name = arknightsRelativePath(directory ? entry.name.slice(0, -1) : entry.name)
+      const key = name.toLowerCase()
+      if (paths.has(key) && (!directory || !paths.get(key))) throw new Error('补丁包路径重复：' + name)
+      paths.set(key, directory)
+      const dest = join(options.destDir, name)
+      if (directory) {
+        await fs.mkdir(dest, { recursive: true })
         continue
       }
-      const dest = safeJoin(options.destDir, entry.name)
-      if (entry.uncompressedSize === 0) {
+      if (entry.compressedSize === 0 && entry.uncompressedSize === 0 && !entry.encrypted) {
         await fs.mkdir(dirname(dest), { recursive: true })
         await fs.writeFile(dest, Buffer.alloc(0))
         continue
@@ -211,6 +235,7 @@ export async function extractZip(options: ExtractOptions): Promise<void> {
 
       // Local header: skip the name + extra fields to reach the file data.
       const header = await readAt(handle, 30, entry.localHeaderOffset)
+      if (header.readUInt32LE(0) !== 0x04034b50) throw new Error('补丁 ZIP 文件头无效')
       const nameLength = header.readUInt16LE(26)
       const extraLength = header.readUInt16LE(28)
       const dataStart = entry.localHeaderOffset + 30 + nameLength + extraLength
@@ -219,7 +244,7 @@ export async function extractZip(options: ExtractOptions): Promise<void> {
         const start = dataStart
         const end = dataStart + entry.compressedSize - 1
         const source = createReadStream(options.zipPath, { start, end })
-        await pipeEntry(source, entry, dest)
+        await pipeEntry(source, entry, dest, options.signal)
       } else {
         if (!options.password) throw new Error('缺少补丁解密口令')
         // Strength 1/2/3 maps to AES-128/192/256 → 8/12/16-byte salts and
@@ -229,6 +254,7 @@ export async function extractZip(options: ExtractOptions): Promise<void> {
         const salt = await readAt(handle, saltLength, dataStart)
         const verify = await readAt(handle, 2, dataStart + saltLength)
         const encryptedLength = entry.compressedSize - saltLength - 2 - 10
+        if (encryptedLength < 0) throw new Error('补丁加密内容不完整')
         const encryptedStart = dataStart + saltLength + 2
         const storedMac = await readAt(handle, 10, encryptedStart + encryptedLength)
 
@@ -244,7 +270,7 @@ export async function extractZip(options: ExtractOptions): Promise<void> {
           start: encryptedStart,
           end: encryptedStart + encryptedLength - 1
         })
-        await pipeEntry(source, entry, dest, new AesCtrDecryptor(encKey, hmac), () => {
+        await pipeEntry(source, entry, dest, options.signal, new AesCtrDecryptor(encKey, hmac), () => {
           const mac = hmac.digest().subarray(0, 10)
           if (!mac.equals(storedMac)) throw new Error(`补丁校验失败：${entry.name}`)
         })
@@ -263,11 +289,27 @@ async function pipeEntry(
   source: NodeJS.ReadableStream,
   entry: ZipEntry,
   dest: string,
+  signal?: AbortSignal,
   transform?: Transform,
   verify?: () => void
 ): Promise<void> {
   const decompressor = entry.method === 8 ? createInflateRaw() : new PassThrough()
-  if (transform) await pipeline(source, transform, decompressor, createWriteStream(dest))
-  else await pipeline(source, decompressor, createWriteStream(dest))
+  let bytes = 0
+  let checksum = 0
+  const check = new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      bytes += chunk.length
+      if (bytes > entry.uncompressedSize) callback(new Error('补丁解压大小超过清单：' + entry.name))
+      else {
+        checksum = crc32(chunk, checksum)
+        callback(null, chunk)
+      }
+    }
+  })
+  if (transform) await pipeline(source, transform, decompressor, check, createWriteStream(dest), { signal })
+  else await pipeline(source, decompressor, check, createWriteStream(dest), { signal })
+  if (bytes !== entry.uncompressedSize || ((!entry.encrypted || entry.crc !== 0) && checksum !== entry.crc)) {
+    throw new Error('补丁解压数据校验失败：' + entry.name)
+  }
   verify?.()
 }

@@ -8,6 +8,7 @@
  * after mount. Default theme and themed builds share this behaviour.
  */
 export function installNoNativeTooltips(): () => void {
+  const copied = new WeakMap<HTMLElement, string>()
   const strip = (root: ParentNode): void => {
     const elements =
       root instanceof Element && root.hasAttribute('title')
@@ -16,7 +17,11 @@ export function installNoNativeTooltips(): () => void {
     for (const element of elements) {
       const text = element.getAttribute('title')?.trim()
       element.removeAttribute('title')
-      if (text && !element.hasAttribute('aria-label')) element.setAttribute('aria-label', text)
+      const label = element.getAttribute('aria-label')
+      if (text && (label === null || label === copied.get(element))) {
+        element.setAttribute('aria-label', text)
+        copied.set(element, text)
+      }
     }
   }
 

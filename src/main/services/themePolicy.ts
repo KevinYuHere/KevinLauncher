@@ -3,7 +3,6 @@ import { promises as fs } from 'fs'
 import { join } from 'path'
 import type { ThemePolicy } from '@shared/types'
 import {
-  applyThemePolicy,
   normalizeThemePolicy,
   policyTargetsVersion
 } from '@shared/specialTheme'
@@ -39,6 +38,7 @@ function candidates(): string[] {
 
 /** Read + validate the first readable policy file, or `null` when none exists. */
 export async function loadThemePolicy(): Promise<ThemePolicy | null> {
+  const version = currentAppVersion()
   for (const file of candidates()) {
     let raw: string
     try {
@@ -50,6 +50,10 @@ export async function loadThemePolicy(): Promise<ThemePolicy | null> {
       const parsed = JSON.parse(raw) as unknown
       const policy = normalizeThemePolicy(parsed)
       if (policy) {
+        if (!policyTargetsVersion(policy, version)) {
+          log(`themePolicy: ${file} targets ${policy.version}; running ${version}`)
+          continue
+        }
         log(`themePolicy: using ${file} (v${policy.version}, ${policy.themeId})`)
         return policy
       }
@@ -76,30 +80,11 @@ export async function applyThemePolicyOnStartup(): Promise<boolean> {
   try {
     const policy = await loadThemePolicy()
     if (!policy) return false
-    // Bind the policy to the version it was shipped with: a later release that
-    // carries a stale copy (or no file) must never rewrite user data again.
-    const version = currentAppVersion()
-    if (!policyTargetsVersion(policy, version)) {
-      log(`themePolicy: ${policy.version} does not target ${version} - skipped`)
-      return false
-    }
-    const settings = await AppStore.launcherSettings()
-    if (settings.themePolicyVersion === policy.version) return false
-    const result = applyThemePolicy(settings.themeAreas, settings.themeLocks, policy)
-    // Apps first: if that write fails, the policy version stays unset and the
-    // whole policy is retried on the next start (re-applying is idempotent).
-    const appsChanged = await AppStore.applyReleasePolicyToApps(policy)
-    await AppStore.setThemePolicyState({
-      themeAreas: result.assignments,
-      // A policy applies values once; it never locks the user out.
-      themeLocks: {},
-      themePolicyVersion: policy.version
-    })
+    if (!(await AppStore.applyReleasePolicy(policy))) return false
     log(
       `themePolicy: applied v${policy.version} → ${policy.themeId}` +
         `${policy.material ? ` · ${policy.material}` : ''}` +
-        `${policy.launchEffect ? ` · ${policy.launchEffect}` : ''}` +
-        `${appsChanged ? ' (apps updated)' : ''} (user can edit afterwards)`
+        `${policy.launchEffect ? ` · ${policy.launchEffect}` : ''} (user can edit afterwards)`
     )
     return true
   } catch (error) {

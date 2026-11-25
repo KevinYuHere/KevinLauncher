@@ -168,10 +168,11 @@ export function bannerName(game: GachaGame, type: string): string {
  *   banner is independent (pity resets between different limited banners), so
  *   limited records are grouped by their specific pool.
  */
-export function poolGroup(game: GachaGame, gachaType: string, poolId?: string): string {
+export function poolGroup(game: GachaGame, gachaType: string, poolId?: string, uigfType?: string): string {
   if (game === 'arknights') {
     return gachaType === 'normal' ? 'normal' : poolId ?? gachaType
   }
+  if (game === 'genshin') return uigfType ?? (gachaType === '400' ? '301' : gachaType)
   return gachaType
 }
 

@@ -1,182 +1,157 @@
-import { parentPort } from 'worker_threads'
-import { promises as fs, createReadStream, createWriteStream } from 'fs'
-import { join, dirname } from 'path'
-import { pipeline } from 'stream/promises'
+import { parentPort } from 'node:worker_threads'
+import { promises as fs, createReadStream, createWriteStream } from 'node:fs'
+import { join } from 'node:path'
+import { pipeline } from 'node:stream/promises'
 import { downloadFile } from '../services/downloader'
-import { md5File } from '../services/hash'
+import { md5Bytes } from '../services/hash'
+import { requireDiskSpace } from '../services/diskSpace'
+import { closeDownloadWorkerRatePort } from '../services/rateLimit'
 import { extractZip } from '../update/zipAes'
-import {
-  applyVfsManifest,
-  commitStage,
-  installConfig,
-  processDeleteList,
-  stageStaticFiles,
-  type PatchManifest
-} from '../update/arknightsPatch'
-import type { AkPack, AkPatch } from '../update/arknightsUpdate'
+import { applyVfsManifest, readDeleteList, stageStaticFiles, validateArknightsManifest, type PatchManifest } from '../update/arknightsPatch'
+import { akStageFiles, akStageRoot, arknightsRecoveryPending, createArknightsCommit, finishArknightsCommit } from '../update/arknightsCommit'
+import { arknightsPath, missingPath } from '../update/arknightsPaths'
+import { arknightsDeltaVolumes, arknightsPackageDirectory, cacheArknightsVolume, missingVolumeBytes } from '../update/arknightsPackages'
+import { readLocalVersion, type AkPatch } from '../update/arknightsUpdate'
 
-interface StartMessage {
+type Task = { type: 'cancel' } | { type: 'recover'; gameDir: string } | {
   type: 'start'
   gameDir: string
   targetVersion: string
   patch: AkPatch
   hpatchzPath: string
-  /** Volumes staged by an earlier pre-download (reused instead of re-fetching). */
   preStagedDir?: string
 }
-
+type DeltaTask = Extract<Task, { type: 'start' }>
 let controller: AbortController | null = null
+const emit = (payload: Record<string, unknown>): void => parentPort?.postMessage(payload)
 
-async function exists(path: string): Promise<boolean> {
-  try {
-    await fs.access(path)
-    return true
-  } catch {
-    return false
+async function loadManifest(extractDir: string, patch: AkPatch, signal: AbortSignal): Promise<PatchManifest> {
+  const file = await arknightsPath(extractDir, 'patch.json')
+  let content = await fs.readFile(file).catch((error) => {
+    if (missingPath(error)) return null
+    throw error
+  })
+  const digest = patch.infoMd5?.toLowerCase()
+  if ((!content || (digest && md5Bytes(content) !== digest)) && patch.infoUrl) {
+    const response = await fetch(patch.infoUrl, { signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]) })
+    if (!response.ok) throw new Error(`下载补丁清单失败：HTTP ${response.status}`)
+    content = Buffer.from(await response.arrayBuffer())
   }
+  if (!content || (digest && md5Bytes(content) !== digest)) throw new Error('补丁清单缺失或校验失败')
+  const manifest = JSON.parse(content.toString('utf8')) as PatchManifest
+  validateArknightsManifest(manifest)
+  return manifest
 }
 
-/** Merge split zip volumes (`*.zip.001`, `.002`, …) into one file for reading. */
-async function mergeVolumes(parts: string[], dest: string, signal: AbortSignal): Promise<string> {
-  if (parts.length === 1) return parts[0]
-  await fs.rm(dest, { force: true })
-  for (const part of parts) {
-    if (signal.aborted) throw new Error('已取消')
-    await pipeline(createReadStream(part), createWriteStream(dest, { flags: 'a' }))
+async function mergeVolumes(paths: string[], directory: string, signal: AbortSignal): Promise<string> {
+  if (paths.length === 1) return paths[0]
+  const merged = join(directory, 'volumes.joined')
+  for (const [index, path] of paths.entries()) {
+    signal.throwIfAborted()
+    await pipeline(createReadStream(path), createWriteStream(merged, { flags: index === 0 ? 'wx' : 'a' }), { signal })
   }
-  return dest
+  return merged
 }
 
-/** Reuse a volume staged by a pre-download (size + md5 verified). */
-async function reuseStagedPart(src: string, dest: string, part: AkPack): Promise<boolean> {
+async function runDelta(msg: DeltaTask, signal: AbortSignal): Promise<void> {
+  const { gameDir, patch } = msg
+  const directory = await arknightsPackageDirectory(gameDir, msg.targetVersion, 'delta', patch.parts)
+  const deltaRoot = await arknightsPath(gameDir, '_kl_delta')
+  const stageRoot = await akStageRoot(gameDir)
+  const stageDir = await akStageFiles(gameDir)
+  const extractDir = join(deltaRoot, 'files')
   try {
-    const stat = await fs.stat(src)
-    if (!stat.isFile()) return false
-    if (part.size > 0 && stat.size !== part.size) return false
-    if (part.md5 && (await md5File(src)) !== part.md5) return false
-    await fs.mkdir(dirname(dest), { recursive: true })
-    await fs.rm(dest, { force: true })
-    try {
-      await fs.link(src, dest)
-    } catch {
-      await fs.copyFile(src, dest)
+    for (const part of patch.parts) {
+      signal.throwIfAborted()
+      const destination = await arknightsPath(directory, part.name)
+      if (msg.preStagedDir && await cacheArknightsVolume(
+        await arknightsPath(msg.preStagedDir, part.name), destination, part)) continue
+      await cacheArknightsVolume(await arknightsPath(gameDir, `Diffs/${part.name}`), destination, part)
     }
-    return true
-  } catch {
-    return false
-  }
-}
-
-parentPort?.on('message', async (message: unknown) => {
-  const msg = message as StartMessage | { type: 'cancel' }
-  if (msg.type === 'cancel') {
-    controller?.abort()
-    return
-  }
-  if (msg.type !== 'start') return
-
-  controller = new AbortController()
-  const signal = controller.signal
-  const emit = (payload: Record<string, unknown>): void => parentPort?.postMessage(payload)
-
-  const diffsDir = join(msg.gameDir, 'Diffs')
-  const extractDir = join(msg.gameDir, '_kl_delta')
-  const stageDir = join(msg.gameDir, '_kl_stage')
-
-  try {
-    const { patch } = msg
-    await fs.mkdir(diffsDir, { recursive: true })
-
-    // 1) Download the (possibly split) encrypted patch archive with resume.
-    const total = patch.parts.reduce((sum, part) => sum + part.size, 0)
-    const partPaths: string[] = []
+    await requireDiskSpace([{ path: directory, bytes: await missingVolumeBytes(directory, patch.parts) }])
+    const paths: string[] = []
     let base = 0
     for (const part of patch.parts) {
-      if (signal.aborted) throw new Error('已取消')
-      const dest = join(diffsDir, part.name)
-      partPaths.push(dest)
-      const offset = base
-      const staged = msg.preStagedDir ? join(msg.preStagedDir, part.name) : ''
-      const reused = staged ? await reuseStagedPart(staged, dest, part) : false
-      if (reused) {
-        emit({ type: 'progress', downloaded: offset + part.size, total })
-      } else {
-        await downloadFile({
-          url: part.url,
-          dest,
-          expectedSize: part.size,
-          expectedMd5: part.md5,
-          signal,
-          onProgress: (downloaded) => emit({ type: 'progress', downloaded: offset + downloaded, total })
-        })
-      }
-      base += part.size
+      const destination = await arknightsPath(directory, part.name)
+      paths.push(destination)
+      await downloadFile({
+        url: part.url, dest: destination, expectedSize: part.size, expectedMd5: part.md5, signal,
+        onProgress: downloaded => emit({ type: 'progress', downloaded: base + downloaded, total: patch.size })
+      })
+      base += (await fs.stat(destination)).size
     }
-    emit({ type: 'progress', downloaded: total, total })
-
-    // 2) Extract, decrypting with the patch key.
-    emit({ type: 'extracting', message: '正在解压补丁…' })
-    await fs.rm(extractDir, { recursive: true, force: true })
+    signal.throwIfAborted()
+    await fs.rm(deltaRoot, { recursive: true, force: true })
     await fs.mkdir(extractDir, { recursive: true })
-    const zipPath = await mergeVolumes(partPaths, join(diffsDir, 'patch.zip'), signal)
+    const archiveBytes = (await Promise.all(paths.map(path => fs.stat(path)))).reduce((sum, part) => sum + part.size, 0)
+    if (paths.length > 1) await requireDiskSpace([{ path: deltaRoot, bytes: archiveBytes }])
+    const zipPath = await mergeVolumes(arknightsDeltaVolumes(paths, patch.parts.map(part => part.name)), deltaRoot, signal)
+    emit({ type: 'extracting', message: '正在解压补丁…' })
     await extractZip({
-      zipPath,
-      destDir: extractDir,
-      password: patch.cdKey,
-      signal,
-      onProgress: (extracted) => emit({ type: 'progress', downloaded: extracted, total })
+      zipPath, destDir: extractDir, password: patch.cdKey, signal,
+      beforeExtract: (size) => requireDiskSpace([{ path: extractDir, bytes: size }]),
+      onProgress: (downloaded, total) => emit({ type: 'progress', downloaded, total })
     })
-
-    // 3) Assemble the new files in a staging directory, then commit atomically.
-    const manifest = await loadManifest(extractDir, patch)
-    emit({ type: 'extracting', message: '正在应用增量补丁…' })
-    await fs.rm(stageDir, { recursive: true, force: true })
+    const manifest = await loadManifest(extractDir, patch, signal)
+    const deletes = await readDeleteList(extractDir)
+    const extractedBytes = await directoryBytes(extractDir, signal)
+    const vfsBytes = manifest.files.reduce((sum, node) => node.local_path || node.patch?.length ? sum + node.size : sum, 0)
+    await requireDiskSpace([{ path: stageDir, bytes: extractedBytes + vfsBytes }])
+    await fs.rm(stageRoot, { recursive: true, force: true })
     await fs.mkdir(stageDir, { recursive: true })
-    await stageStaticFiles(extractDir, stageDir)
+    emit({ type: 'extracting', message: '正在应用增量补丁…' })
+    await stageStaticFiles(extractDir, stageDir, signal)
     await applyVfsManifest({
-      extractDir,
-      gameDir: msg.gameDir,
-      stageDir,
-      manifest,
-      hpatchzPath: msg.hpatchzPath,
-      signal,
-      onProgress: (done, count) => emit({ type: 'progress', downloaded: done, total: count })
+      extractDir, gameDir, stageDir, manifest, hpatchzPath: msg.hpatchzPath, signal,
+      onProgress: (downloaded, total) => emit({ type: 'progress', downloaded, total })
     })
-
-    if (signal.aborted) throw new Error('已取消')
-    emit({ type: 'extracting', message: '正在写入游戏目录…' })
-    await commitStage(stageDir, msg.gameDir)
-    await processDeleteList(extractDir, msg.gameDir, stageDir)
-    await installConfig(extractDir, msg.gameDir)
-
-    // Only drop the downloaded patch archive once the update fully succeeded, so
-    // a failed apply can be retried without re-downloading.
-    await fs.rm(diffsDir, { recursive: true, force: true }).catch(() => undefined)
-    emit({ type: 'done' })
-  } catch (error) {
-    emit({
-      type: 'error',
-      message: (error as Error).message === '已取消' ? '已取消' : (error as Error).message
+    if (await readLocalVersion(stageDir) !== msg.targetVersion) throw new Error('更新包中的游戏版本与目标版本不符')
+    await createArknightsCommit(gameDir, msg.targetVersion, deletes, signal, {
+      packageDir: directory, predownload: Boolean(msg.preStagedDir)
     })
+    await commit(gameDir, signal)
   } finally {
-    // Derived directories are always removed; `Diffs` is kept on failure so a
-    // paused download can resume (it is deleted right after extraction above).
-    await fs.rm(extractDir, { recursive: true, force: true }).catch(() => undefined)
-    await fs.rm(stageDir, { recursive: true, force: true }).catch(() => undefined)
-    controller = null
+    await fs.rm(deltaRoot, { recursive: true, force: true })
+    if (!await arknightsRecoveryPending(gameDir)) await fs.rm(stageRoot, { recursive: true, force: true })
   }
-})
-
-/** Read `patch.json` from the extracted archive (falling back to the API URL). */
-async function loadManifest(extractDir: string, patch: AkPatch): Promise<PatchManifest> {
-  const local = join(extractDir, 'patch.json')
-  if (await exists(local)) {
-    return JSON.parse(await fs.readFile(local, 'utf-8')) as PatchManifest
-  }
-  if (patch.infoUrl) {
-    const res = await fetch(patch.infoUrl)
-    if (!res.ok) throw new Error(`下载补丁清单失败：HTTP ${res.status}`)
-    return (await res.json()) as PatchManifest
-  }
-  throw new Error('补丁清单缺失，无法应用更新')
 }
+
+async function directoryBytes(dir: string, signal: AbortSignal): Promise<number> {
+  let size = 0
+  for await (const entry of await fs.opendir(dir)) {
+    signal.throwIfAborted()
+    const path = join(dir, entry.name)
+    if (entry.isDirectory()) size += await directoryBytes(path, signal)
+    else if (entry.isFile()) size += (await fs.stat(path)).size
+  }
+  return size
+}
+
+async function commit(gameDir: string, signal: AbortSignal): Promise<void> {
+  emit({ type: 'extracting', message: '正在提交已验证的游戏文件…' })
+  const complete = await finishArknightsCommit(gameDir, signal,
+    (downloaded, total) => emit({ type: 'progress', downloaded, total }))
+  if (!complete) throw new Error('缺少明日方舟更新提交记录')
+}
+
+parentPort?.on('message', async (message: Task) => {
+  if (message.type === 'cancel') {
+    controller?.abort(new Error('已取消'))
+    return
+  }
+  if (controller) return
+  controller = new AbortController()
+  const signal = controller.signal
+  let terminal: Record<string, unknown>
+  try {
+    if (message.type === 'recover') await commit(message.gameDir, signal)
+    else await runDelta(message, signal)
+    terminal = { type: 'done' }
+  } catch (error) {
+    terminal = { type: 'error', message: error instanceof Error ? error.message : String(error) }
+  }
+  // No filesystem work follows the terminal status.
+  closeDownloadWorkerRatePort()
+  emit(terminal)
+  parentPort?.close()
+})

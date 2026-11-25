@@ -4,7 +4,9 @@ import { UpdateManager } from '../update/updateManager'
 import { AppUpdateChecker } from '../services/appUpdate'
 import { PlayTimeStore } from '../services/playTimeStore'
 import { GachaStore } from '../gacha/gachaStore'
-import { pendingDataTransfer } from './dataAccess'
+import { pendingDataTransfer, withExclusiveDataAccess } from './dataAccess'
+import { AppStore } from '../services/appStore'
+import { backupUserData, requireBackup } from '../services/dataBackup'
 
 /**
  * Process-wide singletons shared by the IPC modules. Keeping them here (rather
@@ -12,9 +14,23 @@ import { pendingDataTransfer } from './dataAccess'
  */
 export const runtime = new Runtime()
 export const updates = new UpdateManager()
-export const appUpdate = new AppUpdateChecker(pendingDataTransfer)
 export const playTime = PlayTimeStore.instance()
 export const gacha = new GachaStore()
+export const appUpdate = new AppUpdateChecker(pendingDataTransfer, async (reason, apply, checkSpace) => {
+  await withExclusiveDataAccess(async () => {
+    await checkpointData()
+    await checkSpace()
+    requireBackup(await backupUserData(reason))
+    await apply()
+  })
+})
+
+/** Called inside the exclusive gate, where store writes can settle directly. */
+export async function checkpointData(): Promise<void> {
+  await AppStore.load()
+  for (const record of runtime.checkpointSessions()) await playTime.addSession(record)
+  await Promise.all([playTime.flush(), gacha.flush()])
+}
 
 /** Send an event to every renderer (main window and the gallery viewer). */
 export function broadcast(channel: string, payload?: unknown): void {

@@ -1,7 +1,8 @@
 import { app } from 'electron'
 import { promises as fs } from 'fs'
 import { join } from 'path'
-import { BACKUP_DIR_NAME, hasData, migrateData, PREVIOUS_BACKUP_DIR_NAME } from './dataDir'
+import { BACKUP_DIR_NAME, isTransientEntry, migrateData, PREVIOUS_BACKUP_DIR_NAME } from './dataDir'
+import { hasPersistedSettings, verifySnapshot } from './settingsBackup'
 import { log } from './logger'
 
 /**
@@ -17,6 +18,22 @@ import { log } from './logger'
 
 let backupQueue = Promise.resolve()
 const CANDIDATE_PREFIX = `${BACKUP_DIR_NAME}.new-`
+
+/** Additional space for the new snapshot while the existing slot stays valid. */
+export async function estimateBackupBytes(directory: string, top = true): Promise<number> {
+  let total = 0
+  const entries = await fs.readdir(directory, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
+    if (top && error.code === 'ENOENT') return []
+    throw error
+  })
+  for (const entry of entries) {
+    if (top && isTransientEntry(entry.name) || entry.isFile() && entry.name.endsWith('.tmp')) continue
+    const file = join(directory, entry.name)
+    if (entry.isDirectory()) total += await estimateBackupBytes(file, false)
+    else if (entry.isFile()) total += (await fs.lstat(file)).size
+  }
+  return total
+}
 
 async function cleanAbandonedCandidates(directory: string): Promise<void> {
   for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
@@ -39,11 +56,21 @@ async function cleanAbandonedCandidates(directory: string): Promise<void> {
 
 async function exists(path: string): Promise<boolean> {
   try {
-    await fs.access(path)
+    await fs.lstat(path)
     return true
-  } catch {
-    return false
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw error
   }
+}
+
+export type BackupResult =
+  | { status: 'complete'; copied: number; failed: 0 }
+  | { status: 'not-needed'; copied: 0; failed: 0 }
+  | { status: 'failed'; copied: number; failed: number; message: string }
+
+export function requireBackup(result: BackupResult): void {
+  if (result.status === 'failed') throw new Error(`无法备份用户数据：${result.message}`)
 }
 
 /**
@@ -51,7 +78,7 @@ async function exists(path: string): Promise<boolean> {
  * snapshot. Best-effort: it never throws, and it keeps the old snapshot when the
  * new copy did not capture at least a `config.json`.
  */
-export function backupUserData(reason: string): Promise<{ copied: number; failed: number }> {
+export function backupUserData(reason: string): Promise<BackupResult> {
   const from = app.getPath('userData')
   const next = backupQueue.then(() => backupDataDirectory(from, reason))
   backupQueue = next.then(() => undefined, () => undefined)
@@ -61,28 +88,35 @@ export function backupUserData(reason: string): Promise<{ copied: number; failed
 export async function backupDataDirectory(
   from: string,
   reason: string
-): Promise<{ copied: number; failed: number }> {
+): Promise<BackupResult> {
   const slot = join(from, BACKUP_DIR_NAME)
   const previous = join(from, PREVIOUS_BACKUP_DIR_NAME)
   let tmp: string | undefined
+  let copied = 0
   try {
-    if (!(await exists(from))) return { copied: 0, failed: 0 }
+    if (!(await hasPersistedSettings(from))) return { status: 'not-needed', copied: 0, failed: 0 }
     await cleanAbandonedCandidates(from)
     // A process might have exited between the two renames. Recover the old
     // slot before taking another snapshot.
     if (await exists(previous)) {
-      if (await hasData(slot)) await fs.rm(previous, { recursive: true, force: true })
+      if (await exists(slot)) {
+        await verifySnapshot(slot)
+        await fs.rm(previous, { recursive: true, force: true })
+      }
       else {
-        if (await exists(slot)) throw new Error('present backup slot cannot be validated')
+        await verifySnapshot(previous)
         await fs.rename(previous, slot)
       }
     }
     tmp = await fs.mkdtemp(join(from, `${CANDIDATE_PREFIX}${process.pid}-`))
-    const { copied, failed } = await migrateData(from, tmp)
-    if (failed > 0 || !(await hasData(tmp))) {
-      log(`backup: kept the previous snapshot for "${reason}" (${copied} copied, ${failed} failed or no readable config)`)
-      return { copied, failed }
+    const result = await migrateData(from, tmp)
+    copied = result.copied
+    if (result.failed) {
+      const message = result.firstFailure ?? '部分文件无法复制'
+      log(`backup: kept the previous snapshot for "${reason}" (${message})`)
+      return { status: 'failed', copied, failed: result.failed, message }
     }
+    await verifySnapshot(tmp)
     const hadPrevious = await exists(slot)
     if (hadPrevious) await fs.rename(slot, previous)
     try {
@@ -98,11 +132,12 @@ export async function backupDataDirectory(
     if (hadPrevious) await fs.rm(previous, { recursive: true, force: true }).catch((error) => {
       log(`backup: could not remove the previous snapshot (${String(error)})`)
     })
-    log(`backup: "${reason}" -> ${slot} (${copied} item(s), ${failed} failed)`)
-    return { copied, failed }
+    log(`backup: "${reason}" -> ${slot} (${copied} item(s))`)
+    return { status: 'complete', copied, failed: 0 }
   } catch (error) {
-    log(`backup: "${reason}" failed (${(error as Error).message})`)
-    return { copied: 0, failed: 1 }
+    const message = (error as Error).message
+    log(`backup: "${reason}" failed (${message})`)
+    return { status: 'failed', copied, failed: 1, message }
   } finally {
     if (tmp) await fs.rm(tmp, { recursive: true, force: true }).catch(() => undefined)
   }

@@ -5,7 +5,8 @@ import { pipeline } from 'stream/promises'
 import { setTimeout as wait } from 'timers/promises'
 import { throttle } from './rateLimit'
 import { sha256File } from './hash'
-import { isPositiveFileSize, isSha256 } from './appUpdateManifest'
+import { isPositiveFileSize, isSha256, matchesUpdateTransfer } from './appUpdateManifest'
+import { requireDiskSpace } from './diskSpace'
 
 /**
  * Downloading / unpacking the update payload of a new launcher version.
@@ -80,12 +81,8 @@ async function checkResponse(
   expectedBytes: number,
   range?: { start: number; end: number; size: number }
 ): Promise<void> {
-  const type = range ? 206 : 200
-  const length = response.headers.get('content-length')
   const declared = response.headers.get('content-range')
-  const expected = range ? `bytes ${range.start}-${range.end - 1}/${range.size}` : null
-  if (response.status !== type || !response.body || declared !== expected ||
-      (length !== null && Number(length) !== expectedBytes)) {
+  if (!response.body || !matchesUpdateTransfer(response.status, response.headers, expectedBytes, range)) {
     await cancelBody(response)
     throw new Error(`下载响应无效（HTTP ${response.status} / Content-Range: ${declared ?? '无'}）`)
   }
@@ -232,6 +229,10 @@ export async function downloadPayload(
     parts.push({ path, start, end, bytes })
   }
   const whole = { path: `${dest}.full`, start: 0, end: size, bytes: 0 }
+  // The saved ranges and the assembled file can coexist during verification.
+  // Existing reusable bytes already consume disk space.
+  const reused = parts.reduce((sum, part) => sum + part.bytes, 0)
+  await requireDiskSpace([{ path: dest, bytes: size * 2 - reused }])
   let singleConnection = false
   const current = (): number => singleConnection ? whole.bytes : parts.reduce((sum, part) => sum + part.bytes, 0)
   let previous = current()

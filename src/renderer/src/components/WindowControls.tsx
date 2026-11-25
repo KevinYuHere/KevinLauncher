@@ -55,6 +55,7 @@ export default function WindowControls(): ReactElement {
       </button>
       <button
         className="win-btn"
+        aria-label={maximized ? '还原' : '最大化'}
         title={maximized ? '还原' : '最大化'}
         onClick={() => void window.api.windowToggleMaximize().then(setMaximized)}
       >

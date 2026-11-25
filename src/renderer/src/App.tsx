@@ -1,4 +1,6 @@
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -10,8 +12,11 @@ import {
 import type {
   AddonDescriptor,
   AppEntry,
+  AppSettingsPatch,
   AppUpdateInfo,
   AppUpdateState,
+  CacheKind,
+  DiskCacheKind,
   HomeModuleId,
   LauncherSettings,
   LaunchMethod,
@@ -23,7 +28,8 @@ import type {
   UsageReport,
   WallpaperSettings
 } from '@shared/types'
-import { currentWallpaper, isVideoFile } from '@shared/appEntry'
+import { currentWallpaper, defaultLaunchMethod, isVideoFile } from '@shared/appEntry'
+import { dataErrorDetails } from '@shared/dataErrors'
 import Rail from './components/Rail'
 import { perf } from './perfProbe'
 import GamesRow from './components/GamesRow'
@@ -36,7 +42,6 @@ import UpdateView from './components/UpdateView'
 import SettingsView from './components/SettingsView'
 import ModuleManagerView from './components/ModuleManagerView'
 import LinkedLaunchView from './components/LinkedLaunchView'
-import LaunchTransition from './components/LaunchTransition'
 import Toaster, { showToast } from './components/toast'
 import ThemeClickEffect from './components/ThemeClickEffect'
 import { sweepAfterPageSlide } from './themeTextSweep'
@@ -61,6 +66,24 @@ import { SpecialThemeProvider } from './theme/ThemeScope'
 import { extractVideoAccent } from './videoAccent'
 import { usePreparedWallpaper } from './usePreparedWallpaper'
 import { installWallpaperRegionUpdater, updateWallpaperRegions } from './wallpaperRegion'
+import { useVisualActivity } from './useWindowVisible'
+import { useDebouncedEntitySave } from './useDebouncedEntitySave'
+import { useDialogFocus } from './components/useDialogFocus'
+import { setLiquidVisible } from './liquidMaterial'
+import { setSpringsActive } from './drag/spring'
+import { clearThumbnailCache, thumbnailCacheUsage } from './gallery/thumbs'
+import { clearWallpaperCache, wallpaperDiskUsage, wallpaperMemoryUsage } from './wallpaperPrepared'
+import { formatBytes } from './format'
+
+const LaunchTransition = lazy(() => import('./components/LaunchTransition'))
+
+function updateInfoSource(entry: AppEntry): string {
+  return JSON.stringify([entry.addonId, entry.gameDirectory?.trim() || defaultLaunchMethod(entry)?.targetPath])
+}
+
+function infoFor(entry: AppEntry, result?: { source: string; info: UpdateInfo }): UpdateInfo | undefined {
+  return result?.source === updateInfoSource(entry) ? result.info : undefined
+}
 
 /** Local calendar date as `YYYY-MM-DD` (used to run daily update checks). */
 function localDate(): string {
@@ -91,8 +114,11 @@ export default function App(): ReactElement {
   const [linkedFocusId, setLinkedFocusId] = useState<string | null>(null)
   const [linkedLaunches, setLinkedLaunches] = useState<LinkedLaunch[]>([])
   const [totals, setTotals] = useState<Record<string, number>>({})
-  const [updateInfos, setUpdateInfos] = useState<Record<string, UpdateInfo>>({})
+  const [updateInfos, setUpdateInfos] = useState<Record<string, { source: string; info: UpdateInfo }>>({})
   const [updateStatuses, setUpdateStatuses] = useState<Record<string, UpdateStatus>>({})
+  const updateInfoRequests = useRef(new Map<string, symbol>())
+  const updateProgressRevisions = useRef(new Map<string, number>())
+  const completedUpdateIds = useRef(new Map<string, string>())
 
   const [gamesHidden, setGamesHidden] = useState(false)
   const [peeking, setPeeking] = useState(false)
@@ -104,8 +130,8 @@ export default function App(): ReactElement {
     blur: number
     dim: number
   } | null>(null)
-  const bgSaveTimer = useRef<number | undefined>(undefined)
   const bgRaf = useRef(0)
+  const saveBgTuning = useDebouncedEntitySave()
   const [launcherSettings, setLauncherSettings] = useState<LauncherSettings>({
     iconFile: null,
     fontFamily: null,
@@ -124,6 +150,18 @@ export default function App(): ReactElement {
   const [cropSrc, setCropSrc] = useState<string | null>(null)
   const cropResolver = useRef<((value: string | null) => void) | null>(null)
   const [appsLoaded, setAppsLoaded] = useState(false)
+  const [startupError, setStartupError] = useState('')
+  const [startupAttempt, setStartupAttempt] = useState(0)
+  const visible = useVisualActivity(running.some(({ appId, confirmed }) =>
+    confirmed !== false && apps.some((entry) => entry.id === appId && entry.addonId)))
+  useLayoutEffect(() => {
+    document.documentElement.toggleAttribute('data-visual-paused', !visible)
+    setLiquidVisible(visible)
+    setSpringsActive(visible)
+    return () => {
+      document.documentElement.removeAttribute('data-visual-paused')
+    }
+  }, [visible])
   const [gachaNotice, setGachaNotice] = useState<{
     name: string
     bannerName: string
@@ -135,6 +173,9 @@ export default function App(): ReactElement {
   const checkedUpdateDate = useRef<Map<string, string>>(new Map())
   const [appUpdate, setAppUpdate] = useState<AppUpdateInfo | null>(null)
   const [appUpdateState, setAppUpdateState] = useState<AppUpdateState>(IDLE_APP_UPDATE)
+  const criticalDialog = useRef<HTMLDivElement>(null)
+  const criticalUpdateError = appUpdateState.phase === 'error' && appUpdateState.critical === true
+  useDialogFocus(criticalDialog, criticalUpdateError)
   const [dismissedUpdate, setDismissedUpdate] = useState<string | null>(null)
   const [checkingUpdate, setCheckingUpdate] = useState(false)
   const [launchFx, setLaunchFx] = useState<{
@@ -149,6 +190,9 @@ export default function App(): ReactElement {
   const [desktopWall, setDesktopWall] = useState<string | null>(null)
   const [programDir, setProgramDir] = useState('')
   const [usage, setUsage] = useState<UsageReport | null>(null)
+  const [cleaningUsage, setCleaningUsage] = useState(false)
+  const clearingCache = useRef(false)
+  const usageRevision = useRef(0)
 
   const refreshApps = useCallback(async (): Promise<void> => {
     setApps(await window.api.listApps())
@@ -216,30 +260,46 @@ export default function App(): ReactElement {
   }, [gamesHidden])
 
   useEffect(() => {
+    let current = true
+    setStartupError('')
+    const showLoadError = (error: unknown): void => {
+      if (current) setStartupError(dataErrorDetails(error)?.message ?? (error instanceof Error ? error.message : String(error)))
+    }
     void (async (): Promise<void> => {
-      setAddons(await window.api.listAddons())
-      setGamesHidden((await window.api.getUiPrefs()).gamesRowHidden)
-      await refreshApps()
-      await refreshRunning()
-      await refreshTotals()
-      await refreshLinked()
-      setAppsLoaded(true)
+      try {
+        const [addons, prefs, settings] = await Promise.all([
+          window.api.listAddons(), window.api.getUiPrefs(), window.api.getLauncherSettings(),
+          refreshApps(), refreshRunning(), refreshTotals(), refreshLinked()
+        ])
+        if (!current) return
+        setAddons(addons)
+        setGamesHidden(prefs.gamesRowHidden)
+        setLauncherSettings(settings)
+        setAppsLoaded(true)
+      } catch (error) {
+        showLoadError(error)
+      }
     })()
     const offApps = window.api.onAppsChanged(() => {
-      void refreshApps()
-      void refreshLinked()
+      void Promise.all([refreshApps(), refreshLinked()]).catch((error) =>
+        showToast(`刷新应用失败：${(error as Error).message}`)
+      )
     })
-    const offRunning = window.api.onRunningChanged(() => void refreshRunning())
-    const offPlayTime = window.api.onPlayTimeChanged(() => void refreshTotals())
+    const offRunning = window.api.onRunningChanged(() => void refreshRunning().catch(console.error))
+    const offPlayTime = window.api.onPlayTimeChanged(() => void refreshTotals().catch(console.error))
     return () => {
+      current = false
       offApps()
       offRunning()
       offPlayTime()
     }
-  }, [refreshApps, refreshRunning, refreshTotals, refreshLinked])
+  }, [refreshApps, refreshRunning, refreshTotals, refreshLinked, startupAttempt, showToast])
 
   useEffect(() => {
-    void window.api.getLauncherSettings().then(setLauncherSettings)
+    if (appsLoaded && !startupError) void window.api.confirmAppReady().catch(console.error)
+  }, [appsLoaded, startupError])
+
+  useEffect(() => {
     void window.api.listFonts().then(setFonts)
     void window.api.appVersion().then(setVersion)
     void window.api.desktopWallpaper().then(setDesktopWall)
@@ -247,7 +307,6 @@ export default function App(): ReactElement {
       setDataDir(info.current)
       setProgramDir(info.programDir)
     })
-    void window.api.housekeepingUsage().then(setUsage)
     return window.api.onLauncherChanged(() =>
       void window.api.getLauncherSettings().then(setLauncherSettings)
     )
@@ -256,16 +315,30 @@ export default function App(): ReactElement {
   // Launcher self-update: adopt the result of the startup / 24h check (the main
   // process runs it) and of any later check.
   useEffect(() => {
-    void window.api.appUpdateStatus().then((status) => {
-      if (status.info) setAppUpdate(status.info)
+    let alive = true
+    let received = false
+    const off = window.api.onAppUpdateAvailable((info) => {
+      received = true
+      setAppUpdate(info)
     })
-    return window.api.onAppUpdateAvailable(setAppUpdate)
+    void window.api.appUpdateStatus().then((status) => {
+      if (alive && !received && status.info) setAppUpdate(status.info)
+    }).catch(console.error)
+    return () => { alive = false; off() }
   }, [])
 
   // Download / install progress for the rail indicator.
   useEffect(() => {
-    void window.api.appUpdateState().then(setAppUpdateState)
-    return window.api.onAppUpdateState(setAppUpdateState)
+    let alive = true
+    let received = false
+    const off = window.api.onAppUpdateState((state) => {
+      received = true
+      setAppUpdateState(state)
+    })
+    void window.api.appUpdateState().then((state) => {
+      if (alive && !received) setAppUpdateState(state)
+    }).catch(console.error)
+    return () => { alive = false; off() }
   }, [])
 
   // Once the download has taken over, the dialog steps aside; the rail ring shows
@@ -367,18 +440,51 @@ export default function App(): ReactElement {
     }
   }, [showToast])
 
-  /** Cleans the selected caches and refreshes the usage report. */
-  const handleCleanUsage = useCallback(
-    async (kinds: ('staging' | 'thumbs' | 'logs')[]): Promise<void> => {
-      try {
-        setUsage(await window.api.housekeepingClean(kinds))
-        showToast('已清理所选缓存')
-      } catch (error) {
-        showToast(`清理失败：${(error as Error).message}`)
+  const refreshUsage = useCallback(async (): Promise<void> => {
+    const revision = ++usageRevision.current
+    const [disk, wallpaperDisk] = await Promise.all([
+      window.api.housekeepingUsage(), wallpaperDiskUsage().catch(() => null)
+    ])
+    if (revision === usageRevision.current) {
+      setUsage({ ...disk, wallpaperDisk, thumbnailMemory: thumbnailCacheUsage(),
+        wallpaperMemory: wallpaperMemoryUsage() })
+    }
+  }, [])
+
+  useEffect(() => {
+    if (view === 'settings') void refreshUsage().catch(console.error)
+  }, [view, refreshUsage])
+
+  const handleCleanUsage = useCallback(async (kinds: CacheKind[]): Promise<void> => {
+    if (clearingCache.current) return
+    clearingCache.current = true
+    setCleaningUsage(true)
+    const failures: string[] = []
+    let memory = kinds.includes('thumbs') ? clearThumbnailCache() : 0
+    let disk = 0
+    try {
+      const diskKinds = kinds.filter((kind): kind is DiskCacheKind => kind !== 'wallpaper')
+      if (diskKinds.length) {
+        try {
+          const result = await window.api.housekeepingClean(diskKinds)
+          disk += result.diskBytes
+          failures.push(...result.failures)
+        } catch (error) { failures.push((error as Error).message) }
       }
-    },
-    [showToast]
-  )
+      if (kinds.includes('wallpaper')) {
+        const result = await clearWallpaperCache()
+        memory += result.memory
+        disk += result.disk
+        if (result.failure) failures.push(result.failure)
+      }
+      await refreshUsage().catch((error) => failures.push((error as Error).message))
+      showToast(`已释放磁盘文件 ${formatBytes(disk)}、内存缓存 ${formatBytes(memory)}` +
+        (failures.length ? `。失败项：${failures.join('；')}` : ''))
+    } finally {
+      clearingCache.current = false
+      setCleaningUsage(false)
+    }
+  }, [refreshUsage])
 
   /** Moves every setting to a new data directory (the launcher restarts). */
   const handleChangeDataDir = useCallback(async (): Promise<void> => {
@@ -414,20 +520,25 @@ export default function App(): ReactElement {
     if (view !== 'linkedLaunch') setLinkedFocusId(null)
   }, [view])
 
-  const checkUpdate = useCallback(async (appId: string): Promise<void> => {
-    try {
-      const info = await window.api.updateInfo(appId)
-      setUpdateInfos((prev) => ({ ...prev, [appId]: info }))
-    } catch {
-      /* ignore update check errors */
-    }
-  }, [])
-
   /** Latest app list, so the window-shown handler always sees fresh data. */
   const appsRef = useRef<AppEntry[]>([])
-  useEffect(() => {
-    appsRef.current = apps
-  }, [apps])
+  appsRef.current = apps
+  const checkUpdate = useCallback(async (appId: string): Promise<UpdateInfo | null> => {
+    const entry = appsRef.current.find((app) => app.id === appId)
+    if (!entry) return null
+    const source = updateInfoSource(entry)
+    const request = Symbol()
+    updateInfoRequests.current.set(appId, request)
+    try {
+      const info = await window.api.updateInfo(appId)
+      const latest = appsRef.current.find((app) => app.id === appId)
+      if (updateInfoRequests.current.get(appId) !== request || !latest || updateInfoSource(latest) !== source) return null
+      setUpdateInfos((prev) => ({ ...prev, [appId]: { source, info } }))
+      return info
+    } finally {
+      if (updateInfoRequests.current.get(appId) === request) updateInfoRequests.current.delete(appId)
+    }
+  }, [])
 
   // Check every supported game for updates once per day. Runs when the app list
   // loads/changes and whenever the window becomes visible (startup or tray).
@@ -436,9 +547,10 @@ export default function App(): ReactElement {
       const date = localDate()
       for (const app of list ?? appsRef.current) {
         if (!app.addonId) continue
-        if (checkedUpdateDate.current.get(app.id) === date) continue
-        checkedUpdateDate.current.set(app.id, date)
-        void checkUpdate(app.id)
+        const key = JSON.stringify([date, updateInfoSource(app)])
+        if (checkedUpdateDate.current.get(app.id) === key) continue
+        checkedUpdateDate.current.set(app.id, key)
+        void checkUpdate(app.id).catch(console.error)
       }
     },
     [checkUpdate]
@@ -449,6 +561,9 @@ export default function App(): ReactElement {
   }, [apps, runDailyChecks])
 
   useEffect(() => window.api.onWindowShown(() => runDailyChecks()), [runDailyChecks])
+  useEffect(() => window.api.onShutdownFailed((message) => {
+    showToast(`保存失败，启动器仍在运行：${message}`)
+  }), [])
 
   const handleAddApp = useCallback(
     async (input: NewAppEntry, iconDataUrl: string | null): Promise<void> => {
@@ -464,8 +579,12 @@ export default function App(): ReactElement {
 
   /** Merge a partial change into an app (settings page edits it in place). */
   const handlePatchEntry = useCallback(
-    async (entry: AppEntry, patch: Partial<AppEntry>): Promise<void> => {
-      await window.api.updateApp({ ...entry, ...patch })
+    async (appId: string, patch: AppSettingsPatch): Promise<void> => {
+      try {
+        await window.api.updateApp(appId, patch)
+      } catch (error) {
+        showToast(dataErrorDetails(error)?.message ?? (error instanceof Error ? error.message : '应用设置保存失败'))
+      }
     },
     []
   )
@@ -501,7 +620,8 @@ export default function App(): ReactElement {
         showToast(result.error ?? '启动失败')
         return
       }
-      if (result.message) showToast(result.message)
+        if (result.message) showToast(result.message)
+        else if (result.confirmation === 'requested') showToast('启动请求已提交，等待程序出现')
       // A launch may be a wallpaper-rotation trigger.
       if (entry?.wallpaperSettings?.trigger === 'appLaunch') {
         await window.api.wallpaperAdvance(id)
@@ -517,7 +637,8 @@ export default function App(): ReactElement {
   const handleStop = useCallback(
     async (id: string): Promise<void> => {
       const result = await window.api.stopApp(id)
-      showToast(result.killed > 0 ? `已停止（结束 ${result.killed} 个进程）` : '已停止')
+      if (!result.ok) showToast(result.error ?? '停止失败')
+      else showToast(result.killed > 0 ? `已停止（结束 ${result.killed} 个进程）` : '已停止')
     },
     [showToast]
   )
@@ -525,25 +646,34 @@ export default function App(): ReactElement {
   // Live update/download progress (feeds the home-screen controls).
   useEffect(() => {
     return window.api.onUpdateProgress((status) => {
+      updateProgressRevisions.current.set(status.appId, (updateProgressRevisions.current.get(status.appId) ?? 0) + 1)
       setUpdateStatuses((prev) => ({ ...prev, [status.appId]: status }))
       // Once an update finishes, drop the stale "hasUpdate" flag so the button
       // falls back from "开始更新" to "启动" immediately, then re-check for the
       // authoritative version.
       if (status.phase === 'done') {
-        setUpdateInfos((prev) => {
+        if (status.taskId && completedUpdateIds.current.get(status.appId) === status.taskId) return
+        if (status.taskId) completedUpdateIds.current.set(status.appId, status.taskId)
+        // Supersede a pre-completion version lookup that's still in flight.
+        updateInfoRequests.current.delete(status.appId)
+        if (status.mode === 'update') setUpdateInfos((prev) => {
           const cur = prev[status.appId]
-          return cur ? { ...prev, [status.appId]: { ...cur, hasUpdate: false } } : prev
+          return cur ? { ...prev, [status.appId]: { ...cur, info: { ...cur.info, hasUpdate: false } } } : prev
         })
-        void checkUpdate(status.appId)
+        void checkUpdate(status.appId).catch(console.error)
       }
     })
   }, [checkUpdate])
 
   useEffect(() => {
     if (!currentId) return
+    let alive = true
+    const revision = updateProgressRevisions.current.get(currentId)
     void window.api.updateStatus(currentId).then((status) => {
+      if (!alive || revision !== updateProgressRevisions.current.get(currentId)) return
       setUpdateStatuses((prev) => ({ ...prev, [currentId]: status }))
-    })
+    }).catch(console.error)
+    return () => { alive = false }
   }, [currentId])
 
   const handleUpdate = useCallback(
@@ -684,13 +814,15 @@ export default function App(): ReactElement {
       presentLaunchFx(current?.launchEffect ?? 'none', origin)
       const result = await window.api.launchLinkedLaunch(id)
       if (!result.ok) showToast(result.error ?? '启动失败')
+      else if (result.confirmation === 'requested') showToast('关联启动请求已提交，等待程序出现')
     },
     [current, showToast, presentLaunchFx]
   )
 
   const handleStopLinked = useCallback(
     async (id: string): Promise<void> => {
-      await window.api.stopApp(`linked:${id}`)
+      const result = await window.api.stopApp(`linked:${id}`)
+      if (!result.ok) showToast(result.error ?? '停止失败')
     },
     []
   )
@@ -750,20 +882,24 @@ export default function App(): ReactElement {
     }
     try {
       const result = await window.api.importData()
-      if (result) showToast(`已导入（${result.apps} 个应用）`)
+      if (result) {
+        const warning = result.warnings.length ? `。部分系统设置未生效：${result.warnings.join('、')}` : ''
+        showToast(`已导入（${result.apps} 个应用）${warning}`)
+      }
     } catch (error) {
-      showToast(`导入失败：${(error as Error).message}`)
+      showToast(`导入失败：${dataErrorDetails(error)?.message ?? (error as Error).message}`)
     }
   }, [showToast])
 
-  const renderSubView = (entry: AppEntry): ReactElement => {
+  const renderSubView = (entry: AppEntry | null): ReactElement => {
     const back = (): void => setView('home')
-    if (view === 'playtime') {
-      return <PlayTimeView entry={entry} onBack={back} />
+    if (view === 'playtime' && entry) {
+      return <PlayTimeView key={entry.id} entry={entry} onBack={back} />
     }
-    if (view === 'gacha') {
+    if (view === 'gacha' && entry) {
       return (
         <GachaView
+          key={`${entry.id}:${entry.addonId ?? ''}`}
           entry={entry}
           addon={addons.find((a) => a.id === entry.addonId)}
           onBack={back}
@@ -772,15 +908,17 @@ export default function App(): ReactElement {
         />
       )
     }
-    if (view === 'gallery') {
-      return <GalleryView entry={entry} onBack={back} onEdit={() => setView('settings')} />
+    if (view === 'gallery' && entry) {
+      return <GalleryView key={entry.id} active={visible} entry={entry} onBack={back} onEdit={() => setView('settings')} />
     }
-    if (view === 'update') {
+    if (view === 'update' && entry) {
       return (
         <UpdateView
+          key={entry.id}
           entry={entry}
-          info={updateInfos[entry.id]}
-          onChecked={(info) => setUpdateInfos((prev) => ({ ...prev, [entry.id]: info }))}
+          info={infoFor(entry, updateInfos[entry.id])}
+          status={updateStatuses[entry.id]}
+          onCheck={checkUpdate}
           onBack={back}
           onToast={showToast}
         />
@@ -801,7 +939,7 @@ export default function App(): ReactElement {
         />
       )
     }
-    if (view === 'modules') {
+    if (view === 'modules' && entry) {
       return (
         <ModuleManagerView
           entry={entry}
@@ -817,7 +955,7 @@ export default function App(): ReactElement {
           onSetModuleLabel={(label) => void window.api.setModuleLabel(entry.id, label)}
           onSetLaunchEffect={(effect) => void window.api.setLaunchEffect(entry.id, effect)}
           onSetLaunchMethods={(methods, defaultId) =>
-            void handleSetLaunchMethods(entry.id, methods, defaultId)
+            handleSetLaunchMethods(entry.id, methods, defaultId)
           }
           onWallpaperAdd={() => void handleWallpaperAdd()}
           onWallpaperRemove={(id) => void handleWallpaperRemove(id)}
@@ -839,10 +977,10 @@ export default function App(): ReactElement {
         entry={entry}
         addons={addons}
         onBack={back}
-        onPatchEntry={(patch) => void handlePatchEntry(entry, patch)}
+        onPatchEntry={(patch) => { if (entry) void handlePatchEntry(entry.id, patch) }}
         onPickIcon={() => void handlePickAppIcon()}
         onResetIcon={() => void handleResetAppIcon()}
-        onRemove={() => void handleRemove(entry)}
+        onRemove={() => { if (entry) void handleRemove(entry) }}
         onOpenModuleSettings={(section) => {
           setModuleSection(section)
           setView('modules')
@@ -856,15 +994,14 @@ export default function App(): ReactElement {
         onSetBehavior={(patch) => {
           void window.api.setLauncherBehavior(patch).then((settings) => {
             setLauncherSettings(settings)
-            // Switching channel re-checks immediately so the indicator is accurate.
-            if (patch.updateChannel) void handleCheckUpdate()
-          })
+          }).catch((error) => showToast(dataErrorDetails(error)?.message ?? (error as Error).message))
         }}
         onExportData={() => void exportData()}
         onImportData={() => void importData()}
         dataDir={dataDir}
         onChangeDataDir={() => void handleChangeDataDir()}
         usage={usage}
+        cleaningUsage={cleaningUsage}
         onCleanUsage={(kinds) => void handleCleanUsage(kinds)}
         onCheckUpdate={() => void handleCheckUpdate()}
         checkingUpdate={checkingUpdate}
@@ -891,19 +1028,19 @@ export default function App(): ReactElement {
   // Video wallpapers cannot be sampled by the main process, so decode the first
   // frame here and update the auto theme colour when the video changes.
   useEffect(() => {
-    if (!current || !current.autoTheme || !isVideo || !bg) return undefined
-    let cancelled = false
+    if (!visible || !current || !current.autoTheme || !isVideo || !bg) return undefined
+    const controller = new AbortController()
     const appId = current.id
-    void extractVideoAccent(bg).then((color) => {
-      if (!cancelled && color && color !== current.themeColor) {
+    void extractVideoAccent(bg, controller.signal).then((color) => {
+      if (!controller.signal.aborted && color && color !== current.themeColor) {
         void window.api.setThemeColor(appId, color)
       }
     })
     return () => {
-      cancelled = true
+      controller.abort()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bg, isVideo, current?.autoTheme, current?.id])
+  }, [bg, isVideo, current?.autoTheme, current?.id, visible])
 
   // Viewport in CSS px + device pixel ratio. Background preparation depends on
   // it: a wallpaper is rasterised once per size, so resizing waits for the drag
@@ -932,7 +1069,7 @@ export default function App(): ReactElement {
     }
   }, [])
 
-  const prepared = usePreparedWallpaper(isVideo ? null : bg, winSize.w + 128, winSize.h + 128, winSize.dpr)
+  const prepared = usePreparedWallpaper(isVideo ? null : bg, winSize.w + 128, winSize.h + 128, winSize.dpr, visible)
   useLayoutEffect(() => {
     if (!bg) { setBgDisplay(null); return }
     const tuning = { blur: current?.backgroundBlur ?? 0, dim: current?.backgroundDim ?? 0 }
@@ -947,14 +1084,22 @@ export default function App(): ReactElement {
   // time an app is shown) and on an interval. `appLaunch` is handled in
   // `handleLaunch`.
   const startedApps = useRef<Set<string>>(new Set())
+  const switchedWallpaperFor = useRef<string | null>(null)
   useEffect(() => {
-    if (!current) return undefined
+    if (!current) {
+      switchedWallpaperFor.current = null
+      return undefined
+    }
     const settings = current.wallpaperSettings
     const trigger = settings?.trigger
     if (trigger === 'appSwitch') {
-      void window.api.wallpaperAdvance(current.id)
+      if (switchedWallpaperFor.current !== current.id) {
+        switchedWallpaperFor.current = current.id
+        void window.api.wallpaperAdvance(current.id)
+      }
       return undefined
     }
+    switchedWallpaperFor.current = null
     if (trigger === 'launcherStart') {
       if (!startedApps.current.has(current.id)) {
         startedApps.current.add(current.id)
@@ -963,6 +1108,7 @@ export default function App(): ReactElement {
       return undefined
     }
     if (trigger === 'interval') {
+      if (!visible) return undefined
       if (!startedApps.current.has(current.id)) {
         startedApps.current.add(current.id)
         void window.api.wallpaperAdvance(current.id)
@@ -976,27 +1122,27 @@ export default function App(): ReactElement {
     }
     return undefined
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [current?.id, current?.wallpaperSettings?.trigger, current?.wallpaperSettings?.intervalMinutes])
+  }, [current?.id, current?.wallpaperSettings?.trigger, current?.wallpaperSettings?.intervalMinutes, visible])
 
   // Live background tuning from the settings sliders: update instantly, persist
   // debounced.
   const handleBgTuning = useCallback(
     (blur: number, dim: number): void => {
-      // Coalesce the live preview to one update per frame (dragging stays smooth).
-      if (!bgRaf.current) {
-        bgRaf.current = requestAnimationFrame(() => {
-          bgRaf.current = 0
-          setBgDisplay((prev) => (prev ? { ...prev, blur, dim } : prev))
-        })
-      }
-      if (bgSaveTimer.current) window.clearTimeout(bgSaveTimer.current)
       const id = current?.id
-      bgSaveTimer.current = window.setTimeout(() => {
-        if (id) void window.api.setBgTuning(id, { blur, dim })
-      }, 180)
+      if (!id) return
+      cancelAnimationFrame(bgRaf.current)
+      bgRaf.current = requestAnimationFrame(() => {
+        setBgDisplay((prev) => (prev ? { ...prev, blur, dim } : prev))
+      })
+      saveBgTuning(id, 180, () => {
+        void window.api.setBgTuning(id, { blur, dim }).catch((error) =>
+          showToast(`保存壁纸效果失败：${(error as Error).message}`)
+        )
+      })
     },
-    [current?.id]
+    [current?.id, saveBgTuning]
   )
+  useLayoutEffect(() => () => cancelAnimationFrame(bgRaf.current), [currentId])
 
   // Apply the current app's glass. Live edits in the settings page call
   // `applyGlass` themselves (immediate, no App re-render); this keeps other
@@ -1045,7 +1191,18 @@ export default function App(): ReactElement {
     updateWallpaperRegions()
   }, [displaySrc, imageWidth, imageHeight, winSize])
 
-  useEffect(() => installWallpaperRegionUpdater(), [])
+  useEffect(() => visible ? installWallpaperRegionUpdater() : undefined, [visible])
+
+  const videoLayer = useRef<HTMLVideoElement>(null)
+  const videoSource = bgDisplay?.kind === 'video' ? bgDisplay.src : null
+  useEffect(() => {
+    const video = videoLayer.current
+    if (!video) return
+    if (visible) void video.play().catch(() => undefined)
+    else video.pause()
+    return () => video.pause()
+  }, [videoSource, visible])
+  useEffect(() => { if (!visible) setLaunchFx(null) }, [visible])
 
   // Publish the current app's wallpaper blur / dim so popups and dialogs can
   // show the same wallpaper appearance.
@@ -1177,10 +1334,11 @@ export default function App(): ReactElement {
       {bgDisplay && bgDisplay.kind === 'video' && (
         <video
           key={bgDisplay.src}
+          ref={videoLayer}
           className="bg-layer"
           src={bgDisplay.src}
           crossOrigin="anonymous"
-          autoPlay
+          preload={visible ? 'auto' : 'none'}
           muted
           loop
           playsInline
@@ -1225,7 +1383,8 @@ export default function App(): ReactElement {
             }
           }}
         >
-          <div className={`games-collapser${!gamesHidden || peeking ? '' : ' collapsed'}`}>
+          <div className={`games-collapser${!gamesHidden || peeking ? '' : ' collapsed'}`}
+            ref={(el) => { if (el) el.inert = gamesHidden && !peeking }}>
             <GamesRow
               apps={apps}
               currentId={currentId}
@@ -1248,6 +1407,8 @@ export default function App(): ReactElement {
           </div>
           <button
             className="games-toggle"
+            aria-label={gamesHidden ? '固定展开游戏栏' : '收起游戏栏'}
+            aria-expanded={!gamesHidden || peeking}
             title={gamesHidden ? '固定展开游戏栏' : '收起游戏栏'}
             onClick={handleGamesToggle}
           >
@@ -1268,7 +1429,14 @@ export default function App(): ReactElement {
       )}
 
       <main className="stage">
-          {!appsLoaded ? null : !current ? (
+          {view === 'settings' || view === 'linkedLaunch' ? renderSubView(current) :
+          startupError && !appsLoaded ? (
+            <div className="welcome glass" role="alert">
+              <h2>读取启动器数据失败</h2>
+              <p>{startupError}</p>
+              <button className="btn" onClick={() => setStartupAttempt((attempt) => attempt + 1)}>重试</button>
+            </div>
+          ) : !appsLoaded ? <div className="welcome glass" role="status">正在读取应用…</div> : !current ? (
             <div className="welcome glass">
               <div className="welcome-logo">
                 <img
@@ -1290,10 +1458,13 @@ export default function App(): ReactElement {
             <HomeView
               entry={current}
               addon={currentAddon}
-              running={!!currentRunning}
+              running={!!currentRunning && currentRunning.confirmed !== false}
+              starting={currentRunning?.confirmed === false}
               startedAt={currentRunning?.startedAt}
+              elapsedSec={currentRunning?.elapsedSec}
+              activeSince={currentRunning?.activeSince}
               totalSec={totals[current.id] ?? 0}
-              updateInfo={updateInfos[current.id]}
+              updateInfo={infoFor(current, updateInfos[current.id])}
               updateStatus={updateStatuses[current.id] ?? null}
               linkedLaunches={linkedLaunches}
               runningKeys={running.map((r) => r.appId)}
@@ -1337,11 +1508,13 @@ export default function App(): ReactElement {
       )}
 
       <Toaster />
-      <ThemeClickEffect />
+      <ThemeClickEffect active={visible} />
 
       <ConfirmHost />
 
-      <LaunchTransition trigger={launchFx} onDone={() => setLaunchFx(null)} />
+      {visible && launchFx && <Suspense fallback={null}>
+        <LaunchTransition trigger={launchFx} onDone={() => setLaunchFx(null)} />
+      </Suspense>}
 
       {gachaNotice && (
         <div className="gacha-toast">
@@ -1350,8 +1523,9 @@ export default function App(): ReactElement {
         </div>
       )}
 
-      {appUpdateState.phase === 'error' && appUpdateState.critical && (
-        <div className="critical-blocker" role="alertdialog" aria-modal="true">
+      {criticalUpdateError && (
+        <div ref={criticalDialog} className="critical-blocker" role="alertdialog" aria-modal="true"
+          aria-label="重要更新未能完成" tabIndex={-1}>
           <div className="critical-card glass">
             <span className="critical-icon" aria-hidden="true">
               !

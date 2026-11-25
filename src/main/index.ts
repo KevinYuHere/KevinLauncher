@@ -1,28 +1,31 @@
 import { app, shell, BrowserWindow, protocol } from 'electron'
 import { promises as fs } from 'fs'
-import { join, basename, dirname } from 'path'
+import { join, basename } from 'path'
 import { bindWindowRole } from './services/windowRole'
+import { observeWindowActivity } from './services/windowActivity'
 import { serveMediaFile } from './services/mediaProtocol'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { registerIpc, registerUpdatePreview, runtime, warmUpFonts, appUpdate } from './ipc'
+import { requireDataRecovery, withExclusiveDataAccess } from './ipc/dataAccess'
 import { AppStore } from './services/appStore'
+import { recoverDataMove } from './services/dataMoveJournal'
 import { applyLauncherIcon, launcherIconPaths } from './services/appIcon'
 import {
   destroyTray,
+  cancelQuitting,
   ensureTray,
   getCloseToTray,
   isQuitting,
   markQuitting,
   notifyWindowShown,
   setCloseToTray,
+  setMainWindowProvider,
   showMainWindow
 } from './services/behavior'
 import { applyAutoStart, startedHidden } from './services/autostart'
 import { applyDataDir } from './services/dataDir'
 import { applyThemePolicyOnStartup } from './services/themePolicy'
-import { syncInstalledVersion } from './services/install'
-import { cleanArknightsStaging, cleanUpdateStaging } from './services/housekeeping'
-import { currentAppVersion } from './services/appVersion'
+import { cleanUpdateStaging } from './services/housekeeping'
 import { flushBeforeShutdown } from './services/shutdown'
 import { recoverSettingsImport } from './services/settingsBackup'
 import { BgStore } from './services/background'
@@ -30,6 +33,11 @@ import { BrandStore } from './services/brand'
 import { IconStore } from './services/icon'
 import { ensureAdministrator, isElevated } from './services/elevation'
 import { log } from './services/logger'
+import { launcherAppId, launcherDisplayName, trialBuild } from './services/buildIdentity'
+import { setupTaskActive } from './services/setupTask'
+import { SETUP_EXIT_ARGUMENT } from './services/install'
+import { recordApplicationStartup } from './services/appActivation'
+import { broadcast, checkpointData } from './ipc/context'
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -51,7 +59,7 @@ protocol.registerSchemesAsPrivileged([
 // and packaged builds so config / icons / backgrounds stay shared. A custom
 // directory (chosen in the installer or in the settings) is stored in the
 // registry and applied here, before anything reads `app.getPath('userData')`.
-app.setName('kevin-launcher')
+app.setName(trialBuild ? 'kevin-launcher-trial' : 'kevin-launcher')
 applyDataDir()
 
 /** Window size / role of the current run. */
@@ -75,7 +83,7 @@ let windowIcon: string | undefined
 
 
 /** Window size / role of the current run. */
-function createWindow(icon?: string, hidden = false, mode: RunMode = 'app'): void {
+function createWindow(icon?: string, hidden = false, mode: RunMode = 'app'): BrowserWindow {
   const setup = mode !== 'app'
   const mainWindow = new BrowserWindow({
     width: setup ? 1000 : 1180,
@@ -87,7 +95,7 @@ function createWindow(icon?: string, hidden = false, mode: RunMode = 'app'): voi
     frame: false,
     autoHideMenuBar: true,
     backgroundColor: '#0f1115',
-    title: 'KevinLauncher',
+    title: launcherDisplayName,
     icon,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
@@ -96,6 +104,7 @@ function createWindow(icon?: string, hidden = false, mode: RunMode = 'app'): voi
   })
 
   bindWindowRole(mainWindow.webContents, mode, is.dev ? process.env.ELECTRON_RENDERER_URL : undefined)
+  if (!setup) observeWindowActivity(mainWindow, hidden)
   mainWindow.on('ready-to-show', () => {
     // Autostart in tray mode: stay hidden, the tray icon opens the window.
     if (hidden) return
@@ -112,6 +121,10 @@ function createWindow(icon?: string, hidden = false, mode: RunMode = 'app'): voi
   mainWindow.on('unmaximize', () => mainWindow.webContents.send('window:maximized', false))
 
   mainWindow.on('close', (event) => {
+    if (setup && setupTaskActive()) {
+      event.preventDefault()
+      return
+    }
     if (getCloseToTray() && !isQuitting()) {
       event.preventDefault()
       mainWindow.hide()
@@ -125,18 +138,21 @@ function createWindow(icon?: string, hidden = false, mode: RunMode = 'app'): voi
   })
 
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
-    mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
+    const url = new URL(process.env['ELECTRON_RENDERER_URL'])
+    if (setup) url.hash = mode
+    mainWindow.loadURL(url.href)
   } else {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'), { hash: mode })
   }
+  return mainWindow
 }
 
 app.whenReady().then(async () => {
-  electronApp.setAppUserModelId('com.kevin.kevinlauncher')
+  electronApp.setAppUserModelId(launcherAppId)
 
   // A lightweight update may run on a legacy shell with an asInvoker manifest.
   // Hand off before taking the instance lock, binding IPC or opening any window.
-  if (app.isPackaged && runMode !== 'uninstall' && !(await ensureAdministrator(runMode))) {
+  if (app.isPackaged && !trialBuild && runMode !== 'uninstall' && !(await ensureAdministrator(runMode))) {
     app.quit()
     return
   }
@@ -150,7 +166,23 @@ app.whenReady().then(async () => {
       app.quit()
       return
     }
-    app.on('second-instance', () => showMainWindow())
+    if (process.argv.includes(SETUP_EXIT_ARGUMENT)) {
+      app.quit()
+      return
+    }
+    if (app.isPackaged) recordApplicationStartup()
+    let preparingForSetup: Promise<void> | undefined
+    app.on('second-instance', (_event, argv) => {
+      if (argv.includes(SETUP_EXIT_ARGUMENT)) {
+        preparingForSetup ??= withExclusiveDataAccess(checkpointData).then(() => {
+          markQuitting()
+          app.quit()
+        }).catch((error) => log(`setup: launcher could not save before exit (${String(error)})`))
+          .finally(() => { preparingForSetup = undefined })
+      } else {
+        showMainWindow()
+      }
+    })
   }
   log(`app: mode=${runMode} packaged=${app.isPackaged} dev=${is.dev}`)
 
@@ -187,59 +219,69 @@ app.whenReady().then(async () => {
   void isElevated().then((elevated) => log(`app: administrator=${elevated}`))
 
   const mode = runMode
+  let recoveryFailed = false
   if (mode === 'app') {
     try {
+      await recoverDataMove(app.getPath('userData'))
       await recoverSettingsImport(app.getPath('userData'))
     } catch (error) {
-      log(`startup: could not recover an interrupted import (${String(error)})`)
-      app.exit(1)
-      return
+      log(`startup: could not recover an interrupted data transfer (${String(error)})`)
+      requireDataRecovery(error)
+      recoveryFailed = true
     }
   }
   registerIpc(mode)
   registerQuitHandlers()
   if (mode === 'app') {
     // A release policy applies only when the installed launcher starts.
-    await applyThemePolicyOnStartup()
-    windowIcon = (await launcherIconPaths()).png
+    if (!recoveryFailed) await applyThemePolicyOnStartup()
+    windowIcon = (await launcherIconPaths(recoveryFailed ? null : undefined)).png
   }
   // `startedHidden()` is true when the Run entry launched us with `--tray`.
-  createWindow(windowIcon, mode === 'app' && startedHidden(), mode)
+  if (mode === 'app') {
+    let main = createWindow(windowIcon, !recoveryFailed && startedHidden(), mode)
+    setMainWindowProvider(() => {
+      if (main.isDestroyed()) main = createWindow(windowIcon)
+      return main
+    })
+  } else createWindow(windowIcon, false, mode)
 
   // In install / uninstall mode the app is just a small setup UI: no tray, no
   // autostart, no update checking.
-  if (mode !== 'app') return
+  if (mode !== 'app' || recoveryFailed) return
 
-  const launcherSettings = await AppStore.launcherSettings()
-  setCloseToTray(launcherSettings.closeAction === 'tray')
-  applyAutoStart(launcherSettings.autoStart)
+  const launcherSettings = await AppStore.launcherSettings().catch((error) => {
+    log(`startup: user configuration is unavailable (${String(error)})`)
+    return null
+  })
+  if (launcherSettings) {
+    setCloseToTray(launcherSettings.closeAction === 'tray')
+    void applyAutoStart(launcherSettings.autoStart).catch(() => undefined)
+  }
 
   // Icons first (window + tray image), then the tray itself: creating the tray
   // before the icon is resolved would leave it with a generic image.
-  await applyLauncherIcon()
+  if (launcherSettings) {
+    try {
+      await AppStore.synchronizeLauncherIcon((iconFile) => applyLauncherIcon({ iconFile, reportFailure: true }))
+    } catch (error) {
+      log(`startup: retained the previous launcher icons (${String(error)})`)
+    }
+  }
   await ensureTray()
   warmUpFonts()
 
   // Check GitHub Releases shortly after launch, then every 24 hours.
   appUpdate.start()
-  // Remove `app-<old version>` directories left over from previous updates.
-  void appUpdate.cleanupOldVersions()
   // Drop staged update downloads that are not for the running version.
   void cleanUpdateStaging()
   // Arknights apply-staging leftovers (a killed update can leave GBs behind).
-  void cleanArknightsStaging()
-  // An in-app upgrade changes the version pointer but not the uninstall entry /
-  // install marker — keep those in sync so the setup reports the right version.
-  if (app.isPackaged) {
-    void syncInstalledVersion(dirname(process.execPath), currentAppVersion())
-  }
-
   // One-shot download-UI preview: if `%userData%/simulate.json` exists, advertise
   // a fake update (and/or pre-download) for the given app(s), then remove the
   // file. The user clicks to start it and the download is then simulated.
   // Accepts a single `{ appId, mode }` or an array (mode: update|preDownload|both,
   // optional `stopAt` 0–1 to auto-pause the pre-download at that fraction).
-  void (async (): Promise<void> => {
+  if (trialBuild) void (async (): Promise<void> => {
     try {
       const file = join(app.getPath('userData'), 'simulate.json')
       const raw = await fs.readFile(file, 'utf-8')
@@ -263,14 +305,16 @@ app.whenReady().then(async () => {
     }
   })()
 
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow(windowIcon)
-  })
+  app.on('activate', showMainWindow)
 })
 
 function registerQuitHandlers(): void {
   let state: 'ready' | 'flushing' | 'flushed' = 'ready'
   app.on('before-quit', (event) => {
+    if (setupTaskActive()) {
+      event.preventDefault()
+      return
+    }
     markQuitting()
     // Flush play-time (and close out running sessions) before exiting. The
     // handler prevents the first quit, flushes, then quits for real.
@@ -278,14 +322,19 @@ function registerQuitHandlers(): void {
     event.preventDefault()
     if (state === 'flushing') return
     state = 'flushing'
-    void flushBeforeShutdown().finally(() => {
+    void flushBeforeShutdown().then(() => {
       state = 'flushed'
       app.quit()
+    }).catch((error: unknown) => {
+      state = 'ready'
+      cancelQuitting()
+      showMainWindow()
+      broadcast('app:shutdownFailed', error instanceof Error ? error.message : String(error))
     })
   })
 
   app.on('will-quit', () => {
-    runtime.dispose()
+    void runtime.dispose()
     destroyTray()
   })
 

@@ -28,7 +28,9 @@ describe('GachaStore', () => {
   it('retains separate limited pools after export and import', async () => {
     const store = new GachaStore()
     await store.add('old', [record('1', 'first'), record('2', 'second')])
-    await store.importRecords('new', await store.exportUigf('old', 'fixture'))
+    const archive = await store.exportArchive('old')
+    expect(archive.format).toBe('native')
+    await store.importRecords('new', archive.text)
     const before = await store.stats('old')
     const after = await store.stats('new')
     const byGroup = (a: { group: string }, b: { group: string }) => a.group.localeCompare(b.group)
@@ -65,5 +67,24 @@ describe('GachaStore', () => {
     await fs.mkdir(file)
     await expect(store.clear('old')).rejects.toThrow('无法读取现有抽卡记录')
     expect((await fs.stat(file)).isDirectory()).toBe(true)
+  })
+
+  it('uses the source ordering for same-second AK pulls and keeps account histories separate', async () => {
+    const store = new GachaStore()
+    await store.add('old', [
+      { ...record('char1', 'normal'), gachaType: 'normal', uid: '100', seq: '2', rankType: 4 },
+      { ...record('char999', 'normal'), gachaType: 'normal', uid: '100', seq: '1', rankType: 5 },
+      { ...record('char1', 'normal'), gachaType: 'normal', uid: '200', seq: '2', rankType: 5 },
+      { ...record('historical', 'normal'), gachaType: 'normal', uid: '', rankType: 5 }
+    ])
+    expect(await store.count('old')).toBe(4)
+    const { pools } = await store.stats('old', 'arknights')
+    expect(pools.find(({ uid }) => uid === '100')).toMatchObject({ count: 2, topPity: 1, pityKnown: true })
+    expect(pools.find(({ uid }) => uid === '200')).toMatchObject({ count: 1, topPity: 0, pityKnown: true })
+    expect(pools.find(({ uid }) => uid === '')).toMatchObject({ count: 1, pityKnown: false })
+    const group = pools.find(({ uid }) => uid === '100')!.group
+    const first = await store.page('old', group, true, 0, 1)
+    expect(first).toMatchObject({ offset: 0, limit: 1, matched: 2, records: [{ id: 'char1', pityAtPull: 2 }] })
+    expect((await store.page('old', group, true, 1, 1)).records[0].id).toBe('char999')
   })
 })

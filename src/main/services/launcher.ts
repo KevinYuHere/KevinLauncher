@@ -1,233 +1,172 @@
+import { shell } from 'electron'
 import { spawn } from 'child_process'
-import { dirname, extname } from 'path'
+import { promises as fs } from 'fs'
+import { win32 } from 'path'
 import type { LaunchResult } from '@shared/types'
+import type { LaunchObservation } from './processObservation'
 import { log } from './logger'
 import { isElevated } from './elevation'
+import { psQuote, runPowerShell } from './powershell'
+import { splitArgs, windowsCommandLine } from './windowsArguments'
 
-/** Parse a raw argument string into an argv array, honouring quotes. */
-export function splitArgs(input: string): string[] {
-  const args: string[] = []
-  let current = ''
-  let quote: '"' | "'" | null = null
-  let quoted = false
+export { splitArgs } from './windowsArguments'
 
-  for (const ch of input) {
-    if (quote) {
-      if (ch === quote) quote = null
-      else current += ch
-    } else if (ch === '"' || ch === "'") {
-      quote = ch
-      quoted = true
-    } else if (ch === ' ' || ch === '\t') {
-      if (quoted || current.length) {
-        args.push(current)
-        current = ''
-        quoted = false
-      }
-    } else {
-      current += ch
-    }
-  }
-  if (quoted || current.length) args.push(current)
-  return args
-}
-
-/** Quote a string for a PowerShell single-quoted literal. */
-function psQuote(value: string): string {
-  return `'${value.replace(/'/g, "''")}'`
-}
-
-/**
- * Everything needed to start a process. Built from a launch method (per app) or
- * a linked launch (starts several apps), so the launcher stays agnostic.
- */
 export interface LaunchSpec {
-  /** File to start (.exe / .bat / .cmd / .ps1 / .lnk / any file). */
   targetPath: string
   arguments: string
   workingDirectory: string
   runAsAdmin: boolean
-  /** Extra environment variables merged over the current process env. */
   environmentVariables?: Record<string, string>
+}
+
+export interface ProcessLaunchResult extends LaunchResult {
+  observation: LaunchObservation
+}
+
+interface LaunchCommand {
+  executable: string
+  args: string[]
+  env: Record<string, string>
+  verbatim?: boolean
+  indirect?: boolean
+  detached?: boolean
 }
 
 type SpawnResult = LaunchResult & { code?: string }
 
-function isElevationError(result: SpawnResult): boolean {
-  return (
-    result.code === 'EACCES' ||
-    result.code === 'EPERM' ||
-    /EACCES|EPERM|elevation|740/i.test(result.error ?? '')
-  )
+async function identifiedPath(path: string | undefined): Promise<string | undefined> {
+  if (!path || !win32.isAbsolute(path)) return undefined
+  return fs.realpath(path).catch(() => path)
 }
 
+function environment(spec: LaunchSpec): Record<string, string> {
+  const values = spec.environmentVariables ?? {}
+  if (Object.entries(values).some(([key, value]) =>
+    !key || /[=\0]/.test(key) || typeof value !== 'string' || value.includes('\0')
+  )) throw new Error('环境变量格式无效')
+  return { ...values }
+}
+
+function childEnvironment(overrides: Record<string, string>): NodeJS.ProcessEnv {
+  const names = new Set(Object.keys(overrides).map((key) => key.toLowerCase()))
+  return {
+    ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !names.has(key.toLowerCase()))),
+    ...overrides
+  }
+}
+
+function resolveCommand(spec: LaunchSpec): LaunchCommand {
+  const ext = win32.extname(spec.targetPath).toLowerCase()
+  const args = splitArgs(spec.arguments)
+  const env = environment(spec)
+  if (ext === '.bat' || ext === '.cmd') {
+    const fields = [spec.targetPath, ...args].map((value, index) => {
+      // Expansion happens once. Quoting each value keeps cmd metacharacters literal.
+      if (/["\x00-\x1f]/.test(value)) throw new Error('批处理参数不能包含字面双引号或控制字符')
+      const key = `KEVIN_LAUNCH_BATCH_ARG_${index}`
+      env[key] = value
+      return `"%${key}%"`
+    })
+    return {
+      executable: process.env.ComSpec || win32.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'cmd.exe'),
+      args: ['/D', '/V:OFF', '/S', '/C', `"${fields.join(' ')}"`],
+      env, verbatim: true, indirect: true
+    }
+  }
+  if (ext === '.ps1') {
+    return {
+      executable: win32.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+      args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', spec.targetPath, ...args], env, indirect: true,
+      // Windows PowerShell can exit successfully without executing -File
+      // when its process is started with the detached console flag.
+      detached: false
+    }
+  }
+  return { executable: spec.targetPath, args, env, indirect: ext === '.lnk' }
+}
+
+function isElevationError(result: SpawnResult): boolean {
+  return result.code === 'EACCES' || result.code === 'EPERM' || /elevation|740/i.test(result.error ?? '')
+}
+
+/** Keep a distinct observation intent for successful shell requests. */
 export class Launcher {
-  /**
-   * Start `spec.targetPath`. Works for a bare game exe, a `.bat`/`.cmd`
-   * script, a `.ps1` script, a `.lnk` shortcut or any other launcher.
-   *
-   * `.lnk` shortcuts are opened through the shell exactly like double-clicking
-   * them (so their target / arguments / working dir / run-as-admin flag are
-   * whatever the shortcut says, and stay correct even if the shortcut is
-   * updated). Those launches cannot be tracked by pid, so run-state and
-   * play-time rely on the entry's `monitorProcessNames`.
-   *
-   * `name` is only used for logs / user-facing messages.
-   */
-  static async launch(spec: LaunchSpec, name = ''): Promise<LaunchResult> {
-    if (spec.targetPath.toLowerCase().endsWith('.lnk')) {
-      return this.spawnShortcut(spec)
+  static async launch(spec: LaunchSpec, name = ''): Promise<ProcessLaunchResult> {
+    const observation: LaunchObservation = { requestedAt: Date.now() }
+    const failed = (error: unknown): ProcessLaunchResult => ({
+      ok: false, pid: null, elevated: false, error: error instanceof Error ? error.message : String(error), observation
+    })
+    try {
+      const command = resolveCommand(spec)
+      const cwd = spec.workingDirectory.trim() || win32.dirname(spec.targetPath)
+      const shortcut = win32.extname(spec.targetPath).toLowerCase() === '.lnk'
+      observation.rootExecutable = shortcut ? undefined : await identifiedPath(command.executable)
+      observation.indirect = command.indirect
+      if (shortcut) {
+        try {
+          observation.targetExecutable = await identifiedPath(shell.readShortcutLink(spec.targetPath).target)
+        } catch {
+          // Shell associations without a local executable may still open successfully.
+        }
+      }
+      const parentElevated = await isElevated()
+      const elevated = spec.runAsAdmin && !parentElevated
+      observation.requestedAt = Date.now()
+      let result = shortcut || elevated
+        ? await this.shellLaunch(command, cwd, elevated, shortcut, parentElevated)
+        : await this.spawnDetached(command, cwd, parentElevated)
+      if (!shortcut && !elevated && !parentElevated && !result.ok && isElevationError(result)) {
+        result = await this.shellLaunch(command, cwd, true, false, false)
+        if (result.ok && result.confirmation === 'started') result.message = '该程序需要管理员权限，已自动以管理员身份启动'
+      }
+      observation.spawnedAt = Date.now()
+      if (!result.ok) log(`launch: failed for "${name}" (${result.error ?? 'unknown error'})`)
+      else log(`launch: "${name}" ${result.confirmation ?? 'accepted'} (pid=${result.pid ?? 'unconfirmed'})`)
+      return { ...result, observation }
+    } catch (error) {
+      return failed(error)
     }
-
-    // If the launcher itself is already elevated, a direct spawn of an
-    // elevation-required target works and yields a real pid (needed for
-    // process-tree tracking and stopping). Only shell out to RunAs when the
-    // launcher is not elevated.
-    const alreadyElevated = await isElevated()
-    if (spec.runAsAdmin && !alreadyElevated) return this.launchElevated(spec)
-
-    const result = await this.spawnDetached(spec)
-    if (result.ok) return result
-
-    if (isElevationError(result) && !alreadyElevated) {
-      log(`launch: "${name}" requires elevation, retrying as admin`)
-      const elevated = await this.launchElevated(spec)
-      if (elevated.ok) {
-        return { ...elevated, message: '该程序需要管理员权限，已自动以管理员身份启动' }
-      }
-      return elevated
-    }
-
-    log(`launch: failed for "${name}": ${result.error}`)
-    return result
   }
 
-  private static resolveCwd(spec: LaunchSpec): string {
-    return spec.workingDirectory.trim() || dirname(spec.targetPath)
-  }
-
-  /** Open a `.lnk` through the shell (`start`), like a double-click. */
-  private static async spawnShortcut(spec: LaunchSpec): Promise<SpawnResult> {
-    const cwd = this.resolveCwd(spec)
-    const userArgs = splitArgs(spec.arguments)
-    const args = ['/c', 'start', '', spec.targetPath, ...userArgs]
-
-    log(`launch: open shortcut "${spec.targetPath}"`)
-
-    return new Promise<SpawnResult>((resolve) => {
-      try {
-        const child = spawn(process.env.ComSpec || 'cmd.exe', args, {
-          cwd,
-          detached: true,
-          stdio: 'ignore',
-          windowsHide: true
+  private static spawnDetached(command: LaunchCommand, cwd: string, elevated: boolean): Promise<SpawnResult> {
+    return new Promise((resolve) => {
+      const child = spawn(command.executable, command.args, {
+        cwd, env: childEnvironment(command.env), detached: command.detached ?? true, stdio: 'ignore',
+        windowsHide: false, windowsVerbatimArguments: command.verbatim
+      })
+      child.once('error', (error: NodeJS.ErrnoException) =>
+        resolve({ ok: false, pid: null, elevated, error: error.message, code: error.code }))
+      child.once('spawn', () => {
+        child.unref()
+        resolve({
+          ok: true, pid: child.pid ?? null, elevated, confirmation: command.indirect ? 'requested' : 'started'
         })
-        child.once('error', (err: NodeJS.ErrnoException) =>
-          resolve({ ok: false, pid: null, elevated: false, error: err.message, code: err.code })
-        )
-        child.once('spawn', () => {
-          log(`launch: shortcut opened`)
-          child.unref()
-          resolve({ ok: true, pid: null, elevated: false })
-        })
-      } catch (err) {
-        const e = err as NodeJS.ErrnoException
-        resolve({ ok: false, pid: null, elevated: false, error: e.message, code: e.code })
-      }
+      })
     })
   }
 
-  private static async spawnDetached(spec: LaunchSpec): Promise<SpawnResult> {
-    const env = { ...process.env, ...spec.environmentVariables }
-    const cwd = this.resolveCwd(spec)
-    const { command, args } = this.resolveCommand(spec)
-
-    log(`launch: spawn "${command}" ${JSON.stringify(args)} (cwd=${cwd})`)
-
-    return new Promise<SpawnResult>((resolve) => {
-      try {
-        const child = spawn(command, args, {
-          cwd,
-          env,
-          detached: true,
-          stdio: 'ignore',
-          windowsHide: false
-        })
-        child.once('error', (err: NodeJS.ErrnoException) =>
-          resolve({ ok: false, pid: null, elevated: false, error: err.message, code: err.code })
-        )
-        child.once('spawn', () => {
-          log(`launch: spawned pid=${child.pid}`)
-          child.unref()
-          resolve({ ok: true, pid: child.pid ?? null, elevated: false })
-        })
-      } catch (err) {
-        const e = err as NodeJS.ErrnoException
-        resolve({ ok: false, pid: null, elevated: false, error: e.message, code: e.code })
-      }
-    })
-  }
-
-  /**
-   * Elevated launch through `Start-Process -Verb RunAs`. The elevated process
-   * cannot be tracked by pid, so the caller should rely on process-name
-   * monitoring for such entries.
-   */
-  private static async launchElevated(spec: LaunchSpec): Promise<LaunchResult> {
-    const { command, args } = this.resolveCommand(spec)
-    const cwd = this.resolveCwd(spec)
-
-    let script = `Start-Process -FilePath ${psQuote(command)}`
-    if (args.length) script += ` -ArgumentList @(${args.map(psQuote).join(',')})`
-    script += ` -WorkingDirectory ${psQuote(cwd)} -Verb RunAs`
-
-    log(`launch: elevated Start-Process "${command}"`)
-
-    return new Promise<LaunchResult>((resolve) => {
-      try {
-        const child = spawn(
-          'powershell.exe',
-          ['-NoProfile', '-NonInteractive', '-Command', script],
-          { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true }
-        )
-        let stderr = ''
-        child.stderr?.on('data', (chunk: Buffer) => {
-          stderr += chunk.toString()
-        })
-        child.once('error', (err) =>
-          resolve({ ok: false, pid: null, elevated: true, error: err.message })
-        )
-        child.once('close', (code) => {
-          if (code === 0) {
-            resolve({ ok: true, pid: null, elevated: true })
-          } else {
-            const message = stderr.trim().split(/\r?\n/).pop() || `提权启动失败（退出码 ${code}）`
-            log(`launch: elevated failed: ${message}`)
-            resolve({ ok: false, pid: null, elevated: true, error: message })
-          }
-        })
-      } catch (err) {
-        resolve({ ok: false, pid: null, elevated: true, error: (err as Error).message })
-      }
-    })
-  }
-
-  private static resolveCommand(spec: LaunchSpec): { command: string; args: string[] } {
-    const ext = extname(spec.targetPath).toLowerCase()
-    const userArgs = splitArgs(spec.arguments)
-
-    if (ext === '.bat' || ext === '.cmd') {
+  private static async shellLaunch(
+    command: LaunchCommand, cwd: string, elevate: boolean, shortcut: boolean, parentElevated: boolean
+  ): Promise<SpawnResult> {
+    const setEnvironment = Object.entries(command.env).map(([key, value]) =>
+      `[Environment]::SetEnvironmentVariable(${psQuote(key)}, ${psQuote(value)}, 'Process')`
+    )
+    const line = command.verbatim ? command.args.join(' ') : windowsCommandLine(command.args)
+    const runAs = elevate ? ' -Verb RunAs' : ''
+    const argumentsOption = line ? ` -ArgumentList ${psQuote(line)}` : ''
+    const statement = `$process = Start-Process -FilePath ${psQuote(command.executable)}` +
+      ` -WorkingDirectory ${psQuote(cwd)} -PassThru${runAs}${argumentsOption}; if ($process) { $process.Id }`
+    try {
+      const output = await runPowerShell(["$ErrorActionPreference = 'Stop'", ...setEnvironment, statement].join('; '),
+        { timeout: elevate ? 180_000 : 20_000 })
+      const pid = /^\d+$/m.exec(output)?.[0]
       return {
-        command: process.env.ComSpec || 'cmd.exe',
-        args: ['/c', spec.targetPath, ...userArgs]
+        ok: true, pid: shortcut || !pid ? null : Number(pid), elevated: elevate || parentElevated,
+        confirmation: shortcut || command.indirect || !pid ? 'requested' : 'started'
       }
+    } catch (error) {
+      const message = error instanceof Error ? error.message.split(/\r?\n/).filter(Boolean).at(-1) : String(error)
+      return { ok: false, pid: null, elevated: elevate || parentElevated, error: message || 'Windows 启动失败' }
     }
-    if (ext === '.ps1') {
-      return {
-        command: 'powershell.exe',
-        args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', spec.targetPath, ...userArgs]
-      }
-    }
-    return { command: spec.targetPath, args: userArgs }
   }
 }

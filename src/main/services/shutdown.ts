@@ -6,7 +6,7 @@
  * `app.relaunch() + app.exit(0)` paths in the update / data-dir flows, which do
  * not go through `before-quit`.
  */
-import { log } from './logger'
+import { flushLauncherLogs, log } from './logger'
 
 type FlushFn = () => Promise<void> | void
 
@@ -18,10 +18,15 @@ export function onBeforeShutdown(handler: FlushFn): void {
   flushHandler = handler
 }
 
-/** Run the handler exactly once. Safe to call from several exit paths. */
+/** Share an in-flight flush and let the user retry after a storage failure. */
 export function flushBeforeShutdown(): Promise<void> {
   flush ??= Promise.resolve()
     .then(() => flushHandler?.())
-    .catch((error) => log(`shutdown: could not flush user data (${String(error)})`))
+    .then(flushLauncherLogs)
+    .catch((error) => {
+      flush = undefined
+      log(`shutdown: could not flush user data (${String(error)})`)
+      throw error
+    })
   return flush
 }

@@ -8,13 +8,11 @@ import { markQuitting } from '../services/behavior'
 import {
   defaultInstallDir,
   detectInstallation,
-  finishUninstall,
   freeSpace,
   inspectTarget,
   installDirArgument,
   installSize,
   normalizeInstallDir,
-  removeInstallation,
   runningInstances
 } from '../services/install'
 import {
@@ -25,11 +23,14 @@ import {
   switchDataDir
 } from '../services/dataDir'
 import { installLauncher } from '../services/installerFlow'
-import { AppStore } from '../services/appStore'
+import { DataDirectoryRecoveryError } from '../services/dataMoveJournal'
 import { currentAppVersion } from '../services/appVersion'
 import { directorySize } from '../services/updateDownload'
-import { appUpdate, gacha, playTime, runtime } from './context'
-import { withExclusiveDataAccess } from './dataAccess'
+import { appUpdate, checkpointData, runtime } from './context'
+import { advanceDataGeneration, requireDataRecovery, withExclusiveDataAccess } from './dataAccess'
+import { launcherExecutableName, trialBuild } from '../services/buildIdentity'
+import { runSetupTask, setupTaskActive } from '../services/setupTask'
+import { getUninstallDirectory, prepareUninstall } from '../services/uninstall'
 
 function requireAbsoluteDirectory(value: unknown): string {
   if (typeof value !== 'string' ||
@@ -42,12 +43,12 @@ function requireAbsoluteDirectory(value: unknown): string {
 
 /** Installer / uninstaller UI (fresh install + `--uninstall`) and data-dir moves. */
 export function registerInstallerIpc(): void {
-  let installing = false
   let readyInstallDir: string | null = null
+  let uninstallTarget: { app: string; data: string } | null = null
   handleIpc('installer:info', async () => {
     const detected = await detectInstallation()
     const running = await runningInstances()
-    const explicit = installDirArgument()
+    const explicit = trialBuild ? defaultInstallDir() : installDirArgument()
     return {
       defaultDir: defaultInstallDir(),
       detected:
@@ -66,6 +67,7 @@ export function registerInstallerIpc(): void {
   handleIpc('installer:inspect', (_e, dir: string) => inspectTarget(dir))
   handleIpc('installer:freeSpace', (_e, dir: string) => freeSpace(dir))
   handleIpc('installer:pickDirectory', async (e, current: string) => {
+    if (trialBuild) return defaultInstallDir()
     const win = BrowserWindow.fromWebContents(e.sender)
     const result = await dialog.showOpenDialog(win ?? undefined!, {
       title: '选择安装位置',
@@ -75,19 +77,15 @@ export function registerInstallerIpc(): void {
     return result.canceled ? null : (result.filePaths[0] ?? null)
   })
   handleIpc('installer:run', async (e, requested: string, requestedDataDir?: string) => {
-    if (installing) throw new Error('安装正在进行')
     const requestedPath = requireAbsoluteDirectory(requested)
     const dataPath = requestedDataDir === undefined ? undefined : requireAbsoluteDirectory(requestedDataDir)
-    installing = true
-    readyInstallDir = null
-    try {
+    return runSetupTask(async () => {
+      readyInstallDir = null
       readyInstallDir = await installLauncher(requestedPath, dataPath, progress => {
         if (!e.sender.isDestroyed()) e.sender.send('installer:progress', progress)
       })
       return true
-    } finally {
-      installing = false
-    }
+    })
   })
 
   // --- data directory (moved by the user in the settings) -------------------
@@ -97,6 +95,7 @@ export function registerInstallerIpc(): void {
     programDir: dirname(process.execPath)
   }))
   handleIpc('dataDir:pick', async (e, current: string) => {
+    if (trialBuild) return defaultDataDir()
     const win = BrowserWindow.fromWebContents(e.sender)
     const result = await dialog.showOpenDialog(win ?? undefined!, {
       title: '选择数据目录',
@@ -107,7 +106,7 @@ export function registerInstallerIpc(): void {
   })
   /** Moves the data to `dir` and restarts the launcher. */
   handleIpc('dataDir:set', async (e, dir: string) => {
-    if (process.env.KEVIN_LAUNCHER_DATA_DIR?.trim()) throw new Error('测试版使用隔离的数据目录')
+    if (trialBuild) throw new Error('测试版使用固定的隔离数据目录')
     const target = await realDirectoryPath(normalizeDataDir(requireAbsoluteDirectory(dir)))
     if (directoriesOverlap(target, await realDirectoryPath(dirname(process.execPath)))) {
       throw new Error('数据目录不能与程序目录相同，也不能互相包含')
@@ -117,14 +116,12 @@ export function registerInstallerIpc(): void {
       if (appUpdate.isRunning()) throw new Error('启动器正在更新，请完成后再迁移数据')
       const resumePolling = runtime.pausePolling()
       try {
-        await AppStore.load()
-        await AppStore.save()
-        await switchDataDir(target, async () => {
-          for (const record of runtime.checkpointSessions()) await playTime.addSession(record)
-          await Promise.all([playTime.flush(), gacha.flush()])
-        }, (step) => {
+        await switchDataDir(target, checkpointData, (step) => {
           if (!sender.isDestroyed()) sender.send('dataDir:progress', { step })
-        })
+        }, advanceDataGeneration)
+      } catch (error) {
+        if (error instanceof DataDirectoryRecoveryError) requireDataRecovery(error)
+        throw error
       } finally {
         resumePolling()
       }
@@ -132,7 +129,7 @@ export function registerInstallerIpc(): void {
   })
   handleIpc('installer:launch', async (_e, dir: string) => {
     const target = await realDirectoryPath(normalizeInstallDir(requireAbsoluteDirectory(dir)))
-    if (installing || !readyInstallDir || target.toLowerCase() !== readyInstallDir.toLowerCase()) {
+    if (setupTaskActive() || !readyInstallDir || target.toLowerCase() !== readyInstallDir.toLowerCase()) {
       throw new Error('请选择本次已安装的启动器')
     }
     // Start it as a *launcher*, not as an installer: the portable variables are
@@ -141,7 +138,7 @@ export function registerInstallerIpc(): void {
     const env = { ...process.env }
     delete env.PORTABLE_EXECUTABLE_FILE
     delete env.PORTABLE_EXECUTABLE_DIR
-    const child = spawn(join(readyInstallDir, 'KevinLauncher.exe'), [], {
+    const child = spawn(join(readyInstallDir, launcherExecutableName), [], {
       detached: true,
       stdio: 'ignore',
       cwd: readyInstallDir,
@@ -155,29 +152,30 @@ export function registerInstallerIpc(): void {
 
   // ------------------------------------------------------------- uninstaller
   handleIpc('uninstaller:info', async () => {
-    const dir = dirname(process.execPath)
-    const detected = await detectInstallation()
+    const target = { app: await getUninstallDirectory(), data: await realDirectoryPath(app.getPath('userData')) }
+    uninstallTarget = target
     return {
-      installDir: detected?.dir ?? dir,
+      installDir: target.app,
       version: currentAppVersion(),
-      dataDir: app.getPath('userData'),
-      dataSize: await directorySize(app.getPath('userData')),
-      installSize: await directorySize(dir)
+      dataDir: target.data,
+      dataSize: await directorySize(target.data),
+      installSize: await directorySize(target.app)
     }
   })
   handleIpc('uninstaller:run', async (e, keepUserData: boolean) => {
     if (typeof keepUserData !== 'boolean') throw new Error('请选择是否保留用户数据')
+    if (!uninstallTarget) throw new Error('请先核对当前安装位置')
+    const confirmed = uninstallTarget
     const sender = e.sender
-    const dir = dirname(process.execPath)
-    const detected = await detectInstallation()
-    await removeInstallation({
-      installDir: detected?.dir ?? dir,
+    const report = await runSetupTask(() => prepareUninstall({
+      installDir: confirmed.app,
+      dataDir: confirmed.data,
       keepUserData,
       onProgress: (step) => {
         if (!sender.isDestroyed()) sender.send('uninstaller:progress', { step })
       }
-    })
-    finishUninstall(detected?.dir ?? dir)
+    }))
+    if (!sender.isDestroyed()) sender.send('uninstaller:progress', { step: '卸载辅助程序已启动，结果记录在 ' + report })
     markQuitting()
     app.quit()
   })

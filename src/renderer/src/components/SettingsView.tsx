@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type CSSProperties,
@@ -11,21 +12,26 @@ import type {
   AddonDescriptor,
   AfterLaunchAction,
   AppEntry,
+  AppSettingsPatch,
+  CacheKind,
   AutoStartMode,
   CloseAction,
-  UpdateChannel,
   GlassAppearance,
   GlassMaterial,
   GlassPatch,
   LauncherSettings,
+  LauncherBehaviorPatch,
   SpecialThemeId,
   UsageReport
 } from '@shared/types'
 import { DEFAULT_GLASS_APPEARANCE, MATERIAL_DEFAULTS } from '@shared/types'
 import { currentWallpaper, isVideoFile } from '@shared/appEntry'
 import { formatBytes } from '../format'
+import { trialBuild } from '@shared/buildIdentity'
 import { brandUrl, defaultIconUrl, iconUrl } from '../media'
 import { applyGlass } from '../theme'
+import { useDebouncedEntitySave } from '../useDebouncedEntitySave'
+import { showToast } from './toast'
 import ColorPicker from './ColorPicker'
 import Collapse from './Collapse'
 import IconPicker from './IconPicker'
@@ -89,11 +95,11 @@ const GLASS_MATERIAL_DESC: Record<GlassMaterial, string> = {
 // glass behind stays put): per-app appearance/background, and launcher-wide
 // icon/font/behavior/backup. All values are controlled by App.tsx.
 interface SettingsViewProps {
-  entry: AppEntry
+  entry: AppEntry | null
   addons: AddonDescriptor[]
   onBack: () => void
   /** Merge a partial change into the app (name / addon / dirs / monitors …). */
-  onPatchEntry: (patch: Partial<AppEntry>) => void
+  onPatchEntry: (patch: AppSettingsPatch) => void
   onPickIcon: () => void
   onResetIcon: () => void
   onRemove: () => void
@@ -105,15 +111,7 @@ interface SettingsViewProps {
   onPickLauncherIcon: () => void
   onClearLauncherIcon: () => void
   onSetFont: (family: string | null) => void
-  onSetBehavior: (patch: {
-    closeAction?: CloseAction
-    afterLaunch?: AfterLaunchAction
-    autoStart?: AutoStartMode
-    sidebarMaterial?: boolean
-    updateChannel?: UpdateChannel
-    downloadLimitMbps?: number
-    themeAreas?: LauncherSettings['themeAreas']
-  }) => void
+  onSetBehavior: (patch: LauncherBehaviorPatch) => void
   onExportData: () => void
   onImportData: () => void
   /** Current data directory (config, playtime, gacha, icons …). */
@@ -121,7 +119,8 @@ interface SettingsViewProps {
   onChangeDataDir: () => void
   /** Disk usage of the cleanable caches. */
   usage: UsageReport | null
-  onCleanUsage: (kinds: ('staging' | 'thumbs' | 'logs')[]) => void
+  cleaningUsage: boolean
+  onCleanUsage: (kinds: CacheKind[]) => void
   /** Manually check GitHub Releases for a newer launcher version. */
   onCheckUpdate: () => void
   checkingUpdate: boolean
@@ -255,13 +254,16 @@ export default function SettingsView({
   dataDir,
   onChangeDataDir,
   usage,
+  cleaningUsage,
   onCleanUsage,
   onCheckUpdate,
   checkingUpdate,
   updateCheckText,
   onExportLogs
 }: SettingsViewProps): ReactElement {
-  const [tab, setTab] = useState<'game' | 'launcher'>('game')
+  const [selectedTab, setTab] = useState<'game' | 'launcher'>(entry ? 'game' : 'launcher')
+  const tab = entry ? selectedTab : 'launcher'
+  const entryId = entry?.id
   const [dir, setDir] = useState(1)
   const [showColor, setShowColor] = useState(false)
   const [glassOpen, setGlassOpen] = useState(false)
@@ -271,9 +273,9 @@ export default function SettingsView({
   const [draftTheme, setBulkTheme] = useState<SpecialThemeId | null>(null)
   const bulkTheme = draftTheme ?? appliedTheme
   useEffect(() => setBulkTheme(null), [appliedTheme])
-  const autoTheme = entry.autoTheme ?? true
-  const currentIcon = iconUrl(entry.iconFile)
-  const wallpaper = currentWallpaper(entry)
+  const autoTheme = entry?.autoTheme ?? true
+  const currentIcon = iconUrl(entry?.iconFile ?? null)
+  const wallpaper = entry ? currentWallpaper(entry) : null
   const canExtractTheme = !!wallpaper && !isVideoFile(wallpaper.file)
   const themedCount = themedAreaCount(launcher.themeAreas)
   const themedNames = [
@@ -295,19 +297,24 @@ export default function SettingsView({
   }
   // Live glass editing: apply immediately (so dragging feels instant) and
   // persist once the user stops (debounced), without re-rendering the whole app.
-  const [glass, setGlass] = useState<GlassAppearance>(entry.glass ?? DEFAULT_GLASS_APPEARANCE)
-  const glassRef = useRef<GlassAppearance>(entry.glass ?? DEFAULT_GLASS_APPEARANCE)
-  const glassTimer = useRef<number | undefined>(undefined)
+  const [glass, setGlass] = useState<GlassAppearance>(entry?.glass ?? DEFAULT_GLASS_APPEARANCE)
+  const glassRef = useRef<GlassAppearance>(entry?.glass ?? DEFAULT_GLASS_APPEARANCE)
   const glassRaf = useRef(0)
+  const scheduleSave = useDebouncedEntitySave()
 
-  useEffect(() => {
-    const next = entry.glass ?? DEFAULT_GLASS_APPEARANCE
+  useLayoutEffect(() => {
+    const next = entry?.glass ?? DEFAULT_GLASS_APPEARANCE
     glassRef.current = next
     setGlass(next)
-  }, [entry.id])
+    return () => {
+      cancelAnimationFrame(glassRaf.current)
+      glassRaf.current = 0
+    }
+  }, [entryId])
 
   const updateGlass = useCallback(
     (patch: GlassPatch): void => {
+      if (!entryId) return
       // Switching material loads that material's recommended parameters.
       const next =
         patch.material && patch.material !== glassRef.current.material
@@ -323,13 +330,13 @@ export default function SettingsView({
           applyGlass(glassRef.current)
         })
       }
-      if (glassTimer.current) window.clearTimeout(glassTimer.current)
-      const id = entry.id
-      glassTimer.current = window.setTimeout(() => {
-        void window.api.setGlass(id, glassRef.current)
-      }, 200)
+      scheduleSave(entryId, 200, () => {
+        void window.api.setGlass(entryId, next).catch((error) =>
+          showToast(`保存材质失败：${(error as Error).message}`)
+        )
+      })
     },
-    [entry.id]
+    [entryId, scheduleSave]
   )
 
   const tabPanelRef = useRef<HTMLDivElement>(null)
@@ -377,7 +384,7 @@ export default function SettingsView({
       <div className="page-header">
         <div>
           <h1 className="page-title">设置</h1>
-          <p className="page-subtitle">{tab === 'game' ? `应用 · ${entry.name}` : '启动器本体'}</p>
+          <p className="page-subtitle">{tab === 'game' && entry ? `应用 · ${entry.name}` : '启动器本体'}</p>
         </div>
         <div className="page-actions">
           <button className="btn ghost" onClick={onBack}>
@@ -387,7 +394,7 @@ export default function SettingsView({
       </div>
 
       <div className="page-body">
-        <Segmented
+        {entry && <Segmented
           variant="tab"
           value={tab}
           onChange={(value) => switchTab(value as 'game' | 'launcher')}
@@ -395,14 +402,14 @@ export default function SettingsView({
             { value: 'game', label: '应用设置' },
             { value: 'launcher', label: '启动器设置' }
           ]}
-        />
+        />}
 
         <div
           ref={tabPanelRef}
           className="tab-panel"
           style={{ '--tab-x': `${dir * 26}px` } as CSSProperties}
         >
-          {tab === 'game' ? (
+          {tab === 'game' && entry ? (
             <div className="settings">
               <div className="settings-group-title">基本信息</div>
               <IconPicker
@@ -519,7 +526,7 @@ export default function SettingsView({
                   />
                   <Row
                     name="监视进程名"
-                    desc="快捷方式 / 提权启动等无法按 PID 追踪时的运行检测与时长统计"
+                    desc="按进程名检测所选游戏目录中的程序，方便跟踪快捷方式和脚本启动"
                     action={
                       <InlineEdit
                         className="wide"
@@ -971,31 +978,41 @@ export default function SettingsView({
 
               <div className="settings-section">
                 <div className="settings-section-title">清理与占用</div>
-                <div className="about-line">
-                  <span className="about-key">升级暂存</span>
-                  <span className="usage-value">{formatBytes(usage?.staging ?? 0)}</span>
-                </div>
-                <div className="about-line">
-                  <span className="about-key">缩略图缓存</span>
-                  <span className="usage-value">{formatBytes(usage?.thumbs ?? 0)}</span>
-                </div>
-                <div className="about-line">
-                  <span className="about-key">日志</span>
-                  <span className="usage-value">{formatBytes(usage?.logs ?? 0)}</span>
-                </div>
+                {([
+                  ['旧版本升级暂存', 'staleStaging'],
+                  ['在用或可续传的升级暂存', 'retainedStaging'],
+                  ['缩略图 · 内存', 'thumbnailMemory'],
+                  ['旧版缩略图 · 磁盘', 'legacyThumbs'],
+                  ['壁纸派生 · 内存', 'wallpaperMemory'],
+                  ['壁纸派生 · 磁盘', 'wallpaperDisk'],
+                  ['启动器日志', 'logs'],
+                  ['游戏清单与文件索引', 'gameCache'],
+                  ['壁纸与图标源文件', 'media'],
+                  ['备份与恢复数据', 'recovery']
+                ] as const).map(([label, field]) => (
+                  <div className="about-line" key={field}>
+                    <span className="about-key">{label}</span>
+                    <span className="usage-value">{usage?.[field] == null ? '—' : formatBytes(usage[field])}</span>
+                  </div>
+                ))}
+                <p className="hint">全部清理包括旧版本升级暂存、缩略图、壁纸派生缓存和日志。正在显示的图片会保留。</p>
                 <div className="media-row" style={{ gap: 8, marginTop: 12 }}>
-                  <button className="btn sm" onClick={() => onCleanUsage(['staging'])}>
+                  <button className="btn sm" disabled={cleaningUsage} onClick={() => onCleanUsage(['staging'])}>
                     清理暂存
                   </button>
-                  <button className="btn sm" onClick={() => onCleanUsage(['thumbs'])}>
+                  <button className="btn sm" disabled={cleaningUsage} onClick={() => onCleanUsage(['thumbs'])}>
                     清理缩略图
                   </button>
-                  <button className="btn sm" onClick={() => onCleanUsage(['logs'])}>
+                  <button className="btn sm" disabled={cleaningUsage} onClick={() => onCleanUsage(['wallpaper'])}>
+                    清理壁纸缓存
+                  </button>
+                  <button className="btn sm" disabled={cleaningUsage} onClick={() => onCleanUsage(['logs'])}>
                     清理日志
                   </button>
                   <button
                     className="btn sm ghost"
-                    onClick={() => onCleanUsage(['staging', 'thumbs', 'logs'])}
+                    disabled={cleaningUsage}
+                    onClick={() => onCleanUsage(['staging', 'thumbs', 'wallpaper', 'logs'])}
                   >
                     全部清理
                   </button>
@@ -1005,7 +1022,7 @@ export default function SettingsView({
               <div className="settings-group-title">更新与帮助</div>
               <Row
                 name="检查更新"
-                desc={updateCheckText || '检查 GitHub Releases 上是否有新版本'}
+                desc={updateCheckText || (trialBuild ? '检查本地模拟更新' : '检查是否有新的正式版本')}
                 action={
                   <button className="btn sm" disabled={checkingUpdate} onClick={onCheckUpdate}>
                     {checkingUpdate ? '检查中…' : '检查更新'}
@@ -1014,24 +1031,7 @@ export default function SettingsView({
               />
 
               <Row name="当前版本" desc={version} />
-              <Row
-                name="更新通道"
-                desc={
-                  launcher.updateChannel === 'beta'
-                    ? '测试版：优先接收预发布版本'
-                    : '正式版：仅接收稳定版本'
-                }
-                action={
-                  <Segmented
-                    value={launcher.updateChannel}
-                    onChange={(value) => onSetBehavior({ updateChannel: value as UpdateChannel })}
-                    options={[
-                      { value: 'stable', label: '正式版' },
-                      { value: 'beta', label: '测试版' }
-                    ]}
-                  />
-                }
-              />
+              <Row name="更新通道" desc={trialBuild ? '本地试用' : '正式版'} />
 
               <Row
                 name="下载限速"
