@@ -53,11 +53,11 @@ static class WindowsEntryCloseFixture
 
     static IntPtr HandleWindow(IntPtr window, uint message, IntPtr wParam, IntPtr lParam)
     {
-        if (message != 0x0010) return DefWindowProcW(window, message, wParam, lParam);
+        if (message != 0x0010 && message != 0x804B) return DefWindowProcW(window, message, wParam, lParam);
         var name = new StringBuilder(128);
         GetClassNameW(window, name, name.Capacity);
         DestroyWindow(window);
-        Console.WriteLine("close:" + name);
+        Console.WriteLine((message == 0x0010 ? "close:" : "setup:") + name);
         return IntPtr.Zero;
     }
 

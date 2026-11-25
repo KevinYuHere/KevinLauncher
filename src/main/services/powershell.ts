@@ -27,8 +27,11 @@ export function psDataLiteral(value: string): string {
 }
 
 function powerShellArgs(script: string): string[] {
-  return ['-NoProfile', '-NonInteractive', '-Command',
-    `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; ${script}`]
+  return ['-NoProfile', '-NonInteractive', '-Command', utf8PowerShell(script)]
+}
+
+function utf8PowerShell(script: string): string {
+  return `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; ${script}`
 }
 
 /**
@@ -70,10 +73,17 @@ export function startPowerShell(script: string): ChildProcessWithoutNullStreams 
 export function startPowerShellWithReport(script: string, reportFd: number) {
   const systemRoot = process.env.SystemRoot
   if (!systemRoot || !/^[a-z]:[\\/]/i.test(systemRoot)) throw new Error('无法定位 Windows 系统 PowerShell')
-  const directory = win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0')
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'psmodulepath'))
+  const system = win32.join(systemRoot, 'System32')
+  const directory = win32.join(system, 'WindowsPowerShell', 'v1.0')
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(path|psmodulepath)$/i.test(key)))
+  env.Path = `${directory};${system}`
   env.PSModulePath = win32.join(directory, 'Modules')
-  return spawn(win32.join(directory, 'powershell.exe'), powerShellArgs(script), {
+  // libuv's Windows job kills its direct children on exit but lets their
+  // children leave the job. PowerShell still needs its normal console flags.
+  const entry = Buffer.from(utf8PowerShell(script), 'utf16le').toString('base64')
+  return spawn(win32.join(system, 'cmd.exe'), [
+    '/d', '/s', '/c', 'powershell.exe', '-NoProfile', '-NonInteractive', '-OutputFormat', 'Text', '-EncodedCommand', entry
+  ], {
     cwd: directory, env, windowsHide: true, stdio: ['pipe', 'pipe', reportFd]
   })
 }

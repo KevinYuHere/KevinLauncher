@@ -1,10 +1,9 @@
 import assert from 'node:assert/strict'
-import { spawn, execFileSync } from 'node:child_process'
+import { spawn, spawnSync, execFileSync } from 'node:child_process'
 import { once } from 'node:events'
 import { access, cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
-import { tmpdir } from 'node:os'
-import { basename, join, resolve } from 'node:path'
+import { basename, isAbsolute, join, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { isNewerVersion } from '../src/shared/version.ts'
 import { downloadInstaller, releasedAssets } from './verify-release.mjs'
@@ -201,8 +200,17 @@ async function startInstalled(target, version, fixture) {
 async function verifyUninstall(target, data) {
   const executable = join(target, windowsLayout.entry)
   const ownFile = join(target, '用户自放记录.txt')
+  const registration = () => spawnSync(join(process.env.SystemRoot, 'System32', 'reg.exe'), [
+    'query', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\KevinLauncher', '/v', 'InstallLocation'
+  ], { windowsHide: true, encoding: 'utf8' })
+  const registered = registration()
+  assert.equal(registered.status, 0, '鲜装后的卸载入口应存在')
+  assert.ok(registered.stdout.toLowerCase().includes(target.toLowerCase()))
   await writeFile(ownFile, 'preserve')
-  const before = new Set(await readdir(tmpdir()))
+  const profileFiles = ['config.json', 'playtime.json']
+  const beforeData = await Promise.all(profileFiles.map(file => readFile(join(data, file))))
+  const logFile = join(data, 'launcher.log')
+  const before = await readFile(logFile, 'utf8')
   const ui = await launch(executable, '--uninstall')
   const info = await ui.run('window.api.uninstallerInfo()')
   assert.equal(info.installDir.toLowerCase(), target.toLowerCase())
@@ -211,16 +219,28 @@ async function verifyUninstall(target, data) {
     if (error.message !== 'Electron 页面已经关闭') throw error
   })
   await ui.waitForExit()
-  await until(async () => {
-    const reports = (await readdir(tmpdir())).filter(name => /^kevin-uninstall-.*\.result\.txt$/.test(name) && !before.has(name))
-    if (!reports.length) return null
-    const result = (await readFile(join(tmpdir(), reports[0]), 'utf8')).replace(/^\uFEFF/, '')
-    return result.trim()
-  }, '卸载辅助程序完成').then(result => assert.equal(result, 'complete'))
-  for (const name of [windowsLayout.entry, windowsLayout.runtime]) {
+  const launcherLog = await readFile(logFile, 'utf8')
+  const handoff = launcherLog.startsWith(before) ? launcherLog.slice(before.length) : launcherLog
+  assert.ok(handoff.includes('setup: received launcher close request'), '托盘模式下的运行实例应收到正常退出请求')
+  const marker = 'uninstall: handed off to helper. Result: '
+  const line = handoff.split(/\r?\n/).find(item => item.includes(marker))
+  assert.ok(line, '卸载进程退出前没有记录辅助程序交接\n' + handoff.trim().slice(-8192))
+  const report = line.slice(line.indexOf(marker) + marker.length)
+  assert.ok(isAbsolute(report) && /^kevin-uninstall-[\da-f-]{36}\.result\.txt$/i.test(basename(report)), report)
+  const result = await until(async () => {
+    const diagnostic = (await readFile(report, 'utf8')).replace(/^\uFEFF/, '').trim()
+    return /^(?:complete$|failed:|cleanup pending:)/.test(diagnostic) ? diagnostic : null
+  }, '卸载辅助程序完成，诊断文件 ' + report).catch(async error => {
+    const diagnostic = (await readFile(report, 'utf8').catch(reportError => reportError.message)).trim().slice(-8192)
+    throw new Error(error.message + '\n' + handoff.trim().slice(-8192) + '\n' + diagnostic, { cause: error })
+  })
+  assert.equal(result, 'complete')
+  for (const name of [windowsLayout.entry, windowsLayout.runtime, 'install.json']) {
     await assert.rejects(access(join(target, name)), { code: 'ENOENT' })
   }
   assert.equal(await readFile(ownFile, 'utf8'), 'preserve')
+  assert.deepEqual(await Promise.all(profileFiles.map(file => readFile(join(data, file)))), beforeData)
+  assert.equal(registration().status, 1, '卸载应清理原有 Windows 注册入口')
 }
 
 async function comparePayload(installed) {
@@ -284,11 +304,17 @@ try {
   await checkProfile(data, fixture, history)
   await checkProfile(join(data, 'update-backup'), fixture, history)
   await startInstalled(covering, source.version, fixture)
+  console.log('Verified overwrite upgrade, startup, saved history and previous profile backup')
   const fresh = await install(installer, 'fresh', source.version)
   await startInstalled(fresh, source.version, fixture)
   await comparePayload(fresh)
+  console.log('Verified fresh install, startup and byte-for-byte app payload')
   const freshData = sandboxData('fresh')
+  const runningFresh = await launch(join(fresh, windowsLayout.entry))
+  const tray = await runningFresh.run('window.api.setLauncherBehavior({ closeAction: "tray" })')
+  assert.equal(tray.closeAction, 'tray')
   await verifyUninstall(fresh, freshData)
+  await runningFresh.waitForExit()
   await checkProfile(freshData, fixture, history)
   assert.deepEqual(await verifyLocalAssets(dir, source.version, source.electron), assets)
   await writeFile(join(dir, 'windows-verification.json'), JSON.stringify({

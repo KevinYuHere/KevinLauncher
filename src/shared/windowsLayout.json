@@ -1,4 +1,5 @@
 {
   "entry": "KevinLauncher.exe",
-  "runtime": "KevinLauncherRuntime.exe"
+  "runtime": "KevinLauncherRuntime.exe",
+  "setupCloseMessage": 32843
 }

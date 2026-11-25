@@ -6,7 +6,7 @@ import { observeWindowActivity } from './services/windowActivity'
 import { serveMediaFile } from './services/mediaProtocol'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { registerIpc, registerUpdatePreview, runtime, warmUpFonts, appUpdate } from './ipc'
-import { requireDataRecovery, withExclusiveDataAccess } from './ipc/dataAccess'
+import { requireDataRecovery } from './ipc/dataAccess'
 import { AppStore } from './services/appStore'
 import { recoverDataMove } from './services/dataMoveJournal'
 import { applyLauncherIcon, launcherIconPaths } from './services/appIcon'
@@ -35,9 +35,9 @@ import { ensureAdministrator, isElevated } from './services/elevation'
 import { log } from './services/logger'
 import { launcherAppId, launcherDisplayName, trialBuild } from './services/buildIdentity'
 import { isolateSetupSession, setupTaskActive } from './services/setupTask'
-import { SETUP_EXIT_ARGUMENT } from './services/install'
+import windowsLayout from '@shared/windowsLayout.json'
 import { recordApplicationStartup } from './services/appActivation'
-import { broadcast, checkpointData } from './ipc/context'
+import { broadcast } from './ipc/context'
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -106,6 +106,14 @@ function createWindow(icon?: string, hidden = false, mode: RunMode = 'app'): Bro
 
   bindWindowRole(mainWindow.webContents, mode, is.dev ? process.env.ELECTRON_RENDERER_URL : undefined)
   if (!setup) observeWindowActivity(mainWindow, hidden)
+  if (!setup && process.platform === 'win32' && app.isPackaged && !trialBuild) {
+    mainWindow.hookWindowMessage(windowsLayout.setupCloseMessage, () => {
+      setImmediate(() => {
+        log('setup: received launcher close request')
+        app.quit()
+      })
+    })
+  }
   mainWindow.on('ready-to-show', () => {
     // Autostart in tray mode: stay hidden, the tray icon opens the window.
     if (hidden) return
@@ -167,23 +175,8 @@ app.whenReady().then(async () => {
       app.quit()
       return
     }
-    if (process.argv.includes(SETUP_EXIT_ARGUMENT)) {
-      app.quit()
-      return
-    }
     if (app.isPackaged) recordApplicationStartup()
-    let preparingForSetup: Promise<void> | undefined
-    app.on('second-instance', (_event, argv) => {
-      if (argv.includes(SETUP_EXIT_ARGUMENT)) {
-        preparingForSetup ??= withExclusiveDataAccess(checkpointData).then(() => {
-          markQuitting()
-          app.quit()
-        }).catch((error) => log(`setup: launcher could not save before exit (${String(error)})`))
-          .finally(() => { preparingForSetup = undefined })
-      } else {
-        showMainWindow()
-      }
-    })
+    app.on('second-instance', showMainWindow)
   }
   log(`app: mode=${runMode} packaged=${app.isPackaged} dev=${is.dev}`)
 

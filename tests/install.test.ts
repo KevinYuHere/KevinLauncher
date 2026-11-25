@@ -3,15 +3,18 @@ import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { promises as fs } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
+import { build } from 'esbuild'
 import { applyPayload, closeRunningInstances, listFiles, normalizeInstallDir, processesUsingInstall, staleFiles } from '../src/main/services/install'
 import { managedUninstallPaths, startUninstallHelper, uninstallHelperScript } from '../src/main/services/uninstall'
 import { psDataLiteral } from '../src/main/services/powershell'
 import { launcherEntryPath } from '../src/main/services/buildIdentity'
 import { ProcessTree } from '../src/main/services/processTree'
-import * as setupProcess from '../src/main/services/setupProcess'
+import { requestLauncherClose } from '../src/main/services/setupProcess'
 
 vi.mock('electron', () => ({ app: { isPackaged: false, getVersion: () => '2.0.5' } }))
+vi.mock('../src/main/services/logger', () => ({ log: vi.fn() }))
+vi.mock('../src/main/services/setupProcess', () => ({ requestLauncherClose: vi.fn() }))
 
 const temporaryDirs = new Set<string>()
 
@@ -67,11 +70,26 @@ describe('managed uninstall', () => {
     }
     const unrelated = { ...fixture, pid: 424243, executable: join(target, 'another installation', 'KevinLauncher.exe') }
     vi.spyOn(ProcessTree, 'snapshot').mockResolvedValueOnce([fixture, unrelated]).mockResolvedValueOnce([unrelated])
-    const close = vi.spyOn(setupProcess, 'requestLegacyLauncherClose').mockResolvedValue(1)
+    const close = vi.mocked(requestLauncherClose).mockResolvedValueOnce(1)
 
     await expect(closeRunningInstances(target)).resolves.toBe(true)
     expect(close).toHaveBeenCalledOnce()
     expect(close).toHaveBeenCalledWith([fixture])
+  })
+
+  it.skipIf(process.platform !== 'win32')('requests a close from the installed browser without spawning its entry or targeting its children', async () => {
+    const target = await fs.realpath(await temp())
+    await writeTree(target, { 'resources/release-compatibility.json': '{}' })
+    const createdAt = Date.now()
+    const process = (pid: number, ppid: number, name: string) => ({ pid, ppid, name, executable: join(target, name), createdAt })
+    const entry = process(424242, 0, 'KevinLauncher.exe')
+    const runtime = process(424243, entry.pid, 'KevinLauncherRuntime.exe')
+    const child = process(424244, runtime.pid, 'KevinLauncherRuntime.exe')
+    vi.spyOn(ProcessTree, 'snapshot').mockResolvedValueOnce([entry, runtime, child]).mockResolvedValueOnce([])
+    const close = vi.mocked(requestLauncherClose).mockClear().mockResolvedValueOnce(1)
+    await expect(closeRunningInstances(target)).resolves.toBe(true)
+    expect(close).toHaveBeenCalledOnce()
+    expect(close).toHaveBeenCalledWith([entry, runtime])
   })
 
 
@@ -115,6 +133,66 @@ describe('managed uninstall', () => {
     await vi.waitFor(async () => expect((await fs.readFile(report, 'utf8')).trim()).toBe('complete'))
     expect(await listFiles(installDir)).toEqual(['my files/私有记录.txt'])
   }, 12000)
+
+  it.skipIf(process.platform !== 'win32')('finishes the handoff after both the spawning runtime and launcher entry exit', async () => {
+    const root = await fs.realpath(await temp())
+    const installDir = join(root, '安装目录')
+    const dataDir = join(root, '用户数据')
+    const runtime = join(root, 'runtime.cjs')
+    const electron = join(root, 'electron.cjs')
+    const report = join(root, '卸载诊断.txt')
+    const runtimeExited = join(root, 'runtime-exited')
+    await writeTree(installDir, { 'KevinLauncher.exe': 'entry', 'KevinLauncherRuntime.exe': 'runtime',
+      'install.json': '{}', '用户内容.txt': 'preserve' })
+    await writeTree(dataDir, { 'config.json': '{"fixture":true}', 'playtime.json': '{"fixture":60}' })
+    await fs.writeFile(electron, 'exports.app = { isPackaged: false };')
+    await build({
+      stdin: {
+        resolveDir: process.cwd(),
+        contents: `import { startUninstallHelper, uninstallHelperScript, managedUninstallPaths } from './src/main/services/uninstall'
+const paths = JSON.parse(process.argv[2])
+const owners = [process.pid, process.ppid].map(pid => ({ pid, path: process.execPath, required: true }))
+const script = uninstallHelperScript({ ...paths, dataDir: undefined, owners,
+  files: managedUninstallPaths(['KevinLauncher.exe', 'KevinLauncherRuntime.exe']) })
+startUninstallHelper(script, paths.report).then(() => process.exit(0), error => {
+  console.error(error)
+  process.exit(1)
+})`
+      },
+      alias: { '@shared': resolve('src/shared'), electron },
+      platform: 'node', bundle: true, format: 'cjs', outfile: runtime
+    })
+    const entry = spawn(process.execPath, ['-e', `
+const child = require('node:child_process').spawn(process.execPath, process.argv.slice(1, 3),
+  { windowsHide: true, stdio: ['ignore', 'ignore', 'inherit'] })
+child.once('exit', (code) => {
+  if (code !== 0) process.exit(code ?? 1)
+  require('node:fs').writeFileSync(process.argv[3], 'closed')
+  process.stdin.resume()
+})
+`, runtime, JSON.stringify({ installDir, backup: join(root, '隔离目录'), report }), runtimeExited], {
+      windowsHide: true, stdio: ['pipe', 'ignore', 'pipe']
+    })
+    let errors = ''
+    entry.stderr.on('data', chunk => { errors += String(chunk) })
+    const exited = once(entry, 'exit')
+    try {
+      await vi.waitFor(async () => {
+        if (entry.exitCode !== null) throw new Error(errors + await fs.readFile(report, 'utf8').catch(() => ''))
+        await fs.access(runtimeExited)
+      }, { timeout: 8000 })
+      expect(await fs.readFile(join(installDir, 'KevinLauncher.exe'), 'utf8')).toBe('entry')
+      entry.stdin.end()
+      expect(await exited).toEqual([0, null])
+      await vi.waitFor(async () => expect((await fs.readFile(report, 'utf8')).trim()).toBe('complete'), { timeout: 8000 })
+      expect(await listFiles(installDir)).toEqual(['用户内容.txt'])
+      expect(await fs.readFile(join(dataDir, 'config.json'), 'utf8')).toBe('{"fixture":true}')
+      expect(await fs.readFile(join(dataDir, 'playtime.json'), 'utf8')).toBe('{"fixture":60}')
+    } finally {
+      if (entry.exitCode === null && entry.signalCode === null) entry.kill()
+      await exited
+    }
+  }, 22000)
 
   it.skipIf(process.platform !== 'win32')('restores files on a failed uninstall and retries through the original entry', async () => {
     const root = await fs.realpath(await temp())

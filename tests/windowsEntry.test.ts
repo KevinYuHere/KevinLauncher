@@ -2,7 +2,7 @@ import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { once } from 'node:events'
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { createRequire } from 'node:module'
 import { setTimeout as delay } from 'node:timers/promises'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
@@ -17,6 +17,7 @@ describe.skipIf(process.platform !== 'win32')('Windows launcher entry', () => {
   let runtime: string
   let cwd: string
   let legacy: string
+  let installedBrowser: string
 
   beforeAll(() => {
     root = realpathSync(mkdtempSync(join(tmpdir(), 'kl-entry-')))
@@ -49,7 +50,9 @@ describe.skipIf(process.platform !== 'win32')('Windows launcher entry', () => {
     const legacyDir = join(root, '旧 版本')
     mkdirSync(legacyDir)
     legacy = join(legacyDir, 'KevinLauncher.exe')
+    installedBrowser = join(legacyDir, 'KevinLauncherRuntime.exe')
     compile(legacy, join(import.meta.dirname, 'fixtures', 'windows-entry-close.cs'))
+    compile(installedBrowser, join(import.meta.dirname, 'fixtures', 'windows-entry-close.cs'))
   })
 
   afterAll(() => { if (root) rmSync(root, { recursive: true, force: true, maxRetries: 3 }) })
@@ -87,8 +90,10 @@ describe.skipIf(process.platform !== 'win32')('Windows launcher entry', () => {
     expect(child.stderr).toContain('KevinLauncherRuntime.exe (2)')
   })
 
-  test('only posts a normal close to hidden Chrome windows owned by the verified legacy process', async () => {
-    const target = spawn(legacy, [], { cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] })
+  test.each(['legacy window', 'installed browser'] as const)('only posts a close to hidden Chrome windows of the verified %s', async kind => {
+    const image = kind === 'legacy window' ? legacy : installedBrowser
+    const message = kind === 'legacy window' ? 'close:' : 'setup:'
+    const target = spawn(image, [], { cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] })
     let stdout = ''
     target.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk })
     await once(target, 'spawn')
@@ -100,30 +105,30 @@ describe.skipIf(process.platform !== 'win32')('Windows launcher entry', () => {
         if (target.exitCode !== null) break
         await delay(30)
       }
-      throw new Error('Legacy window fixture did not report ' + pattern)
+      throw new Error('Window fixture did not report ' + pattern)
     }
     const request = (created: number, expected: string) => spawnSync(entry,
-      ['--kevin-close-legacy-window', String(target.pid), String(created), expected],
+      ['--kevin-close-launcher-window', String(target.pid), String(created), expected],
       { cwd, windowsHide: true, encoding: 'utf8', timeout: 3000 })
     try {
       const created = Number((await receive(/ready:(\d+)\r?\n/))[1])
-      for (const [time, expected] of [[created + 1, legacy], [created, join(cwd, 'KevinLauncher.exe')]] as const) {
+      for (const [time, expected] of [[created + 1, image], [created, join(cwd, basename(image))]] as const) {
         const rejected = request(time, expected)
         expect(rejected.error).toBeUndefined()
         expect(rejected.status).toBe(1)
         expect(rejected.stdout).toBe('')
         expect(rejected.stderr).toContain('process identity changed')
       }
-      expect(stdout).not.toContain('close:')
-      const matched = request(created, legacy)
+      expect(stdout).not.toMatch(/close:|setup:/)
+      const matched = request(created, image)
       expect(matched.error).toBeUndefined()
       expect(matched.status).toBe(0)
       expect(matched.stdout.trim()).toBe('1')
       expect(matched.stderr).toBe('')
-      await receive(/close:Chrome_WidgetWin_1\r?\n/)
-      expect(request(created, legacy).stdout.trim()).toBe('0')
+      await receive(new RegExp(message + 'Chrome_WidgetWin_1\\r?\\n'))
+      expect(request(created, image).stdout.trim()).toBe('0')
       expect(target.exitCode).toBeNull()
-      expect(stdout).not.toContain('close:KevinLauncherFixture_Other')
+      expect(stdout).not.toContain('KevinLauncherFixture_Other')
     } finally {
       if (target.exitCode === null && target.signalCode === null) target.kill()
       await closed

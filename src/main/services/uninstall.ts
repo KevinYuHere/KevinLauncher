@@ -187,6 +187,7 @@ try {
 
 const HELPER_ENTRY = `
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 [Console]::InputEncoding = [Text.Encoding]::UTF8
 $env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules')
 $line = [Console]::ReadLine()

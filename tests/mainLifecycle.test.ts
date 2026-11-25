@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs'
 import { join } from 'node:path'
 import { runInNewContext } from 'node:vm'
 import { transformWithEsbuild } from 'vite'
+import windowsLayout from '../src/shared/windowsLayout.json'
 
 let entry: string
 beforeAll(async () => {
@@ -13,6 +14,7 @@ beforeAll(async () => {
 async function start(mode: 'app' | 'install' | 'uninstall', ownsLock = true, packaged = false, elevated = true) {
   const listeners = new Map<string, (event?: { preventDefault: () => void }) => void>()
   const events: string[] = []
+  const windowMessages = new Map<number, () => void>()
   const ensureAdministrator = vi.fn(async () => elevated)
   const app = {
     isPackaged: packaged,
@@ -34,6 +36,7 @@ async function start(mode: 'app' | 'install' | 'uninstall', ownsLock = true, pac
   const loadIcon = vi.fn(() => ({}))
   class StubWindow {
     webContents = { setWindowOpenHandler() {} }
+    hookWindowMessage(message: number, callback: () => void) { windowMessages.set(message, callback) }
     on() {}
     loadFile() {}
   }
@@ -54,7 +57,7 @@ async function start(mode: 'app' | 'install' | 'uninstall', ownsLock = true, pac
     },
     './services/appStore': { AppStore: { launcherSettings: async () => ({ autoStart: 'off' }) } },
     './services/appIcon': { applyLauncherIcon() {}, launcherIconPaths: loadIcon },
-    './services/behavior': { markQuitting() {}, setCloseToTray() {}, setMainWindowProvider() {}, ensureTray() {} },
+    './services/behavior': { markQuitting() {}, showMainWindow() {}, setCloseToTray() {}, setMainWindowProvider() {}, ensureTray() {} },
     './services/autostart': { startedHidden: () => false, applyAutoStart: async () => {} },
     './services/dataDir': { applyDataDir() {} },
     './services/dataMoveJournal': { recoverDataMove: async () => {} },
@@ -62,7 +65,7 @@ async function start(mode: 'app' | 'install' | 'uninstall', ownsLock = true, pac
     './services/shutdown': { flushBeforeShutdown: flush },
     './services/setupTask': { isolateSetupSession, setupTaskActive: () => false },
     './services/appActivation': { recordApplicationStartup() {} },
-    './services/install': { SETUP_EXIT_ARGUMENT: '--kevin-exit-for-setup' },
+    '@shared/windowsLayout.json': windowsLayout,
     './services/settingsBackup': { recoverSettingsImport: () => events.push('recover') },
     './services/housekeeping': { cleanUpdateStaging() {}, cleanArknightsStaging: async () => {} },
     './services/elevation': { isElevated: async () => elevated, ensureAdministrator },
@@ -71,10 +74,10 @@ async function start(mode: 'app' | 'install' | 'uninstall', ownsLock = true, pac
   runInNewContext(entry, {
     require: (name: string) => modules[name] ?? {},
     process: { env: {}, argv: mode === 'app' ? [] : [`--${mode}`], platform: 'win32' },
-    __dirname: 'fixture-main', module: { exports: {} }, exports: {}
+    __dirname: 'fixture-main', module: { exports: {} }, exports: {}, setImmediate
   })
   await ready
-  return { listeners, events, app, flush, release, policy, loadIcon, ensureAdministrator, isolateSetupSession, whenReady }
+  return { listeners, events, windowMessages, app, flush, release, policy, loadIcon, ensureAdministrator, isolateSetupSession, whenReady }
 }
 
 describe('launcher data lifecycle', () => {
@@ -112,6 +115,20 @@ describe('launcher data lifecycle', () => {
     expect(second.listeners.has('before-quit')).toBe(false)
   })
 
+  it('routes the installed browser setup close message through the regular quit lifecycle', async () => {
+    const main = await start('app', true, true)
+    const request = main.windowMessages.get(windowsLayout.setupCloseMessage)
+    expect(request).toBeTypeOf('function')
+    request!()
+    await new Promise<void>(resolve => setImmediate(resolve))
+    expect(main.app.quit).toHaveBeenCalledOnce()
+    const preventDefault = vi.fn()
+    main.listeners.get('before-quit')!({ preventDefault })
+    expect(preventDefault).toHaveBeenCalledOnce()
+    expect(main.flush).toHaveBeenCalledOnce()
+    main.release()
+  })
+
   it.each(['install', 'uninstall'] as const)('opening %s mode skips settings and release policy', async (mode) => {
     const setup = await start(mode)
     expect(setup.isolateSetupSession).toHaveBeenCalledOnce()
@@ -119,5 +136,6 @@ describe('launcher data lifecycle', () => {
     expect(setup.events).toEqual([mode])
     expect(setup.policy).not.toHaveBeenCalled()
     expect(setup.loadIcon).not.toHaveBeenCalled()
+    expect(setup.windowMessages.size).toBe(0)
   })
 })

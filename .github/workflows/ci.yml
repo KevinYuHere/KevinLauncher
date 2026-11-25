@@ -30,6 +30,7 @@ jobs:
           node-version-file: .node-version
           cache: npm
       - run: npm ci --no-audit --no-fund
+      - run: node node_modules/electron/install.js
       - run: npm run lint
       - run: npm run typecheck
       - run: npm run test:core
@@ -49,6 +50,7 @@ jobs:
           node-version-file: .node-version
           cache: npm
       - run: npm ci --no-audit --no-fund
+      - run: node node_modules/electron/install.js
       - run: npm run typecheck
       - run: |
           $canonicalTemp = node -p "require('node:fs').realpathSync.native(require('node:os').tmpdir())"

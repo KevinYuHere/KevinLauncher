@@ -1,6 +1,5 @@
 import { app, shell } from 'electron'
-import { execFile, spawn } from 'child_process'
-import { once } from 'events'
+import { execFile } from 'child_process'
 import { promises as fs } from 'fs'
 import { randomUUID } from 'crypto'
 import { dirname, join, relative, resolve, sep } from 'path'
@@ -16,7 +15,7 @@ import { realDirectoryPath } from './dataDir'
 import { createSiblingWorkspace, isFileSystemRoot } from './directoryPath'
 import { availableSpace, requireDiskSpace, type SpaceNeed } from './diskSpace'
 import { canonicalExecutable, hasProcessIdentity, ProcessTree, type ProcInfo } from './processTree'
-import { requestLegacyLauncherClose } from './setupProcess'
+import { requestLauncherClose } from './setupProcess'
 import {
   assertTrialInstallDirectory, launcherDisplayName, launcherExecutableName as EXE,
   launcherEntryPath, launcherProcessNames, launcherProductName, launcherRuntimeExecutableName as RUNTIME,
@@ -43,7 +42,6 @@ const UNINSTALL_KEY =
 const UNINSTALL_KEY_MACHINE =
   'HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\KevinLauncher'
 const APP_KEY = 'HKCU\\Software\\KevinLauncher'
-export const SETUP_EXIT_ARGUMENT = '--kevin-exit-for-setup'
 /** Marker file inside the install directory (also used for stale-file cleanup). */
 const INFO_FILE = 'install.json'
 
@@ -237,23 +235,13 @@ export async function closeRunningInstances(targetDir: string): Promise<boolean>
   const pids = processesUsingInstall(initial, targetDir)
   if (pids.length) {
     log(`install: requesting normal exit from ${pids.join(', ')} at ${targetDir}`)
-    const hasCloseProtocol = await pathExists(join(targetDir, 'resources', 'release-compatibility.json'))
     try {
-      if (hasCloseProtocol) {
-        const env = { ...process.env }
-        delete env.PORTABLE_EXECUTABLE_FILE
-        delete env.PORTABLE_EXECUTABLE_DIR
-        const messenger = spawn(exe, [SETUP_EXIT_ARGUMENT], {
-          cwd: targetDir, env, windowsHide: true, stdio: 'ignore'
-        })
-        await once(messenger, 'spawn')
-        messenger.unref()
-      } else {
-        const selected = new Set(pids)
-        const sent = await requestLegacyLauncherClose(initial.filter(hasProcessIdentity)
-          .filter(item => selected.has(item.pid) && !selected.has(item.ppid)))
-        log(`install: legacy window close posted to ${sent} window(s)`)
-      }
+      const selected = new Set(pids)
+      const matching = initial.filter(hasProcessIdentity).filter(item => selected.has(item.pid))
+      const paths = new Map(matching.map(item => [item.pid, canonicalExecutable(item.executable)]))
+      // Keep the browser under the entry, and skip Chromium processes under the same runtime image.
+      const sent = await requestLauncherClose(matching.filter(item => paths.get(item.ppid) !== paths.get(item.pid)))
+      log(`install: launcher close posted to ${sent} window(s)`)
     } catch (error) {
       log(`install: launcher exit request failed (${String(error)})`)
     }
