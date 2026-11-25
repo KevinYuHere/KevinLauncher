@@ -192,6 +192,12 @@ static class WindowsEntry
                 GetWindowThreadProcessId(window, out owner) == thread && owner == pid;
         }
 
+        static void Report(string format, params object[] args)
+        {
+            try { Console.Error.WriteLine(format, args); }
+            catch (System.IO.IOException) { }
+        }
+
         static bool InvokeTrayQuit(IntPtr process, uint pid)
         {
             var name = new StringBuilder(128);
@@ -210,21 +216,39 @@ static class WindowsEntry
                 if (IsWindowVisible(window)) openedBeforeRequest.Add(window);
                 return true;
             }, IntPtr.Zero);
-            if (tray == IntPtr.Zero || !StillOwnsWindow(process, pid, trayThread, tray)) return false;
+            if (tray == IntPtr.Zero || !StillOwnsWindow(process, pid, trayThread, tray))
+            {
+                Report("Launcher tray host unavailable");
+                return false;
+            }
 
             // Grant permission from the foreground installer. The old launcher may already be
             // eligible when the grant fails, so still attempt the addressed tray callback.
             bool canActivate = AllowSetForegroundWindow(pid);
-            if (!PostMessageW(tray, TrayCallback, new IntPtr(FirstTrayIcon), new IntPtr(ContextMenuMessage))) return false;
+            bool posted = PostMessageW(tray, TrayCallback, new IntPtr(FirstTrayIcon), new IntPtr(ContextMenuMessage));
+            int postError = posted ? 0 : Marshal.GetLastWin32Error();
+            Report("Launcher tray host verified (foreground granted: {0}, callback posted: {1})", canActivate, posted);
+            if (!posted)
+            {
+                Report("Launcher tray callback failed with Windows error {0}", postError);
+                return false;
+            }
             var quitItem = new AndCondition(
                 new PropertyCondition(AutomationElement.ProcessIdProperty, (int)pid),
                 new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.MenuItem),
                 new PropertyCondition(AutomationElement.NameProperty, "\u9000\u51fa"));
             var wait = Stopwatch.StartNew();
+            bool sawPopup = false;
+            bool sawQuitItem = false;
+            bool invokeAttempted = false;
             do
             {
                 uint state = WaitForSingleObject(process, 0);
-                if (state == 0) return true;
+                if (state == 0)
+                {
+                    Report("Launcher process exited after the tray callback");
+                    return true;
+                }
                 if (state != WaitTimeout) throw new Win32Exception();
                 var popups = new List<IntPtr>();
                 EnumWindows((window, context) => {
@@ -234,6 +258,7 @@ static class WindowsEntry
                         name.ToString().StartsWith("Chrome_WidgetWin_", StringComparison.Ordinal)) popups.Add(window);
                     return true;
                 }, IntPtr.Zero);
+                sawPopup |= popups.Count > 0;
                 foreach (var popup in popups)
                 {
                     try
@@ -241,11 +266,14 @@ static class WindowsEntry
                         if (!StillOwnsWindow(process, pid, trayThread, popup)) continue;
                         var root = AutomationElement.FromHandle(popup);
                         var items = root.FindAll(TreeScope.Descendants, quitItem);
+                        sawQuitItem |= items.Count > 0;
                         object pattern;
                         if (items.Count != 1 || !items[0].Current.IsEnabled ||
                             !items[0].TryGetCurrentPattern(InvokePattern.Pattern, out pattern) ||
                             !StillOwnsWindow(process, pid, trayThread, popup)) continue;
+                        invokeAttempted = true;
                         ((InvokePattern)pattern).Invoke();
+                        Report("Launcher tray quit action invoked (popup and quit item verified)");
                         return true;
                     }
                     catch (ElementNotAvailableException)
@@ -255,7 +283,8 @@ static class WindowsEntry
                 }
                 Thread.Sleep(50);
             } while (wait.ElapsedMilliseconds < 1500);
-            Console.Error.WriteLine(canActivate ? "Launcher tray quit action unavailable" : "Launcher tray could not obtain foreground permission");
+            Report("Launcher tray quit action unavailable (popup observed: {0}, quit item observed: {1}, invoke attempted: {2})",
+                sawPopup, sawQuitItem, invokeAttempted);
             return false;
         }
 
@@ -274,8 +303,13 @@ static class WindowsEntry
             try
             {
                 AssertIdentity(process, expected, created);
-                int sent = message == CloseMessage && InvokeTrayQuit(process, id)
-                    ? 1 : PostClose(process, id, message);
+                int sent = 1;
+                if (message != CloseMessage || !InvokeTrayQuit(process, id))
+                {
+                    sent = PostClose(process, id, message);
+                    Report("Launcher {0} request posted to {1} window(s)",
+                        message == CloseMessage ? "WM_CLOSE fallback" : "setup close", sent);
+                }
                 Console.WriteLine(sent.ToString(CultureInfo.InvariantCulture));
                 return 0;
             }

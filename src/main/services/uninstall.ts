@@ -284,7 +284,7 @@ export async function prepareUninstall(options: {
   }
   const script = uninstallHelperScript({
     installDir, files, dataDir, dataBackup, backup, owners,
-    cleanup: uninstallIntegrationScript(installDir, dataDir)
+    cleanup: await uninstallIntegrationScript(installDir, dataDir)
   })
   await startUninstallHelper(script, report, () => {
     onProgress?.('正在交接卸载，程序文件移除后将清理系统设置…')

@@ -240,21 +240,43 @@ async function installThroughSetup(ui, info, target, data) {
   return { programMethod, dataMethod }
 }
 
+async function trackSetupLog(data) {
+  const file = join(data, 'launcher.log')
+  const read = () => readFile(file, 'utf8').catch(() => '')
+  let position = (await read()).length
+  return async () => {
+    const contents = await read()
+    const appended = contents.slice(contents.length >= position ? position : 0)
+    position = contents.length
+    const status = appended.split(/\r?\n/).filter(line => /\b(?:install:|setup:|shutdown:)/.test(line))
+    if (status.length) console.log(status.join('\n'))
+  }
+}
+
 async function confirmSetupInstall(ui, target, data, requireForeground = false) {
   await clickPrimary(ui, '下一步')
   const locations = await ui.run(`[...document.querySelectorAll('.setup-list em')].map(element => element.textContent)`)
   assert(locations.some(path => samePath(path, target)), '确认页显示选中的程序目录')
   assert(locations.some(path => samePath(path, data)), '确认页显示选中的数据目录')
+  const reportProgress = requireForeground ? await trackSetupLog(data) : null
   if (requireForeground) {
     await ui.command('Page.bringToFront', {})
-    await until(() => windows('activate-installer', '-ProcessId', String(ui.pid)), '实际覆盖安装器处于 Windows 前台', 10_000)
+    const active = await until(async () => {
+      const state = await windows('activate-installer', '-ProcessId', String(ui.pid))
+      return state.foreground ? state : null
+    }, '实际覆盖安装器处于 Windows 前台', 10_000)
+    console.log('Actual installer in the Windows foreground: ' + JSON.stringify(active))
   }
   await clickPrimary(ui, '开始安装')
-  await until(() => ui.run(`(() => {
-    const failure = document.querySelector('.setup-warn-block')?.textContent
-    if (failure) throw new Error(failure)
-    return document.querySelector('.setup-title-lg')?.textContent === '安装完成'
-  })()`), 'Beta 安装完成')
+  const finished = await until(async () => {
+    await reportProgress?.()
+    const state = await ui.run(`({
+      failure: document.querySelector('.setup-warn-block')?.textContent,
+      complete: document.querySelector('.setup-title-lg')?.textContent === '安装完成'
+    })`)
+    return state.failure || state.complete ? state : null
+  }, 'Beta 安装完成')
+  assert(!finished.failure, finished.failure)
   assert(samePath(await ui.run(`document.querySelector('.setup-panel .setup-sub b')?.textContent`), target))
 }
 
@@ -355,7 +377,7 @@ async function activityProcess(action) {
 }
 
 async function placeLegacyInTray(ui, installed, data) {
-  const preferences = await ui.run('window.api.setLauncherBehavior({ closeAction: "tray", autoStart: "tray" })')
+  const preferences = await ui.run('window.api.setLauncherBehavior({ closeAction: "tray", autoStart: "tray", afterLaunch: "none" })')
   assert.equal(preferences.closeAction, 'tray')
   assert.equal(preferences.autoStart, 'tray')
   const file = join(root, 'playtime-fixture.exe')
@@ -369,10 +391,18 @@ async function placeLegacyInTray(ui, installed, data) {
   await until(async () => (await ui.run('window.api.listRunning()')).some(
     app => app.appId === fixture.id && app.pids.includes(launched.pid)), '旧模式已记录运行中的应用')
   assert.equal(await activityProcess('activity-process'), true)
-  const browserWindow = async () => (await windows('processes', '-Target', installed)).processes.find(process => process.id === ui.pid)
-  await until(async () => (await browserWindow())?.window, '旧版启动器升级前已显示实际窗口')
-  await ui.run('window.api.windowClose()')
-  await until(async () => (await browserWindow())?.window === false, '旧版关闭窗口后保持在托盘中', 15_000)
+  await ui.run('window.api.windowClose()', 5000)
+  let observed
+  const tray = await until(async () => {
+    const visibility = await ui.run('document.visibilityState', 5000)
+    const { processes } = await windows('processes', '-Target', installed)
+    observed = { visibility, processes }
+    return visibility === 'hidden' && processes.find(process => process.tray && process.chromeHidden &&
+      !process.chromeVisible && !process.renderer)
+  }, '旧版关闭窗口后保持在实际 Windows 托盘中', 15_000).catch(error => {
+    throw new Error(error.message + '\nLegacy window observation: ' + JSON.stringify(observed), { cause: error })
+  })
+  console.log('Legacy launcher hidden in its Windows tray: ' + JSON.stringify({ pid: tray.id, image: tray.path, activityPid: launched.pid }))
   assert.equal(await activityProcess('activity-process'), true)
   const persisted = JSON.parse(await readFile(join(data, 'playtime.json'), 'utf8'))
   assert(!persisted.sessions.some(session => session.appId === activity.appId), '旧版退出前活动会话应尚未保存')
@@ -587,6 +617,7 @@ async function verifyPublishedOverlay() {
   await previousUi.waitForExit()
   assert.equal(existing, covering)
   const updatedHistory = await expectedOverlayHistory(data, history)
+  if (beta) console.log('Legacy launcher exited normally and saved its running session')
   await checkUnrelated?.()
   await checkProfile(data, fixture, updatedHistory)
   await checkProfile(join(data, 'update-backup'), fixture, updatedHistory)

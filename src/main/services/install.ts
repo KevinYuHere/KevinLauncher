@@ -2,12 +2,13 @@ import { app, shell } from 'electron'
 import { execFile } from 'child_process'
 import { promises as fs } from 'fs'
 import { randomUUID } from 'crypto'
-import { dirname, join, relative, resolve, sep } from 'path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'path'
 import { promisify } from 'util'
 import { directorySize } from './updateDownload'
 import { AUTO_START_TASK } from './autostart'
 import { currentAppVersion } from './appVersion'
 import { loadJsonSafe, writeFileAtomic } from './atomicFile'
+import { sha256File } from './hash'
 import { psDataLiteral } from './powershell'
 import { log } from './logger'
 import { directoriesOverlap } from '@shared/paths'
@@ -808,21 +809,48 @@ export async function writeUninstallEntry(installDir: string, version: string): 
 
 // ----------------------------------------------------------------- uninstall
 
-/** Deferred cleanup inspects the current target of each system integration. */
-export function uninstallIntegrationScript(installDir: string, removedDataDir?: string): string {
-  assertTrialInstallDirectory(installDir)
-  const registryPath = (key: string) => psDataLiteral(key.replace(/^(HKCU|HKLM)\\/, '$1:\\'))
-  const shortcutsScript = `
-$exe = ${psDataLiteral(join(installDir, EXE))}
-if (!(Test-Path -LiteralPath $exe -ErrorAction Stop)) {
-  $shortcutShell = New-Object -ComObject WScript.Shell
-  foreach ($link in @(${Object.values(shortcuts()).map(psDataLiteral).join(',')})) {
-    if (!(Test-Path -LiteralPath $link -PathType Leaf -ErrorAction Stop)) { continue }
-    Assert-PlainPath $link
-    if ($shortcutShell.CreateShortcut($link).TargetPath -ieq $exe) {
-      Remove-Item -LiteralPath $link -ErrorAction Stop
+/** Resolve the shortcut while the target still exists, then bind it to its original contents. */
+export async function uninstallShortcutCleanup(executable: string, links: readonly string[]): Promise<string> {
+  const target = canonicalExecutable(executable)
+  const confirmed: { path: string; sha256: string }[] = []
+  for (const path of links) {
+    try {
+      const stat = await fs.lstat(path)
+      if (!stat.isFile() || stat.isSymbolicLink() || canonicalExecutable(await fs.realpath(path)) !== canonicalExecutable(path)) {
+        continue
+      }
+      const sha256 = await sha256File(path)
+      const linked = shell.readShortcutLink(path).target
+      if (!isAbsolute(linked)) continue
+      const canonical = canonicalExecutable(linked)
+      if (canonical !== target && canonicalExecutable(await fs.realpath(linked)) !== target) continue
+      if (await sha256File(path) === sha256) confirmed.push({ path, sha256 })
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') log('uninstall: unable to verify a launcher shortcut')
     }
   }
+  return `
+  foreach ($link in (ConvertFrom-Json -InputObject ${psDataLiteral(JSON.stringify(confirmed))})) {
+    try {
+      if (!(Test-Path -LiteralPath $link.path -PathType Leaf -ErrorAction Stop)) { continue }
+      Assert-PlainPath $link.path
+      $hash = (Get-FileHash -LiteralPath $link.path -Algorithm SHA256 -ErrorAction Stop).Hash
+    } catch { continue }
+    if ($hash -ieq $link.sha256) { Remove-Item -LiteralPath $link.path -ErrorAction Stop }
+  }
+`
+}
+
+/** Deferred cleanup inspects the current target of each system integration. */
+export async function uninstallIntegrationScript(installDir: string, removedDataDir?: string): Promise<string> {
+  assertTrialInstallDirectory(installDir)
+  const registryPath = (key: string) => psDataLiteral(key.replace(/^(HKCU|HKLM)\\/, '$1:\\'))
+  const executable = join(installDir, EXE)
+  const cleanup = await uninstallShortcutCleanup(executable, Object.values(shortcuts()))
+  const shortcutsScript = `
+$exe = ${psDataLiteral(executable)}
+if (!(Test-Path -LiteralPath $exe -ErrorAction Stop)) {
+  ${cleanup}
 `.trim()
   if (trialBuild) return shortcutsScript + '\n}'
   return shortcutsScript + `

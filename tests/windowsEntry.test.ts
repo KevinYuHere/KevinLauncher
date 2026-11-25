@@ -134,7 +134,9 @@ describe.skipIf(process.platform !== 'win32').each([
       expect(matched.error).toBeUndefined()
       expect(matched.status).toBe(0)
       expect(matched.stdout.trim()).toBe('1')
-      expect(matched.stderr).toBe('')
+      expect(matched.stderr).toContain(kind === 'legacy window'
+        ? 'Launcher WM_CLOSE fallback request posted to 1 window(s)'
+        : 'Launcher setup close request posted to 1 window(s)')
       await receive(new RegExp(message + 'Chrome_WidgetWin_1\\r?\\n'))
       expect(request(created, image).stdout.trim()).toBe('0')
       expect(target.exitCode).toBeNull()
@@ -158,7 +160,9 @@ describe.skipIf(process.platform !== 'win32').each([
       expect(response.error).toBeUndefined()
       expect(response.status).toBe(0)
       expect(response.stdout.trim()).toBe('1')
-      expect(response.stderr).toBe('')
+      expect(response.stderr).toMatch(/Launcher tray host verified \(foreground granted: (True|False), callback posted: True\)/)
+      expect(response.stderr).toContain('Launcher process exited after the tray callback')
+      expect(response.stderr).not.toContain('WM_CLOSE fallback')
       expect(await closed).toEqual([0, null])
       expect(stdout).toMatch(/tray:quit\r?\ntray:saved\r?\n$/)
       expect(stdout).not.toContain('close:')

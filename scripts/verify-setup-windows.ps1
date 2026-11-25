@@ -172,7 +172,8 @@ public static class SetupFolderPicker {
   $runtimeId = $runtime[0].ProcessId
   if ($Action -eq 'activate-installer') {
     $window = (Get-Process -Id $runtimeId).MainWindowHandle
-    [SetupFolderPicker]::Activate([uint32]$runtimeId, $window) | ConvertTo-Json -Compress
+    $active = [SetupFolderPicker]::Activate([uint32]$runtimeId, $window)
+    [ordered]@{ pid = $runtimeId; window = $window.ToInt64(); foreground = $active } | ConvertTo-Json -Compress
   } else {
     [SetupFolderPicker]::Select([uint32]$runtimeId, $Target) | ConvertTo-Json -Compress
   }
@@ -301,6 +302,15 @@ using System.ComponentModel;
 using System.Runtime.InteropServices;
 
 public static class SetupToken {
+    delegate bool WindowCallback(IntPtr window, IntPtr parameter);
+    [DllImport("user32.dll")]
+    static extern bool EnumWindows(WindowCallback callback, IntPtr parameter);
+    [DllImport("user32.dll")]
+    static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    static extern int GetClassName(IntPtr window, System.Text.StringBuilder text, int size);
+    [DllImport("user32.dll")]
+    static extern bool IsWindowVisible(IntPtr window);
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern IntPtr OpenProcess(uint access, bool inheritHandle, uint processId);
     [DllImport("kernel32.dll")]
@@ -315,6 +325,21 @@ public static class SetupToken {
     static extern IntPtr GetSidSubAuthority(IntPtr sid, uint index);
     [DllImport("advapi32.dll")]
     static extern bool IsTokenRestricted(IntPtr token);
+
+    public static int WindowKinds(uint processId) {
+        int found = 0;
+        var name = new System.Text.StringBuilder(128);
+        EnumWindows((window, _) => {
+            uint owner;
+            GetWindowThreadProcessId(window, out owner);
+            if (owner != processId || GetClassName(window, name, name.Capacity) == 0) return true;
+            string label = name.ToString();
+            if (label == "Electron_NotifyIconHostWindow") found |= 4;
+            if (label.StartsWith("Chrome_WidgetWin_", StringComparison.Ordinal)) found |= IsWindowVisible(window) ? 1 : 2;
+            return true;
+        }, IntPtr.Zero);
+        return found;
+    }
 
     public static int[] Read(uint processId) {
         IntPtr process = OpenProcess(0x1000, false, processId); // PROCESS_QUERY_LIMITED_INFORMATION
@@ -353,9 +378,13 @@ $running = @(Get-CimInstance Win32_Process -Filter $filter | Where-Object {
   try {
     $process = Get-Process -Id $observedId
     $token = [SetupToken]::Read($observedId)
+    $windows = [SetupToken]::WindowKinds($observedId)
     [ordered]@{
       id = $observedId; parentId = $_.ParentProcessId; path = $_.ExecutablePath
       window = $process.MainWindowHandle -ne [IntPtr]::Zero
+      chromeVisible = ($windows -band 1) -ne 0
+      chromeHidden = ($windows -band 2) -ne 0
+      tray = ($windows -band 4) -ne 0
       renderer = $_.CommandLine -match '(?:^|\s)--type=renderer(?:\s|$)'
       noSandbox = $_.CommandLine -match '(?:^|\s)--no-sandbox(?:\s|$)'
       elevated = $token[0] -ge 0x3000 -and $token[1] -ne 0

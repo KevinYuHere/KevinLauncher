@@ -3,16 +3,23 @@ import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { promises as fs } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { build } from 'esbuild'
-import { applyPayload, closeRunningInstances, listFiles, normalizeInstallDir, processesUsingInstall, staleFiles } from '../src/main/services/install'
+import { shell } from 'electron'
+import {
+  applyPayload, closeRunningInstances, listFiles, normalizeInstallDir, processesUsingInstall, staleFiles,
+  uninstallShortcutCleanup
+} from '../src/main/services/install'
 import { managedUninstallPaths, startUninstallHelper, uninstallHelperScript } from '../src/main/services/uninstall'
-import { psDataLiteral } from '../src/main/services/powershell'
+import { psDataLiteral, runPowerShell } from '../src/main/services/powershell'
 import { launcherEntryPath } from '../src/main/services/buildIdentity'
 import { ProcessTree } from '../src/main/services/processTree'
 import { requestLauncherClose } from '../src/main/services/setupProcess'
 
-vi.mock('electron', () => ({ app: { isPackaged: false, getVersion: () => '2.0.5' } }))
+vi.mock('electron', () => ({
+  app: { isPackaged: false, getVersion: () => '2.0.5' },
+  shell: { readShortcutLink: vi.fn() }
+}))
 vi.mock('../src/main/services/logger', () => ({ log: vi.fn() }))
 vi.mock('../src/main/services/setupProcess', () => ({ requestLauncherClose: vi.fn() }))
 
@@ -150,6 +157,43 @@ describe('managed uninstall', () => {
     }
     await vi.waitFor(async () => expect((await fs.readFile(report, 'utf8')).trim()).toBe('complete'))
     expect(await listFiles(installDir)).toEqual(['my files/私有记录.txt'])
+  }, 12000)
+
+  it.skipIf(process.platform !== 'win32')('removes only unchanged Windows shortcuts for a Unicode installation', async () => {
+    const root = await fs.realpath(await temp())
+    const installDir = join(root, "程序 ‘甲’ d'Art")
+    const executable = join(installDir, 'KevinLauncher.exe')
+    const other = join(root, '其它 程序.exe')
+    const links = ['桌面', '开始菜单', '同名其它链接', '安装器替换'].map(folder => join(root, folder, 'KevinLauncher.lnk'))
+    await writeTree(installDir, { 'KevinLauncher.exe': 'entry', 'install.json': '{}' })
+    await fs.writeFile(other, 'unrelated')
+    for (const link of links) await fs.mkdir(dirname(link))
+    const writeLinks = async (items: { path: string; target: string }[]) => runPowerShell(`
+$shell = New-Object -ComObject WScript.Shell
+foreach ($item in (ConvertFrom-Json -InputObject ${psDataLiteral(JSON.stringify(items))})) {
+  $link = $shell.CreateShortcut($item.path)
+  $link.TargetPath = $item.target
+  $link.Save()
+}
+`)
+    const entries = links.map((path, index) => ({ path, target: index === 2 ? other : executable }))
+    await writeLinks(entries)
+    vi.mocked(shell.readShortcutLink).mockImplementation(path => ({
+      target: entries.find(entry => entry.path === path)!.target,
+      args: '', cwd: '', description: '', icon: '', iconIndex: 0, appUserModelId: '', toastActivatorClsid: ''
+    }))
+    const cleanup = await uninstallShortcutCleanup(executable, links)
+    await writeLinks([{ path: links[3], target: other }])
+    const preserved = await Promise.all(links.slice(2).map(link => fs.readFile(link)))
+    const report = join(root, '卸载结果.txt')
+    await startUninstallHelper(uninstallHelperScript({
+      installDir, dataDir: undefined, backup: join(root, '卸载备份'), owners: [],
+      files: managedUninstallPaths(['KevinLauncher.exe']), cleanup
+    }), report)
+    await vi.waitFor(async () => expect((await fs.readFile(report, 'utf8')).trim()).toBe('complete'))
+    for (const link of links.slice(0, 2)) await expect(fs.access(link)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await Promise.all(links.slice(2).map(link => fs.readFile(link)))).toEqual(preserved)
+    expect(await fs.readFile(other, 'utf8')).toBe('unrelated')
   }, 12000)
 
   it.skipIf(process.platform !== 'win32')('finishes the handoff after both the spawning runtime and launcher entry exit', async () => {
