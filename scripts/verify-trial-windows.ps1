@@ -64,7 +64,13 @@ if ($Action -eq 'integration') {
     if (-not $key) { return $null }
     try {
       $result = [ordered]@{}
-      if (-not $names) { $names = @($key.GetValueNames() | Sort-Object) }
+      $existing = @($key.GetValueNames() | Sort-Object)
+      if ($names) {
+        $names = @($existing | Where-Object { $names -contains $_ })
+        if (-not $names) { return $null }
+      } else {
+        $names = $existing
+      }
       foreach ($name in $names) { $result[$name] = $key.GetValue($name) }
       return $result
     } finally { $key.Dispose() }
