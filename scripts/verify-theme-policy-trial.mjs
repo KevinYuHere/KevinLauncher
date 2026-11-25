@@ -108,6 +108,10 @@ async function verify(batch) {
     assert.deepEqual(await persistedSettings(configFile), initial)
     await windows('close', '-ProcessId', String(immediate.main.id), '-Target', runtime)
     await waitForProcessesToExit([immediate.entry.id, immediate.main.id])
+  }).catch(async error => {
+    const launchModes = (await log()).split(/\r?\n/).filter(line => line.includes('app: mode='))
+    console.error('Trial startup modes', launchModes)
+    throw error
   })
   assert.equal((await readFile(versionPointer, 'utf8')).trim(), version)
   assert.deepEqual(await readJson(bundled), fixture)
@@ -266,7 +270,10 @@ async function clickSetupButton(evaluate, label) {
 
 async function installThroughGui(installer, installed, data, completed) {
   return withGui(installer, url => url.endsWith('/out/renderer/index.html#install'), async evaluate => {
-    const info = await evaluate('window.api.installerInfo()')
+    const info = await evaluate('window.api.installerInfo()').catch(async cause => {
+      const document = await evaluate('location.href').catch(() => '(not available)')
+      throw new Error('Setup preload invocation failed. Renderer ' + document + ', TEMP ' + env.TEMP, { cause })
+    })
     assert.equal(info.version, version)
     assert(samePath(info.prefillDir, installed))
     assert(samePath(info.dataDir, data))

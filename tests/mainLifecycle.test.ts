@@ -39,7 +39,7 @@ async function start(mode: 'app' | 'install' | 'uninstall', ownsLock = true, pac
     webContents = { setWindowOpenHandler() {} }
     hookWindowMessage(message: number, callback: () => void) { windowMessages.set(message, callback) }
     on() {}
-    loadFile() {}
+    loadURL() {}
   }
   const modules: Record<string, unknown> = {
     electron: {
@@ -50,7 +50,7 @@ async function start(mode: 'app' | 'install' | 'uninstall', ownsLock = true, pac
     fs: { promises: { readFile: async () => { throw new Error('missing fixture') } } },
     path: { join },
     '@electron-toolkit/utils': { electronApp: { setAppUserModelId() {} }, is: { dev: true } },
-    './services/windowRole': { bindWindowRole() {} },
+    './services/windowRole': { bindWindowRole: () => new URL('file:///fixture-renderer/index.html') },
     './services/windowActivity': { observeWindowActivity() {} },
     './ipc': {
       registerIpc: (role: string) => events.push(role), warmUpFonts() {},

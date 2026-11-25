@@ -104,7 +104,8 @@ function createWindow(icon?: string, hidden = false, mode: RunMode = 'app'): Bro
     }
   })
 
-  bindWindowRole(mainWindow.webContents, mode, is.dev ? process.env.ELECTRON_RENDERER_URL : undefined)
+  const devUrl = is.dev ? process.env.ELECTRON_RENDERER_URL : undefined
+  const renderer = bindWindowRole(mainWindow.webContents, mode, devUrl)
   if (!setup) observeWindowActivity(mainWindow, hidden)
   if (!setup && process.platform === 'win32' && app.isPackaged) {
     mainWindow.hookWindowMessage(windowsLayout.setupCloseMessage, () => {
@@ -146,13 +147,8 @@ function createWindow(icon?: string, hidden = false, mode: RunMode = 'app'): Bro
     return { action: 'deny' }
   })
 
-  if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
-    const url = new URL(process.env['ELECTRON_RENDERER_URL'])
-    if (setup) url.hash = mode
-    mainWindow.loadURL(url.href)
-  } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'), { hash: mode })
-  }
+  if (setup || !devUrl) renderer.hash = mode
+  mainWindow.loadURL(renderer.href)
   return mainWindow
 }
 
