@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawn, execFileSync } from 'node:child_process'
 import { once } from 'node:events'
-import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { access, cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
@@ -10,6 +10,10 @@ import { isNewerVersion } from '../src/shared/version.ts'
 import { downloadInstaller, releasedAssets } from './verify-release.mjs'
 import { verifyLocalAssets } from './release-assets.mjs'
 import { readReleaseVersion } from './release-source.mjs'
+import windowsExecutable from './windows-executable.js'
+import { createRequire } from 'node:module'
+
+const windowsLayout = createRequire(import.meta.url)('../src/shared/windowsLayout.json')
 
 if (process.platform !== 'win32' || process.env.GITHUB_ACTIONS !== 'true' ||
     process.env.RUNNER_ENVIRONMENT !== 'github-hosted' || !process.env.RUNNER_TEMP) {
@@ -154,20 +158,31 @@ async function install(file, name, version, previousVersion) {
 }
 
 async function diagnoseUnpackedSetup() {
-  try {
-    const unpacked = join(dir, 'win-unpacked', 'KevinLauncher.exe')
-    const ui = await launch(unpacked, '--install')
-    const info = await ui.run('window.api.installerInfo()')
-    console.log('Diagnostic production unpacked setup start: ' + info.version)
-    await ui.close()
-  } catch (error) {
-    console.error('Diagnostic production unpacked setup failed: ' + error.message)
+  const source = join(dir, 'win-unpacked')
+  for (const level of ['requireAdministrator', 'asInvoker']) {
+    console.log('Diagnostic installed-image setup launch with ' + level)
+    try {
+      const image = join(root, 'diagnostic-' + level)
+      await cp(source, image, { recursive: true, force: false, errorOnExist: true })
+      const executable = join(image, windowsLayout.runtime)
+      if (level === 'requireAdministrator') windowsExecutable.prepareWindowsExecutable(executable, undefined, level)
+      windowsExecutable.assertExecutionLevel(executable, level)
+      const ui = await launch(executable, '--install')
+      const info = await ui.run('window.api.installerInfo()')
+      await ui.close()
+      console.log('Diagnostic ' + level + ' reached setup IPC for ' + info.version)
+    } catch (error) {
+      console.error('Diagnostic ' + level + ' failed: ' + error.message)
+    }
   }
 }
 
 async function startInstalled(target, version) {
-  const ui = await launch(join(target, 'KevinLauncher.exe'))
+  windowsExecutable.assertExecutionLevel(join(target, windowsLayout.entry), 'requireAdministrator')
+  windowsExecutable.assertExecutionLevel(join(target, windowsLayout.runtime), 'asInvoker')
+  const ui = await launch(join(target, windowsLayout.entry))
   assert.equal(await ui.run('window.api.appVersion()'), version)
+  assert.ok((await ui.run('navigator.userAgent')).includes('Electron/' + source.electron))
   assert.ok(Array.isArray(await ui.run('window.api.listApps()')))
   await until(async () => {
     const health = JSON.parse(await readFile(join(target, 'resources', 'app-activation.json'), 'utf8'))
@@ -177,7 +192,7 @@ async function startInstalled(target, version) {
 }
 
 async function verifyUninstall(target, data) {
-  const executable = join(target, 'KevinLauncher.exe')
+  const executable = join(target, windowsLayout.entry)
   const ownFile = join(target, '用户自放记录.txt')
   await writeFile(ownFile, 'preserve')
   const before = new Set(await readdir(tmpdir()))
@@ -195,8 +210,9 @@ async function verifyUninstall(target, data) {
     const result = (await readFile(join(tmpdir(), reports[0]), 'utf8')).replace(/^\uFEFF/, '')
     return result.trim()
   }, '卸载辅助程序完成').then(result => assert.equal(result, 'complete'))
-  const exists = await access(executable).then(() => true, () => false)
-  assert.equal(exists, false)
+  for (const name of [windowsLayout.entry, windowsLayout.runtime]) {
+    await assert.rejects(access(join(target, name)), { code: 'ENOENT' })
+  }
   assert.equal(await readFile(ownFile, 'utf8'), 'preserve')
   const config = JSON.parse(await readFile(join(data, 'config.json'), 'utf8'))
   assert.ok(Array.isArray(config.apps))
@@ -269,6 +285,8 @@ try {
     historyPreserved: true,
     payloadMatchesInstalled: true,
     uninstalled: true,
+    entryMode: 'requireAdministrator',
+    runtimeMode: 'asInvoker',
     assets
   }, null, 2) + '\n')
   if (process.env.GITHUB_STEP_SUMMARY) {

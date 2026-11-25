@@ -11,7 +11,7 @@ asar: false
 files:
   - from: shell
     to: .
-# Writes resources/app-version.txt, verifies layout, and edits Windows resources offline.
+# Writes the app version, verifies the layout, and builds the small Windows entry offline.
 afterPack: scripts/afterPack.js
 extraResources:
   - from: resources/hpatchz.exe
@@ -35,5 +35,5 @@ win:
     - portable
 portable:
   artifactName: ${productName}-Installer-${version}.${ext}
-  # The NSIS wrapper elevates before extracting and starting the app.
+  # The NSIS wrapper elevates before extracting and calling the public entry.
   requestExecutionLevel: admin

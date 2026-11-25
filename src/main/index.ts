@@ -34,7 +34,7 @@ import { IconStore } from './services/icon'
 import { ensureAdministrator, isElevated } from './services/elevation'
 import { log } from './services/logger'
 import { launcherAppId, launcherDisplayName, trialBuild } from './services/buildIdentity'
-import { setupTaskActive } from './services/setupTask'
+import { isolateSetupSession, setupTaskActive } from './services/setupTask'
 import { SETUP_EXIT_ARGUMENT } from './services/install'
 import { recordApplicationStartup } from './services/appActivation'
 import { broadcast, checkpointData } from './ipc/context'
@@ -77,6 +77,7 @@ function detectMode(): RunMode {
 }
 
 const runMode: RunMode = detectMode()
+if (runMode !== 'app') isolateSetupSession()
 
 /** Icon used for the window / taskbar (resolved once on startup). */
 let windowIcon: string | undefined
@@ -152,7 +153,7 @@ app.whenReady().then(async () => {
 
   // A lightweight update may run on a legacy shell with an asInvoker manifest.
   // Hand off before taking the instance lock, binding IPC or opening any window.
-  if (app.isPackaged && !trialBuild && runMode !== 'uninstall' && !(await ensureAdministrator(runMode))) {
+  if (app.isPackaged && !trialBuild && !(await ensureAdministrator(runMode))) {
     app.quit()
     return
   }

@@ -9,19 +9,21 @@
 import { flushLauncherLogs, log } from './logger'
 
 type FlushFn = () => Promise<void> | void
+type ShutdownHandler = (beforeDispose?: FlushFn) => Promise<void> | void
 
-let flushHandler: FlushFn | null = null
+let flushHandler: ShutdownHandler | null = null
 let flush: Promise<void> | undefined
 
 /** Register the shutdown handler (called once, from `registerIpc`). */
-export function onBeforeShutdown(handler: FlushFn): void {
+export function onBeforeShutdown(handler: ShutdownHandler): void {
   flushHandler = handler
 }
 
-/** Share an in-flight flush and let the user retry after a storage failure. */
-export function flushBeforeShutdown(): Promise<void> {
+/** Run any activation after saving, inside the recoverable shutdown phase. */
+export function flushBeforeShutdown(beforeDispose?: FlushFn): Promise<void> {
+  if (flush && beforeDispose) return Promise.reject(new Error('启动器正在关闭'))
   flush ??= Promise.resolve()
-    .then(() => flushHandler?.())
+    .then(() => flushHandler ? flushHandler(beforeDispose) : beforeDispose?.())
     .then(flushLauncherLogs)
     .catch((error) => {
       flush = undefined

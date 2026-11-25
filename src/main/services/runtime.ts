@@ -91,7 +91,7 @@ export class Runtime {
       appId, rootPid, elevated, intent, startedAt, settledAt: startedAt, elapsedSec: 0, resumePending: false,
       processes: new Map(), seen: new Map(), inspected: false,
       monitor: new Set(monitorNames.map((name) => name.toLowerCase()).filter(Boolean)),
-      armed: rootPid !== null && !intent.indirect,
+      armed: false,
       recordSession
     })
     this.timer ??= setInterval(() => { void this.tick() }, POLL_INTERVAL_MS)
@@ -240,7 +240,9 @@ export class Runtime {
       for (const pid of active.keys()) owners.set(pid, entry.appId)
       if (active.size) {
         if (!entry.armed || entry.resumePending) {
-          const timestamp = new Date(now).toISOString()
+          const directRoot = !entry.armed && !entry.resumePending && !entry.intent.indirect && entry.rootPid !== null
+            ? active.get(entry.rootPid) : undefined
+          const timestamp = new Date(directRoot ? Math.max(entry.intent.requestedAt, directRoot.createdAt) : now).toISOString()
           if (!entry.armed) entry.startedAt = timestamp
           entry.settledAt = timestamp
           entry.armed = true

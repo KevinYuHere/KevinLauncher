@@ -64,6 +64,31 @@ describe('Windows process observation', () => {
     }
   })
 
+  it('keeps an unobserved direct launch pending without recording its grace period', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(at)
+    const scanner = { snapshot: vi.fn(async () => []), dispose: vi.fn(async () => {}) }
+    const runtime = new Runtime(scanner)
+    const ended = vi.fn()
+    runtime.onSessionEnded(ended)
+    try {
+      runtime.start('forwarder', 1000, false, [], true, { requestedAt: at, rootExecutable: PATH })
+      await vi.advanceTimersByTimeAsync(4_000)
+      expect(runtime.list()).toMatchObject([{ confirmed: false, elapsedSec: 0, activeSince: undefined }])
+      expect(runtime.checkpointSessions()).toEqual([])
+      await vi.advanceTimersByTimeAsync(5 * 60_000 - 4_000)
+      expect(runtime.list()).toEqual([])
+      expect(ended).not.toHaveBeenCalled()
+
+      runtime.start('forwarder', 1001, false, [], true, { requestedAt: Date.now(), rootExecutable: PATH })
+      await vi.advanceTimersByTimeAsync(4_000)
+      expect(runtime.endAll()).toEqual([])
+    } finally {
+      await runtime.dispose()
+      vi.useRealTimers()
+    }
+  })
+
   it('recognizes a launch started while a previous process scan is in flight', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
     const now = Date.now()

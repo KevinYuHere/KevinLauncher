@@ -1,7 +1,7 @@
 import { promises as fs, createReadStream, createWriteStream } from 'fs'
 import { join, dirname } from 'path'
 import { createCipheriv, createHmac, pbkdf2Sync, type Hmac } from 'crypto'
-import { Transform, PassThrough } from 'stream'
+import { Transform, PassThrough, Readable } from 'stream'
 import { pipeline } from 'stream/promises'
 import { createInflateRaw, crc32 } from 'zlib'
 import { arknightsRelativePath } from './arknightsPaths'
@@ -266,7 +266,7 @@ export async function extractZip(options: ExtractOptions): Promise<void> {
         }
 
         const hmac = createHmac('sha1', macKey)
-        const source = createReadStream(options.zipPath, {
+        const source = encryptedLength === 0 ? Readable.from([]) : createReadStream(options.zipPath, {
           start: encryptedStart,
           end: encryptedStart + encryptedLength - 1
         })

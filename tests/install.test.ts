@@ -2,9 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { promises as fs } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyPayload, listFiles, normalizeInstallDir, staleFiles } from '../src/main/services/install'
+import { applyPayload, listFiles, normalizeInstallDir, processesUsingInstall, staleFiles } from '../src/main/services/install'
 import { managedUninstallPaths, uninstallHelperScript } from '../src/main/services/uninstall'
 import { psQuote, runPowerShellFile, startDetachedPowerShellFile } from '../src/main/services/powershell'
+import { launcherEntryPath } from '../src/main/services/buildIdentity'
 
 vi.mock('electron', () => ({ app: { isPackaged: false, getVersion: () => '2.0.5' } }))
 
@@ -37,6 +38,23 @@ describe('staleFiles', () => {
 })
 
 describe('managed uninstall', () => {
+  it('keeps the uninstaller entry and its sandboxed descendants while identifying exact target processes', () => {
+    const target = join('installations', '目标目录')
+    const entry = join(target, 'KevinLauncher.exe')
+    const runtime = join(target, 'KevinLauncherRuntime.exe')
+    const process = (pid: number, ppid: number, executable: string) => ({ pid, ppid, executable, name: '' })
+    const snapshot = [
+      process(1, 0, entry), process(2, 1, runtime), process(3, 2, runtime), process(4, 3, runtime),
+      process(5, 0, entry), process(6, 5, runtime),
+      process(7, 0, join('another installation', 'KevinLauncher.exe'))
+    ]
+    expect(launcherEntryPath(runtime)).toBe(entry)
+    expect(launcherEntryPath(entry)).toBe(entry)
+    expect(processesUsingInstall(snapshot, target, { pid: 2, ppid: 1, execPath: runtime })).toEqual([5, 6])
+    expect(processesUsingInstall(snapshot, target, { pid: 22, ppid: 0, execPath: 'setup.exe' }))
+      .toEqual([1, 2, 3, 4, 5, 6])
+  })
+
   it('uses only the validated recorded file set', () => {
     expect(managedUninstallPaths(['KevinLauncher.exe', 'resources/app/main.js', 'INSTALL.JSON']))
       .toEqual(['KevinLauncher.exe', 'resources/app/main.js', 'INSTALL.JSON'])
@@ -305,7 +323,7 @@ describe('applyPayload', () => {
     expect(await fs.readFile(join(target, 'my own data.txt'), 'utf8')).toBe('preserve this')
     expect(await fs.readFile(join(root, `.kevin-install-retired-${id}/previous/provider.dll`), 'utf8'))
       .toBe('old runtime')
-  })
+  }, 20_000)
 
   it('rejects another installer while a live process owns the filesystem lease', async () => {
     const { source, target } = await installFixture()

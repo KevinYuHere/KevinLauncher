@@ -94,7 +94,8 @@ describe('使用时长', () => {
     const first = local(7, 8).getTime()
     vi.setSystemTime(first)
     try {
-      runtime.start('example', 20, false, [])
+      runtime.start('example', 20, false, [], true, { requestedAt: first, rootExecutable: 'D:\\tests\\test.exe' })
+      await vi.waitFor(() => expect(runtime.list()[0]?.confirmed).toBe(true))
       expect(runtime.suspendSessions(first + 2_000)).toEqual([
         session(new Date(first), new Date(first + 2_000))
       ])
@@ -103,9 +104,8 @@ describe('使用时长', () => {
       vi.setSystemTime(wake)
       expect(runtime.checkpointSessions(wake)).toEqual([])
       runtime.resumeObservations()
-      await vi.waitFor(() => expect(runtime.list()[0]?.confirmed).toBe(true))
+      await vi.waitFor(() => expect(Date.parse(runtime.list()[0]?.activeSince ?? '')).toBeGreaterThanOrEqual(wake))
       const observed = Date.parse(runtime.list()[0].activeSince!)
-      expect(observed).toBeGreaterThanOrEqual(wake)
       expect(runtime.checkpointSessions(observed + 4_000)).toEqual([
         session(new Date(observed), new Date(observed + 4_000))
       ])

@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AppUpdateChecker } from '../src/main/services/appUpdate'
 import { parseUpdateManifest } from '../src/main/services/appUpdateManifest'
+import { pendingDataTransfer, runWithDataAccess, withShutdownDataAccess } from '../src/main/ipc/dataAccess'
 
 const mocks = vi.hoisted(() => ({
   data: '',
@@ -46,7 +47,7 @@ vi.mock('../src/main/services/dataBackup', async importOriginal => ({
 }))
 vi.mock('../src/main/services/shutdown', () => ({ flushBeforeShutdown: mocks.flush }))
 vi.mock('../src/main/services/behavior', () => ({ markQuitting: vi.fn() }))
-vi.mock('../src/main/services/logger', () => ({ log: vi.fn() }))
+vi.mock('../src/main/services/logger', () => ({ log: vi.fn(), flushLauncherLogs: async () => {} }))
 
 const version = '2.0.5'
 const asset = 'some exact bytes for the application update'
@@ -65,6 +66,7 @@ const manifest = (electron: string, installer = false) => ({
 
 beforeEach(async () => {
   vi.clearAllMocks()
+  mocks.flush.mockImplementation(async (beforeDispose?: () => Promise<void>) => { await beforeDispose?.() })
   dir = await fs.mkdtemp(join(tmpdir(), 'app-update-test-'))
   extractedVersion = version
   mocks.data = join(dir, 'data')
@@ -207,5 +209,50 @@ describe('update manifest integrity', () => {
     await vi.waitFor(() => expect(checker.isRunning()).toBe(false))
     expect(download).toHaveBeenCalledTimes(1)
     expect(await fs.readFile(pointer, 'utf8')).toBe(version)
+  })
+
+  it('reopens data access and retries the verified download when the version pointer cannot be written', async () => {
+    const shutdown = await vi.importActual<typeof import('../src/main/services/shutdown')>('../src/main/services/shutdown')
+    const disposed = vi.fn()
+    shutdown.onBeforeShutdown(beforeDispose => withShutdownDataAccess(async () => {}, async () => {
+      await beforeDispose?.()
+      disposed()
+    }))
+    mocks.flush.mockImplementation(shutdown.flushBeforeShutdown)
+    const download = stubRelease('44.7.0', () => asset)
+    const pointer = join(process.resourcesPath, 'app-version.txt')
+    const marker = join(process.resourcesPath, 'app-activation.json')
+    const oldActivation = { schema: 1, healthy: '2.0.4', previousHealthy: '2.0.3' }
+    await fs.writeFile(pointer, '2.0.4')
+    await fs.writeFile(marker, JSON.stringify(oldActivation))
+    const rename = fs.rename.bind(fs)
+    let failPointer = true
+    const replace = vi.spyOn(fs, 'rename').mockImplementation((source, target) => {
+      if (target === pointer && failPointer) return Promise.reject(new Error('版本指针被占用'))
+      return rename(source, target)
+    })
+    try {
+      const checker = new AppUpdateChecker(pendingDataTransfer)
+      await checker.check()
+      checker.begin()
+      await vi.waitFor(() => expect(checker.isRunning()).toBe(false))
+      expect(checker.stateSnapshot()).toMatchObject({ phase: 'error', error: '版本指针被占用' })
+      expect(await fs.readFile(pointer, 'utf8')).toBe('2.0.4')
+      expect(JSON.parse(await fs.readFile(marker, 'utf8'))).toEqual(oldActivation)
+      expect(mocks.relaunch).not.toHaveBeenCalled()
+      expect(disposed).not.toHaveBeenCalled()
+      await expect(runWithDataAccess('apps:update', () => 'saved')).resolves.toBe('saved')
+
+      failPointer = false
+      checker.begin()
+      await vi.waitFor(() => expect(checker.isRunning()).toBe(false))
+      expect(checker.stateSnapshot()).toMatchObject({ phase: 'done' })
+      expect(download).toHaveBeenCalledOnce()
+      expect(disposed).toHaveBeenCalledOnce()
+      expect(mocks.relaunch).toHaveBeenCalledOnce()
+      expect(await fs.readFile(pointer, 'utf8')).toBe(version)
+    } finally {
+      replace.mockRestore()
+    }
   })
 })

@@ -39,6 +39,8 @@ GitHub 仓库可启用 [Immutable releases](https://docs.github.com/en/repositor
 
 调整启动壳、安装协议或持久化格式时，同步更新 `scripts/release-compatibility.json` 相应协议号。热更新会核对 Electron、宿主文件、协议和数据格式，遇到变化时使用完整安装程序。热更新启动连续两次失败会使用上一健康代码，保留同格式的用户数据和更新前备份。
 
+正式安装器和安装后的 `KevinLauncher.exe` 均声明管理员权限。安装目录中的 `KevinLauncher.exe` 是小型入口，等待同目录 `KevinLauncherRuntime.exe` 执行并传递退出码。Electron 浏览器继承管理员令牌，GPU 和渲染子进程继续使用 Chromium 沙箱。打包仅保留一份 Electron 可执行文件，验收同时检查公开入口与内部运行库的 Windows 清单。
+
 ## 可选网络验证
 
 HTTP/2 与 HTTP/3 验证使用合成资产和本机端口。HTTP/3 需要 Python 3.14 环境，依赖版本见 `scripts/verify-hoyo-requirements.txt`。

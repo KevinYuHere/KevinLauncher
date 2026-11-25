@@ -73,6 +73,7 @@ if (command === 'new') {
   const assets = await verifyLocalAssets(dir, source.version, source.electron)
   if (verification.runId !== runId || verification.sha !== source.sha || verification.tree !== source.tree ||
       verification.version !== source.version || verification.electron !== source.electron ||
+      verification.entryMode !== 'requireAdministrator' || verification.runtimeMode !== 'asInvoker' ||
       !['freshInstall', 'launched', 'overwriteUpgrade', 'historyPreserved', 'payloadMatchesInstalled', 'uninstalled']
         .every(key => verification[key] === true) ||
       !assetNames(source.version).every(name => verification.assets?.[name]?.size === assets[name].size &&

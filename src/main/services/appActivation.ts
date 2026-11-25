@@ -56,7 +56,16 @@ export async function prepareApplicationActivation(target: string): Promise<void
     healthy: loaded.version,
     pending: { target, previous: loaded.version, attempts: 0 }
   })
-  await writeFileAtomic(join(process.resourcesPath, 'app-version.txt'), target)
+  try {
+    await writeFileAtomic(join(process.resourcesPath, 'app-version.txt'), target)
+  } catch (error) {
+    try {
+      await saveActivation(state)
+    } catch {
+      throw new Error('无法恢复更新激活记录，请重启启动器后重试', { cause: error })
+    }
+    throw error
+  }
 }
 
 export async function confirmApplicationActivation(): Promise<void> {

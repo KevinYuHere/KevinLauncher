@@ -54,7 +54,7 @@ export async function withExclusiveDataAccess<T>(action: () => Promise<T>): Prom
   }
 }
 
-/** Close admissions before draining. Reopen only when saving fails and the launcher remains. */
+/** Close admissions before draining. Reopen if preparation fails and the launcher remains. */
 export async function withShutdownDataAccess(
   cancelWork: () => Promise<void>,
   flush: () => Promise<void>

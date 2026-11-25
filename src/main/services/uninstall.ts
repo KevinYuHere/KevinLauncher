@@ -4,7 +4,7 @@ import { promises as fs } from 'fs'
 import { dirname, join, resolve } from 'path'
 import { directoriesOverlap } from '@shared/paths'
 import { writeFileAtomic } from './atomicFile'
-import { assertTrialInstallDirectory, launcherExecutableName } from './buildIdentity'
+import { assertTrialInstallDirectory, launcherExecutableName, launcherRuntimeExecutableName } from './buildIdentity'
 import { isFileSystemRoot } from './directoryPath'
 import { closeRunningInstances, readInstallInfo, uninstallIntegrationScript } from './install'
 import { log } from './logger'
@@ -91,10 +91,24 @@ try {
     $gone = $true
   } else {
     Assert-PlainPath $root
-    [IO.File]::WriteAllText($ack, 'ready', [Text.Encoding]::UTF8)
+    $entry = Join-Path $root ${psQuote(launcherExecutableName)}
+    $runtime = Join-Path $root ${psQuote(launcherRuntimeExecutableName)}
     $owner = Get-Process -Id ${process.pid} -ErrorAction SilentlyContinue
-    if ($owner -and $owner.Path -ieq (Join-Path $root ${psQuote(launcherExecutableName)})) {
-      if (!$owner.WaitForExit(30000)) { throw 'Uninstaller did not exit' }
+    $waiting = @()
+    if ($owner -and $owner.Path -iin @($entry, $runtime)) {
+      $null = $owner.Handle
+      $waiting += $owner
+      if ($runtime -ine $entry -and $owner.Path -ieq $runtime) {
+        $parent = Get-Process -Id ${process.ppid} -ErrorAction SilentlyContinue
+        if ($parent -and $parent.Path -ieq $entry) {
+          $null = $parent.Handle
+          $waiting += $parent
+        }
+      }
+    }
+    [IO.File]::WriteAllText($ack, 'ready', [Text.Encoding]::UTF8)
+    foreach ($process in $waiting) {
+      if (!$process.WaitForExit(30000)) { throw 'Uninstaller or its launcher entry did not exit' }
     }
     if (!(Test-Path -LiteralPath $permission) -or [IO.File]::ReadAllText($permission) -ne 'commit') {
       throw 'Uninstall handoff was not confirmed'

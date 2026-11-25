@@ -40,11 +40,13 @@ function prepareWindowsExecutable(file, iconFile, level = requiredLevel) {
     entry.bin = Buffer.from(revised, 'utf8')
   }
 
-  const icons = Data.IconFile.from(fs.readFileSync(iconFile)).icons.map(icon => icon.data)
-  const groups = Resource.IconGroupEntry.fromEntries(resources.entries).filter(group => group.id === electronIconGroup)
-  if (icons.length === 0 || groups.length === 0) throw new Error(`${file}: app icon or Electron icon group is missing`)
-  for (const group of groups) {
-    Resource.IconGroupEntry.replaceIconsForResource(resources.entries, group.id, group.lang, icons)
+  if (iconFile) {
+    const icons = Data.IconFile.from(fs.readFileSync(iconFile)).icons.map(icon => icon.data)
+    const groups = Resource.IconGroupEntry.fromEntries(resources.entries).filter(group => group.id === electronIconGroup)
+    if (icons.length === 0 || groups.length === 0) throw new Error(`${file}: app icon or Electron icon group is missing`)
+    for (const group of groups) {
+      Resource.IconGroupEntry.replaceIconsForResource(resources.entries, group.id, group.lang, icons)
+    }
   }
 
   resources.outputResource(exe)
@@ -61,7 +63,7 @@ module.exports = { assertElevated: assertExecutionLevel, assertExecutionLevel, p
 
 if (require.main === module) {
   const files = process.argv.slice(2)
-  const level = files[0] === '--trial' ? (files.shift(), 'asInvoker') : requiredLevel
+  const level = ['--trial', '--as-invoker'].includes(files[0]) ? (files.shift(), 'asInvoker') : requiredLevel
   if (files.length === 0) throw new Error('Usage: node scripts/windows-executable.js <exe> [other.exe ...]')
   for (const file of files) {
     assertExecutionLevel(file, level)

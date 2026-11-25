@@ -1,11 +1,21 @@
 import { lstatSync, mkdirSync, realpathSync } from 'fs'
-import { isAbsolute, join, resolve } from 'path'
+import { basename, dirname, isAbsolute, join, resolve } from 'path'
 import { trialBuild } from '@shared/buildIdentity'
+import windowsLayout from '@shared/windowsLayout.json'
 export { trialBuild } from '@shared/buildIdentity'
 export const launcherProductName = trialBuild ? 'KevinLauncherTrial' : 'KevinLauncher'
-export const launcherExecutableName = `${launcherProductName}.exe`
+export const launcherExecutableName = trialBuild ? `${launcherProductName}.exe` : windowsLayout.entry
+export const launcherRuntimeExecutableName = trialBuild ? launcherExecutableName : windowsLayout.runtime
+export const launcherProcessNames = new Set([launcherExecutableName, launcherRuntimeExecutableName])
 export const launcherAppId = trialBuild ? 'com.kevin.kevinlauncher.trial' : 'com.kevin.kevinlauncher'
 export const launcherDisplayName = trialBuild ? 'KevinLauncher 本地试用' : 'KevinLauncher'
+
+/** Resolve the public entry while retaining the dev, trial, and legacy paths. */
+export function launcherEntryPath(executable = process.execPath): string {
+  return basename(executable).toLowerCase() === launcherRuntimeExecutableName.toLowerCase()
+    ? join(dirname(executable), launcherExecutableName)
+    : executable
+}
 
 /** Fixed, per-user habitat. Reject redirects before touching its children. */
 export function trialDirectory(name: 'data' | 'installed' | 'integration'): string {

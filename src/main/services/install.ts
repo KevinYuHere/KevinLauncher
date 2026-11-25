@@ -15,9 +15,11 @@ import { directoriesOverlap } from '@shared/paths'
 import { realDirectoryPath } from './dataDir'
 import { createSiblingWorkspace, isFileSystemRoot } from './directoryPath'
 import { availableSpace, requireDiskSpace, type SpaceNeed } from './diskSpace'
+import { canonicalExecutable, ProcessTree, type ProcInfo } from './processTree'
 import {
   assertTrialInstallDirectory, launcherDisplayName, launcherExecutableName as EXE,
-  launcherProductName, trialBuild, trialDirectory, trialShortcuts
+  launcherEntryPath, launcherProcessNames, launcherProductName, launcherRuntimeExecutableName as RUNTIME,
+  trialBuild, trialDirectory, trialShortcuts
 } from './buildIdentity'
 
 /**
@@ -164,40 +166,42 @@ async function writeInstallInfo(dir: string, version: string, files: string[]): 
   await writeFileAtomic(join(dir, INFO_FILE), JSON.stringify(info, null, 2))
 }
 
-/** Paths of every running KevinLauncher.exe that is not this process. */
+/** Public entry paths of the other launcher processes. */
 export async function runningInstances(): Promise<string[]> {
   try {
-    const stdout = await runPowerShell(
-      `Get-Process ${launcherProductName} -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Path`
-    )
-    const self = process.execPath.toLowerCase()
-    return stdout
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter((line) => line.toLowerCase().endsWith('.exe'))
-      .filter((line) => line.toLowerCase() !== self)
-      .filter((line) => !trialBuild || dirname(line).toLowerCase() === defaultInstallDir().toLowerCase())
+    const names = new Set([...launcherProcessNames].map(name => name.toLowerCase()))
+    const self = canonicalExecutable(launcherEntryPath())
+    const instances = new Map<string, string>()
+    for (const process of await ProcessTree.snapshot()) {
+      if (!process.executable || !names.has(process.name.toLowerCase())) continue
+      const entry = launcherEntryPath(process.executable)
+      if (canonicalExecutable(entry) === self ||
+          trialBuild && canonicalExecutable(dirname(entry)) !== canonicalExecutable(defaultInstallDir())) continue
+      instances.set(canonicalExecutable(entry), entry)
+    }
+    return [...instances.values()]
   } catch {
     return []
   }
 }
 
-/** PIDs running the given executable (empty when the path cannot be read). */
-async function pidsUsing(exe: string): Promise<number[]> {
-  const target = psQuote(exe)
-  try {
-    const stdout = await runPowerShell(
-      `Get-Process ${launcherProductName} -ErrorAction SilentlyContinue | ` +
-        `Where-Object { $_.Path -ieq ${target} } | Select-Object -ExpandProperty Id`,
-      { timeout: 2500 }
-    )
-    return stdout
-      .split(/\r?\n/)
-      .map((line) => Number.parseInt(line.trim(), 10))
-      .filter((pid) => Number.isInteger(pid) && pid > 0 && pid !== process.pid)
-  } catch {
-    return []
+/** Identify both generations while keeping the current uninstaller's own process tree alive. */
+export function processesUsingInstall(
+  snapshot: ProcInfo[], targetDir: string,
+  owner: { pid: number; ppid: number; execPath: string } = process
+): number[] {
+  const entry = canonicalExecutable(join(targetDir, EXE))
+  const runtime = canonicalExecutable(join(targetDir, RUNTIME))
+  const own = new Set(ProcessTree.descendants(snapshot, owner.pid))
+  if (entry !== runtime && canonicalExecutable(owner.execPath) === runtime) {
+    const parent = snapshot.find(item => item.pid === owner.ppid)
+    if (parent?.executable && canonicalExecutable(parent.executable) === entry) own.add(parent.pid)
   }
+  return snapshot.filter(item => {
+    if (own.has(item.pid) || !item.executable) return false
+    const path = canonicalExecutable(item.executable)
+    return path === entry || path === runtime
+  }).map(item => item.pid)
 }
 
 /** True when the executable can be opened for writing (i.e. not in use). */
@@ -215,17 +219,20 @@ async function isUnlocked(file: string): Promise<boolean> {
 /**
  * Closes the launcher **installed in `targetDir`** (best effort).
  *
- * Only processes running `<targetDir>\KevinLauncher.exe` are targeted — this is
- * what makes it safe: the installer itself runs from its own folder, so it can
- * never close itself (a previous "exclude my own path" filter did exactly that
- * when the paths did not compare equal).
+ * Match the public entry and the runtime by their exact installation paths.
+ * Existing single-executable releases remain valid targets.
  *
  * Returns true when the executable is no longer in use.
  */
 export async function closeRunningInstances(targetDir: string): Promise<boolean> {
   assertTrialInstallDirectory(targetDir)
   const exe = join(targetDir, EXE)
-  const pids = await pidsUsing(exe)
+  const runtime = join(targetDir, RUNTIME)
+  const expires = Date.now() + 12_000
+  const scan = () => ProcessTree.snapshot(AbortSignal.timeout(Math.max(1, expires - Date.now())))
+    .then(snapshot => processesUsingInstall(snapshot, targetDir)).catch(() => null)
+  const pids = await scan()
+  if (!pids) return false
   if (pids.length) {
     log(`install: requesting normal exit from ${pids.join(', ')} at ${targetDir}`)
     try {
@@ -233,7 +240,7 @@ export async function closeRunningInstances(targetDir: string): Promise<boolean>
       delete env.PORTABLE_EXECUTABLE_FILE
       delete env.PORTABLE_EXECUTABLE_DIR
       const messenger = spawn(exe, [SETUP_EXIT_ARGUMENT], {
-        cwd: targetDir, env, detached: true, windowsHide: true, stdio: 'ignore'
+        cwd: targetDir, env, windowsHide: true, stdio: 'ignore'
       })
       await once(messenger, 'spawn')
       messenger.unref()
@@ -243,15 +250,16 @@ export async function closeRunningInstances(targetDir: string): Promise<boolean>
     if (!(await pathExists(join(targetDir, 'resources', 'release-compatibility.json')))) {
       await runPowerShell(
         `Get-Process -Id ${pids.join(',')} -ErrorAction SilentlyContinue | ` +
-        `Where-Object { $_.Path -ieq ${psQuote(exe)} } | ForEach-Object { $_.CloseMainWindow() }`,
+        `Where-Object { $_.Path -iin @(${psQuote(exe)}, ${psQuote(runtime)}) } | ` +
+        'ForEach-Object { $_.CloseMainWindow() }',
         { timeout: 2500 }
       ).catch(() => undefined)
     }
   }
-  const ownsExecutable = process.execPath.toLowerCase() === exe.toLowerCase()
-  const expires = Date.now() + 12_000
+  const ownsExecutable = canonicalExecutable(launcherEntryPath()) === canonicalExecutable(exe)
   while (Date.now() < expires) {
-    if (!(await pidsUsing(exe)).length && (ownsExecutable || await isUnlocked(exe))) return true
+    const active = await scan()
+    if (active?.length === 0 && (ownsExecutable || await isUnlocked(exe) && await isUnlocked(runtime))) return true
     await new Promise((resolve) => setTimeout(resolve, 450))
   }
   return false

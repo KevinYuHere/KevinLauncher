@@ -1,6 +1,7 @@
 import { psQuote, runPowerShell } from './powershell'
 import { log } from './logger'
 import { windowsCommandLine } from './windowsArguments'
+import { launcherEntryPath } from './buildIdentity'
 
 let cached: Promise<boolean> | null = null
 const REQUESTED = '--kevin-elevation-requested'
@@ -25,14 +26,14 @@ function tokenIsElevated(): Promise<boolean> {
 }
 
 /** Only the process with the elevated token may continue into the packaged UI. */
-export async function ensureAdministrator(mode: 'app' | 'install'): Promise<boolean> {
+export async function ensureAdministrator(mode: 'app' | 'install' | 'uninstall'): Promise<boolean> {
   try {
     if (await tokenIsElevated()) return true
     const args = process.argv.slice(1)
     if (args.includes(REQUESTED)) throw new Error('提权后仍未获得管理员权限')
     // A legacy portable session must restart the outer file. Its extracted
     // executable is removed by NSIS as soon as the original instance exits.
-    const file = mode === 'install' ? process.env.PORTABLE_EXECUTABLE_FILE || process.execPath : process.execPath
+    const file = (mode === 'install' && process.env.PORTABLE_EXECUTABLE_FILE) || launcherEntryPath()
     const commandLine = windowsCommandLine([...args, REQUESTED])
     await runPowerShell(
       'Start-Process -Verb RunAs -ErrorAction Stop -FilePath ' + psQuote(file) +

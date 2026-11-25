@@ -21,6 +21,8 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & node scripts/windows-executable.js release/win-unpacked/KevinLauncher.exe "release/KevinLauncher-Installer-$version.exe"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& node scripts/windows-executable.js --as-invoker release/win-unpacked/KevinLauncherRuntime.exe
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & node scripts/extract-changelog.mjs $version release/RELEASE_NOTES.md
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & node scripts/build-update-payload.mjs release/win-unpacked $version

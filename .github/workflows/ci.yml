@@ -50,8 +50,9 @@ jobs:
           cache: npm
       - run: npm ci --no-audit --no-fund
       - run: npm run typecheck
-      - run: npm test
-        env:
-          TEMP: ${{ runner.temp }}
-          TMP: ${{ runner.temp }}
+      - run: |
+          $canonicalTemp = node -p "require('node:fs').realpathSync(require('node:os').tmpdir())"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:TEMP = $env:TMP = $canonicalTemp
+          npm test
       - run: npm run build

@@ -49,7 +49,7 @@ export function registerIpc(mode: 'app' | 'install' | 'uninstall' = 'app'): void
   powerMonitor.on('resume', () => runtime.resumeObservations())
   // On exit, close out sessions that are still running and flush pending saves
   // so the last stretch of play time is not lost.
-  onBeforeShutdown(async () => {
+  onBeforeShutdown(async (beforeDispose) => {
     const resumePolling = runtime.pausePolling()
     try {
       await withShutdownDataAccess(async () => {
@@ -62,7 +62,11 @@ export function registerIpc(mode: 'app' | 'install' | 'uninstall' = 'app'): void
           const failure = results.find((result) => result.status === 'rejected')
           if (failure) throw failure.reason
         }
-        await Promise.all([gacha.dispose(), runtime.dispose()])
+        await beforeDispose?.()
+        const disposals = await Promise.allSettled([gacha.dispose(), runtime.dispose()])
+        for (const result of disposals) {
+          if (result.status === 'rejected') log(`shutdown: service disposal failed (${String(result.reason)})`)
+        }
       })
     } catch (error) {
       updates.resumeTasks()

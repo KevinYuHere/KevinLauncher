@@ -10,7 +10,7 @@ import { clearDataMoveJournal, DATA_MOVE_PREFIX, DataDirectoryRecoveryError, rec
 import { hasPersistedSettings, verifySnapshot } from './settingsBackup'
 import { log } from './logger'
 import { runPowerShellSync } from './powershell'
-import { trialBuild, trialDirectory } from './buildIdentity'
+import { launcherEntryPath, trialBuild, trialDirectory } from './buildIdentity'
 
 /**
  * Where the launcher keeps its data (`config.json`, playtime, gacha, icons …).
@@ -395,7 +395,7 @@ export async function switchDataDir(
   })
   onCommitted?.()
   log(`dataDir: switched to ${target}`)
-  app.relaunch()
+  app.relaunch({ execPath: launcherEntryPath() })
   app.exit(0)
 }
 

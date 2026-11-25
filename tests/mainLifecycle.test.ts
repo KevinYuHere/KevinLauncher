@@ -23,6 +23,10 @@ async function start(mode: 'app' | 'install' | 'uninstall', ownsLock = true, pac
     quit: vi.fn()
   }
   let ready: Promise<unknown> | undefined
+  const whenReady = vi.fn(() => ({ then: (handler: () => void) => {
+    ready = Promise.resolve().then(handler)
+  } }))
+  const isolateSetupSession = vi.fn()
   let release!: () => void
   const waitingToFlush = new Promise<void>(resolve => { release = resolve })
   const flush = vi.fn(() => waitingToFlush)
@@ -35,9 +39,7 @@ async function start(mode: 'app' | 'install' | 'uninstall', ownsLock = true, pac
   }
   const modules: Record<string, unknown> = {
     electron: {
-      app: { ...app, whenReady: () => ({ then: (handler: () => void) => {
-        ready = Promise.resolve().then(handler)
-      } }) },
+      app: { ...app, whenReady },
       protocol: { registerSchemesAsPrivileged() {}, handle() {} },
       BrowserWindow: StubWindow
     },
@@ -58,7 +60,7 @@ async function start(mode: 'app' | 'install' | 'uninstall', ownsLock = true, pac
     './services/dataMoveJournal': { recoverDataMove: async () => {} },
     './services/themePolicy': { applyThemePolicyOnStartup: policy },
     './services/shutdown': { flushBeforeShutdown: flush },
-    './services/setupTask': { setupTaskActive: () => false },
+    './services/setupTask': { isolateSetupSession, setupTaskActive: () => false },
     './services/appActivation': { recordApplicationStartup() {} },
     './services/install': { SETUP_EXIT_ARGUMENT: '--kevin-exit-for-setup' },
     './services/settingsBackup': { recoverSettingsImport: () => events.push('recover') },
@@ -72,11 +74,11 @@ async function start(mode: 'app' | 'install' | 'uninstall', ownsLock = true, pac
     __dirname: 'fixture-main', module: { exports: {} }, exports: {}
   })
   await ready
-  return { listeners, events, app, flush, release, policy, loadIcon, ensureAdministrator }
+  return { listeners, events, app, flush, release, policy, loadIcon, ensureAdministrator, isolateSetupSession, whenReady }
 }
 
 describe('launcher data lifecycle', () => {
-  it.each(['app', 'install'] as const)('stops packaged %s before IPC and the instance lock when elevation is required', async mode => {
+  it.each(['app', 'install', 'uninstall'] as const)('stops packaged %s before IPC and the instance lock when elevation is required', async mode => {
     const result = await start(mode, true, true, false)
     expect(result.ensureAdministrator).toHaveBeenCalledWith(mode)
     expect(result.app.quit).toHaveBeenCalledOnce()
@@ -87,6 +89,7 @@ describe('launcher data lifecycle', () => {
 
   it('the primary instance recovers data before loading policy and waits for disk on repeated quits', async () => {
     const main = await start('app')
+    expect(main.isolateSetupSession).not.toHaveBeenCalled()
     expect(main.events).toEqual(['recover', 'app', 'policy'])
     const beforeQuit = main.listeners.get('before-quit')!
     const preventDefault = vi.fn()
@@ -111,6 +114,8 @@ describe('launcher data lifecycle', () => {
 
   it.each(['install', 'uninstall'] as const)('opening %s mode skips settings and release policy', async (mode) => {
     const setup = await start(mode)
+    expect(setup.isolateSetupSession).toHaveBeenCalledOnce()
+    expect(setup.isolateSetupSession.mock.invocationCallOrder[0]).toBeLessThan(setup.whenReady.mock.invocationCallOrder[0])
     expect(setup.events).toEqual([mode])
     expect(setup.policy).not.toHaveBeenCalled()
     expect(setup.loadIcon).not.toHaveBeenCalled()

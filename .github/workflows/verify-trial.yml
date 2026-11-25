@@ -38,10 +38,10 @@ jobs:
           node node_modules/electron/install.js
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build the isolated trial with a synthetic current policy
-        env:
-          TEMP: ${{ runner.temp }}
-          TMP: ${{ runner.temp }}
         run: |
+          $canonicalTemp = node -p "require('node:fs').realpathSync(require('node:os').tmpdir())"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:TEMP = $env:TMP = $canonicalTemp
           $fixture = Join-Path $env:RUNNER_TEMP 'theme-policy-trial.json'
           node scripts/verify-theme-policy-trial.mjs --write-fixture $fixture
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

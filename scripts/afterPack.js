@@ -1,7 +1,8 @@
 const fs = require('node:fs')
 const path = require('node:path')
 const { createHash } = require('node:crypto')
-const { prepareWindowsExecutable } = require('./windows-executable.js')
+const { assertExecutionLevel, prepareWindowsExecutable } = require('./windows-executable.js')
+const windowsLayout = require('../src/shared/windowsLayout.json')
 
 /**
  * electron-builder afterPack hook.
@@ -48,12 +49,33 @@ module.exports = async function afterPack(context) {
   }
   const archiveTool = path.join(resources, `app-${version}`, 'out', 'native', 'KevinArchive.exe')
   if (!fs.existsSync(archiveTool)) throw new Error(`缺少本项目的 Windows 解压工具 ${archiveTool}`)
+  const nativeSources = []
+  if (context.electronPlatformName === 'win32') {
+    const name = `${context.packager.appInfo.productFilename}.exe`
+    const entry = path.join(context.appOutDir, name)
+    const icon = path.join(projectDir, 'resources', 'icon.ico')
+    if (trial) {
+      prepareWindowsExecutable(entry, icon, 'asInvoker')
+    } else {
+      if (name !== windowsLayout.entry) throw new Error('正式 Windows 入口文件名不一致')
+      const { buildWindowsEntry, windowsEntrySourceFiles } = await import('./build-windows-entry.mjs')
+      const runtime = path.join(context.appOutDir, windowsLayout.runtime)
+      fs.renameSync(entry, runtime)
+      prepareWindowsExecutable(runtime, icon, 'asInvoker')
+      await buildWindowsEntry(entry)
+      assertExecutionLevel(entry, 'requireAdministrator')
+      assertExecutionLevel(runtime, 'asInvoker')
+      nativeSources.push(...windowsEntrySourceFiles,
+        path.join(projectDir, 'src/shared/windowsLayout.json'), path.join(__dirname, 'windows-executable.js'))
+    }
+  }
   const fingerprint = createHash('sha256')
   const hostFiles = [
     ...['app/package.json', 'app/loader.js', 'app/out/main/index.js', 'hpatchz.exe', 'icon.ico', 'icon.png']
       .map(file => path.join(resources, file)),
     ...['scripts/hoyo-archive/WindowsArchive.cs', 'scripts/hoyo-archive/long-path.manifest', 'scripts/build-windows-archive.mjs']
-      .map(file => path.join(projectDir, file))
+      .map(file => path.join(projectDir, file)),
+    ...nativeSources
   ]
   for (const file of hostFiles) {
     const content = fs.readFileSync(file)
@@ -90,9 +112,4 @@ module.exports = async function afterPack(context) {
 
   fs.writeFileSync(path.join(resources, 'app-version.txt'), version, 'utf8')
   console.log(`afterPack: app-version.txt -> ${version}`)
-
-  if (context.electronPlatformName === 'win32') {
-    const exe = path.join(context.appOutDir, `${context.packager.appInfo.productFilename}.exe`)
-    prepareWindowsExecutable(exe, path.join(projectDir, 'resources', 'icon.ico'), trial ? 'asInvoker' : undefined)
-  }
 }

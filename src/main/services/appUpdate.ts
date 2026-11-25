@@ -28,7 +28,7 @@ import { writeFileAtomic } from './atomicFile'
 import { flushBeforeShutdown } from './shutdown'
 import { markQuitting } from './behavior'
 import { log } from './logger'
-import { trialBuild } from './buildIdentity'
+import { launcherEntryPath, trialBuild } from './buildIdentity'
 
 /** Owner/repository used for release checks (public GitHub API). */
 export const GITHUB_REPO = 'KevinYuHere/KevinLauncher'
@@ -868,9 +868,10 @@ export class AppUpdateChecker {
         ])
       })
       awaitingSave = true
-      await flushBeforeShutdown()
-      awaitingSave = false
-      await prepareApplicationActivation(info.version)
+      await flushBeforeShutdown(async () => {
+        awaitingSave = false
+        await prepareApplicationActivation(info.version)
+      })
       await this.clearCriticalMarker()
       await fs.rm(staging, { recursive: true, force: true }).catch(() => {})
       this.patch({
@@ -879,7 +880,7 @@ export class AppUpdateChecker {
         message: '更新完成，正在重启…',
         critical: info.critical === true
       })
-      app.relaunch()
+      app.relaunch({ execPath: launcherEntryPath() })
       app.exit(0)
     } catch (error) {
       if (controller.signal.aborted) {

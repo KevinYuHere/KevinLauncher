@@ -16,7 +16,10 @@ vi.mock('electron', () => ({
   app: { isPackaged: true, setLoginItemSettings: mocks.runKey, getLoginItemSettings: mocks.readRunKey }
 }))
 vi.mock('../src/main/services/powershell', () => ({ psQuote: (text: string) => text, runPowerShell: mocks.query }))
-vi.mock('../src/main/services/buildIdentity', () => ({ trialBuild: false }))
+vi.mock('../src/main/services/buildIdentity', () => ({
+  trialBuild: false,
+  launcherEntryPath: () => 'D:\\测试 目录\\KevinLauncher.exe'
+}))
 vi.mock('../src/main/services/logger', () => ({ log: vi.fn() }))
 
 beforeEach(() => {
@@ -30,7 +33,7 @@ describe('Windows startup settings', () => {
   it('applies requests in order and reports their actual mechanism', async () => {
     let create!: (code: number) => void
     mocks.task.mockImplementationOnce(() => new Promise<number>((resolve) => { create = resolve }))
-    const older = applyAutoStart('tray', 'D:\\测试 目录\\KevinLauncher.exe')
+    const older = applyAutoStart('tray')
     const newer = applyAutoStart('off')
     await vi.waitFor(() => expect(mocks.task).toHaveBeenCalledOnce())
     expect(mocks.task.mock.calls[0][0]).toContain('"D:\\测试 目录\\KevinLauncher.exe" --tray')

@@ -83,14 +83,19 @@ describe('data transfer gate', () => {
 })
 
 describe('runtime checkpoints', () => {
-  it('records elapsed segments once without resetting the original start time', () => {
+  it('records elapsed segments once without resetting the original start time', async () => {
     vi.useFakeTimers()
-    const runtime = new Runtime()
+    const createdAt = Date.parse('2026-11-24T00:00:00Z')
+    const executable = 'D:\\games\\game.exe'
+    const runtime = new Runtime({
+      snapshot: async () => [{ pid: 100, ppid: 1, name: 'game.exe', executable, createdAt }],
+      dispose: async () => {}
+    })
     try {
-      vi.setSystemTime(new Date('2026-11-24T00:00:00Z'))
-      runtime.start('game', 100, false, [])
+      vi.setSystemTime(createdAt)
+      runtime.start('game', 100, false, [], true, { requestedAt: createdAt, rootExecutable: executable })
       const start = runtime.list()[0].startedAt
-      vi.setSystemTime(new Date('2026-11-24T00:00:10Z'))
+      await vi.advanceTimersByTimeAsync(10_000)
       expect(runtime.checkpointSessions()).toMatchObject([{ startUtc: start, durationSec: 10 }])
       expect(runtime.list()[0].startedAt).toBe(start)
       expect(runtime.checkpointSessions()).toEqual([])
@@ -98,7 +103,7 @@ describe('runtime checkpoints', () => {
       expect(runtime.endAll()).toMatchObject([{ durationSec: 5 }])
       expect(runtime.list()).toEqual([])
     } finally {
-      runtime.dispose()
+      await runtime.dispose()
       vi.useRealTimers()
     }
   })

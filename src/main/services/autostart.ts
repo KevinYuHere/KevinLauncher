@@ -2,7 +2,7 @@ import { app } from 'electron'
 import { execFile } from 'child_process'
 import type { AutoStartMode } from '@shared/types'
 import { log } from './logger'
-import { trialBuild } from './buildIdentity'
+import { launcherEntryPath, trialBuild } from './buildIdentity'
 import { psQuote, runPowerShell } from './powershell'
 
 /** Argument added when starting hidden (tray mode). */
@@ -50,7 +50,7 @@ function updateRunKey(openAtLogin: boolean, path?: string, args?: string[]): voi
  * UAC prompt at every logon, while the task starts it elevated silently.
  * (The task is therefore only writable while the launcher runs elevated.)
  */
-export function applyAutoStart(mode: AutoStartMode, executable = process.execPath): Promise<AutoStartResult> {
+export function applyAutoStart(mode: AutoStartMode, executable = launcherEntryPath()): Promise<AutoStartResult> {
   const task = queue.then(async (): Promise<AutoStartResult> => {
     if (trialBuild || !app.isPackaged) return { requested: mode, mechanism: 'isolated' }
     if (mode === 'off') {
