@@ -294,6 +294,23 @@ async function checkProfile(data, fixture, history) {
   assert.deepEqual(JSON.parse(await readFile(join(data, 'playtime.json'), 'utf8')), history)
 }
 
+async function seedProfile(target, data, version) {
+  const ui = await launch(join(target, windowsLayout.entry))
+  assert.equal(await ui.run('window.api.appVersion()'), version)
+  assert.deepEqual(await ui.run('window.api.listApps()'), [])
+  const fixture = await ui.run('window.api.addApp({ name: "Windows 验收夹具", launchMethods: [] })')
+  assert.equal(typeof fixture.id, 'string')
+  await ui.close()
+  const end = new Date()
+  const history = { version: 1, sessions: [{
+    appId: fixture.id, startUtc: new Date(end.getTime() - 60_000).toISOString(),
+    endUtc: end.toISOString(), durationSec: 60
+  }] }
+  await writeFile(join(data, 'playtime.json'), JSON.stringify(history))
+  await checkProfile(data, fixture, history)
+  return { fixture, history }
+}
+
 async function startInstalled(target, version, fixture) {
   windowsExecutable.assertExecutionLevel(join(target, windowsLayout.entry), 'requireAdministrator')
   windowsExecutable.assertExecutionLevel(join(target, windowsLayout.runtime), 'asInvoker')
@@ -392,8 +409,13 @@ async function verifyUninstall(target, data) {
   }
   assert.equal(await readFile(ownFile, 'utf8'), 'preserve')
   assert.deepEqual(await Promise.all(profileFiles.map(file => readFile(join(data, file)))), beforeData)
-  assert.equal((await windows('integration')).uninstall, null, '卸载应清理原有 Windows 注册入口')
-  if (beta) assert.equal(await windows('links'), null, '卸载应清理指向已卸载目录的快捷方式')
+  const removed = await windows('integration')
+  assert.equal(removed.uninstall, null, '卸载应清理原有 Windows 注册入口')
+  if (beta) {
+    assert.equal(removed.program, null, '卸载应清理指向已卸载程序的注册项')
+    assert.equal(removed.task, null, '卸载应清理指向已卸载程序的开机任务')
+    assert.equal(await windows('links'), null, '卸载应清理指向已卸载目录的快捷方式')
+  }
 }
 
 async function comparePayload(installed) {
@@ -424,26 +446,43 @@ async function comparePayload(installed) {
   }
 }
 
+async function uninstallFresh(target, data, fixture, history) {
+  const running = await launch(join(target, windowsLayout.entry))
+  const tray = await running.run('window.api.setLauncherBehavior({ closeAction: "tray" })')
+  assert.equal(tray.closeAction, 'tray')
+  await verifyUninstall(target, data)
+  await running.waitForExit()
+  await checkProfile(data, fixture, history)
+}
+
+async function verifyFreshBeta() {
+  console.log('Checking the fresh Beta before downloading the historical installer')
+  const { target, selections } = await install(installer, 'fresh', source.version)
+  const data = sandboxData('fresh')
+  const { fixture, history } = await seedProfile(target, data, source.version)
+  await startInstalled(target, source.version, fixture)
+  await comparePayload(target)
+  const integration = await verifyBetaIntegration(target, data, selections)
+  await uninstallFresh(target, data, fixture, history)
+  // The uninstall must keep this data. Only unlink the private fixture from
+  // the disposable account before seeding the historical installation.
+  await windows('clear-fixture-data-dir', '-FixtureRoot', root, '-Target', data)
+  await checkProfile(data, fixture, history)
+  const proof = { ...integration, installedPayloadMatched: true, uninstalledWithDataPreserved: true }
+  console.log('Fresh Windows Beta verification: ' + JSON.stringify(proof))
+  return proof
+}
+
 try {
+  const betaIntegration = beta ? await verifyFreshBeta() : null
   const previous = await releasedAssets(process.argv[4] ?? 'latest')
   assert.ok(isNewerVersion(source.version, previous.manifest.version), '候选版本必须高于已发布正式版本')
   const previousFile = join(root, previous.manifest.installerName)
   await downloadInstaller(previous, previousFile)
   const { target: existing } = await install(previousFile, 'upgrade', previous.manifest.version)
   const oldEntry = join(existing, windowsLayout.entry)
-  const seeded = await launch(oldEntry)
-  assert.equal(await seeded.run('window.api.appVersion()'), previous.manifest.version)
-  const fixture = await seeded.run('window.api.addApp({ name: "Windows 验收夹具", launchMethods: [] })')
-  assert.equal(typeof fixture.id, 'string')
-  await seeded.close()
   const data = sandboxData('upgrade')
-  const end = new Date()
-  const history = { version: 1, sessions: [{
-    appId: fixture.id, startUtc: new Date(end.getTime() - 60_000).toISOString(),
-    endUtc: end.toISOString(), durationSec: 60
-  }] }
-  await writeFile(join(data, 'playtime.json'), JSON.stringify(history))
-  await checkProfile(data, fixture, history)
+  const { fixture, history } = await seedProfile(existing, data, previous.manifest.version)
   const previousUi = await launch(oldEntry)
   assert.equal(await previousUi.run('window.api.appVersion()'), previous.manifest.version)
   assert.ok((await previousUi.run('window.api.listApps()')).some(app => app.id === fixture.id))
@@ -462,18 +501,13 @@ try {
   await checkProfile(join(data, 'update-backup'), fixture, history)
   await startInstalled(covering, source.version, fixture)
   console.log('Verified overwrite upgrade, startup, saved history and previous profile backup')
-  const { target: fresh, selections } = await install(installer, 'fresh', source.version)
-  await startInstalled(fresh, source.version, fixture)
-  await comparePayload(fresh)
-  console.log('Verified fresh install, startup and byte-for-byte app payload')
-  const freshData = sandboxData('fresh')
-  const betaIntegration = beta ? await verifyBetaIntegration(fresh, freshData, selections) : null
-  const runningFresh = await launch(join(fresh, windowsLayout.entry))
-  const tray = await runningFresh.run('window.api.setLauncherBehavior({ closeAction: "tray" })')
-  assert.equal(tray.closeAction, 'tray')
-  await verifyUninstall(fresh, freshData)
-  await runningFresh.waitForExit()
-  await checkProfile(freshData, fixture, history)
+  if (!beta) {
+    const { target: fresh } = await install(installer, 'fresh', source.version)
+    await startInstalled(fresh, source.version, fixture)
+    await comparePayload(fresh)
+    console.log('Verified fresh install, startup and byte-for-byte app payload')
+    await uninstallFresh(fresh, sandboxData('fresh'), fixture, history)
+  }
   assert.deepEqual(beta ? await verifyBetaInstaller() : await verifyLocalAssets(dir, source.version, source.electron), assets)
   const verification = {
     sha: source.sha,
