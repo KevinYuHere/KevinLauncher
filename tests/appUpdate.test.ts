@@ -9,6 +9,7 @@ import { pendingDataTransfer, runWithDataAccess, withShutdownDataAccess } from '
 
 const mocks = vi.hoisted(() => ({
   data: '',
+  currentVersion: '2.0.4',
   openPath: vi.fn(async () => ''),
   quit: vi.fn(),
   relaunch: vi.fn(),
@@ -29,9 +30,9 @@ vi.mock('electron', () => ({
   shell: { openPath: mocks.openPath }
 }))
 vi.mock('../src/main/services/appVersion', () => ({
-  currentAppVersion: () => '2.0.4',
+  currentAppVersion: () => mocks.currentVersion,
   loadedApplication: () => ({
-    version: '2.0.4', directory: join(process.resourcesPath, 'app-2.0.4'), pending: false
+    version: mocks.currentVersion, directory: join(process.resourcesPath, `app-${mocks.currentVersion}`), pending: false
   })
 }))
 vi.mock('../src/main/services/appStore', () => ({
@@ -66,6 +67,7 @@ const manifest = (electron: string, installer = false) => ({
 
 beforeEach(async () => {
   vi.clearAllMocks()
+  mocks.currentVersion = '2.0.4'
   mocks.flush.mockImplementation(async (beforeDispose?: () => Promise<void>) => { await beforeDispose?.() })
   dir = await fs.mkdtemp(join(tmpdir(), 'app-update-test-'))
   extractedVersion = version
@@ -117,6 +119,32 @@ function stubRelease(runtime: string, serve: () => string): ReturnType<typeof vi
 }
 
 describe('update manifest integrity', () => {
+  it('offers only a newer stable release when the installed application is a Beta', async () => {
+    mocks.currentVersion = '2.0.6-beta.1'
+    await fs.mkdir(mocks.data)
+    await fs.writeFile(join(mocks.data, 'simulate-app-update.json'), JSON.stringify({ version: '9.9.9' }))
+    stubRelease('44.7.0', () => asset)
+    const checker = new AppUpdateChecker()
+    expect(await checker.check()).toMatchObject({ current: mocks.currentVersion, hasUpdate: false, error: undefined })
+
+    const available = '2.0.6'
+    vi.stubGlobal('fetch', vi.fn(async (input: string) => {
+      if (input.endsWith('/releases')) {
+        return Response.json([
+          { tag_name: 'v2.0.7-beta.1', prerelease: true },
+          { tag_name: `v${available}` }
+        ])
+      }
+      if (input.endsWith(`/v${available}/update-manifest.json`)) {
+        return Response.json({ ...manifest('44.7.0'), version: available })
+      }
+      throw new Error(`Unexpected URL in test: ${input}`)
+    }))
+    expect(await checker.check('manual')).toMatchObject({
+      current: mocks.currentVersion, hasUpdate: true, info: { version: available }
+    })
+  })
+
   it('requires matching version, runtime and valid hashes for offered artifacts', () => {
     expect(() => parseUpdateManifest(JSON.stringify(manifest('44.7.0')), '3.0.0')).toThrow()
     expect(() => parseUpdateManifest(JSON.stringify(manifest('')))).toThrow()

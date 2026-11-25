@@ -10,18 +10,7 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 if ($version -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') {
   throw 'An official layout requires a stable version'
 }
-$env:KEVIN_BUILD_IDENTITY = 'production'
-$env:CSC_IDENTITY_AUTO_DISCOVERY = 'false'
-
-& npm.cmd run build
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-& node node_modules/electron-builder/cli.js --win --x64 --dir --publish never
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-& node node_modules/electron-builder/cli.js --win --x64 --prepackaged release/win-unpacked --publish never
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-& node scripts/windows-executable.js release/win-unpacked/KevinLauncher.exe "release/KevinLauncher-Installer-$version.exe"
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-& node scripts/windows-executable.js --as-invoker release/win-unpacked/KevinLauncherRuntime.exe
+& node scripts/build-windows-installer.mjs
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & node scripts/extract-changelog.mjs $version release/RELEASE_NOTES.md
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

@@ -28,7 +28,6 @@ jobs:
     timeout-minutes: 35
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-      KEVIN_BUILD_IDENTITY: production
       npm_config_registry: https://registry.npmjs.org/
     steps:
       - uses: actions/checkout@v4

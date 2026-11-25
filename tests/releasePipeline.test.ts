@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, test } from 'vitest'
 import { completedCodexReview, assertCiRun } from '../scripts/release-source.mjs'
+import { betaPackageMetadata, copyBetaBuildInputs } from '../scripts/package-test.mjs'
 import { seedTrial } from '../scripts/seed-trial.mjs'
 import { verifyRemotePayload } from '../scripts/verify-release.mjs'
 import { assetNames, mayBuildBatch, missingDraftAssets, verifyLocalAssets } from '../scripts/release-assets.mjs'
@@ -17,6 +18,49 @@ async function temp(): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(temps.splice(0).map(path => fs.rm(path, { recursive: true, force: true })))
+})
+
+test('Beta changes only the version in separate package and lock manifests', () => {
+  const version = '2.0.5'
+  const manifest = { name: 'kevin-launcher', version, dependencies: { electron: '44.11.6' } }
+  const lock = {
+    version,
+    packages: {
+      '': { name: manifest.name, version, dependencies: manifest.dependencies },
+      'node_modules/electron': { version: '44.11.6' }
+    }
+  }
+  const [beta, betaLock] = betaPackageMetadata(manifest, lock, undefined)
+  expect(beta).toEqual({ ...manifest, version: '2.0.6-beta.1' })
+  expect(betaLock).toEqual({
+    ...lock,
+    version: beta.version,
+    packages: { ...lock.packages, '': { ...lock.packages[''], version: beta.version } }
+  })
+  expect(manifest.version).toBe(version)
+  expect(lock.packages[''].version).toBe(version)
+  expect(betaPackageMetadata(manifest, lock, '2.0.6-beta.12')[0].version).toBe('2.0.6-beta.12')
+  expect(betaPackageMetadata(manifest, lock, '2.1.0-beta.1')[0].version).toBe('2.1.0-beta.1')
+  for (const invalid of ['2.0.5-beta.1', '2.0.6', '2.0.6-beta.01', '2.0.7-rc.1']) {
+    expect(() => betaPackageMetadata(manifest, lock, invalid)).toThrow('高于 2.0.5 的 Beta 版本号')
+  }
+  expect(() => betaPackageMetadata(manifest, { ...lock, version: '2.0.4' }, undefined)).toThrow('同一正式版本号')
+})
+
+test('Beta stages a source archive without Git and leaves out local-only configuration', async () => {
+  const root = await temp()
+  const source = join(root, 'staged')
+  const inputs = ['scripts', 'src', 'resources', 'shell/out', 'tests']
+  for (const input of inputs) await fs.mkdir(join(root, input), { recursive: true })
+  const files = [
+    'electron-builder.yml', 'electron.vite.config.ts', 'vitest.config.ts',
+    'theme-policy.json', 'tsconfig.test.json', 'shell/out/main.js'
+  ]
+  const omitted = ['src/.env.local', 'scripts/verify.ps1', 'tests/integration.log', 'notes.md']
+  for (const file of [...files, ...omitted]) await fs.writeFile(join(root, file), file)
+  await copyBetaBuildInputs(root, source)
+  for (const file of files) expect(await fs.readFile(join(source, file), 'utf8')).toBe(file)
+  for (const file of omitted) await expect(fs.access(join(source, file))).rejects.toMatchObject({ code: 'ENOENT' })
 })
 
 test('simple review text cannot substitute for both scoped reviews or exact push CI', () => {

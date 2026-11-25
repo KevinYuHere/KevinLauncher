@@ -1,97 +1,98 @@
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
-import { createRequire } from 'node:module'
-import { join, relative, resolve, sep } from 'node:path'
+import { copyFile, cp, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { basename, join, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
-import windowsExecutable from './windows-executable.js'
+import { compareVersions } from '../src/shared/version.ts'
+import { STABLE_VERSION } from '../src/main/services/appUpdateManifest.ts'
+import { buildWindowsInstaller } from './build-windows-installer.mjs'
 
-const { trialEntry, trialRuntime } = createRequire(import.meta.url)('../src/shared/windowsLayout.json')
+const betaPattern = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)-beta\.[1-9]\d*$/
+const sourceDirectories = ['scripts', 'src', 'resources', 'shell', 'tests']
+const buildConfigs = ['electron-builder.yml', 'electron.vite.config.ts', 'vitest.config.ts']
+const excludedInputs = /^(?:\.env(?:\.|$)|\.git$|\.DS_Store$|node_modules$|__pycache__$)|\.(?:local|log)$/i
 
-if (process.platform !== 'win32') throw new Error('本地试用安装包须在 Windows 上构建')
-const root = resolve(import.meta.dirname, '..')
-const { values } = parseArgs({
-  options: { 'theme-policy': { type: 'string' }, 'keep-unpacked': { type: 'boolean' } }
-})
-const { name: packageName, version, devDependencies } = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
-const electronDist = join(root, 'node_modules', 'electron', 'dist')
-const runtime = (await readFile(join(electronDist, 'version'), 'utf8').catch(() => '')).trim().replace(/^v/, '')
-if (runtime !== devDependencies.electron) throw new Error('请先运行 scripts/install.ps1 安装锁定的 Electron 运行库')
-const output = await mkdtemp(join(root, 'release-trial-'))
-const temp = join(output, 'tmp')
-const installer = `KevinLauncherTrial-Installer-${version}.exe`
-const env = {
-  ...process.env,
-  KEVIN_BUILD_IDENTITY: 'trial',
-  KEVIN_TRIAL_THEME_POLICY: values['theme-policy'] ? resolve(values['theme-policy']) : '',
-  KEVIN_NATIVE_OUTPUT: join(output, 'app', 'native'),
-  CSC_IDENTITY_AUTO_DISCOVERY: 'false',
-  TEMP: temp,
-  TMP: temp
+export function betaPackageMetadata(manifest, lock, requested) {
+  const version = manifest.version
+  if (!STABLE_VERSION.test(version) || version !== lock.version || version !== lock.packages?.['']?.version) {
+    throw new Error('package.json 和 package-lock.json 必须使用同一正式版本号')
+  }
+  const core = version.split('.')
+  core[2] = String(BigInt(core[2]) + 1n)
+  const next = core.join('.')
+  const beta = requested ?? next + '-beta.1'
+  if (!betaPattern.test(beta) || compareVersions(beta, version) <= 0) {
+    throw new Error('请使用高于 ' + version + ' 的 Beta 版本号，例如 ' + next + '-beta.1')
+  }
+  return [
+    { ...manifest, version: beta },
+    { ...lock, version: beta, packages: { ...lock.packages, '': { ...lock.packages[''], version: beta } } }
+  ]
 }
 
-function node(script, ...args) {
-  execFileSync(process.execPath, [join(root, script), ...args], { cwd: root, env, stdio: 'inherit' })
+export async function copyBetaBuildInputs(root, source) {
+  await mkdir(source)
+  for (const directory of sourceDirectories) {
+    await cp(join(root, directory), join(source, directory), {
+      recursive: true,
+      filter: async path => {
+        if (excludedInputs.test(basename(path)) || path === join(root, 'scripts', 'verify.ps1')) return false
+        if ((await lstat(path)).isSymbolicLink()) throw new Error('Beta 构建输入不能为符号链接：' + path)
+        return true
+      }
+    })
+  }
+  const rootFiles = await readdir(root)
+  const configs = buildConfigs.concat(rootFiles.filter(file => /^tsconfig(?:\.[\w-]+)*\.json$/.test(file)))
+  if (rootFiles.includes('theme-policy.json')) configs.push('theme-policy.json')
+  for (const file of configs) {
+    const from = join(root, file)
+    if (!(await lstat(from)).isFile()) throw new Error('Beta 构建输入必须是普通文件：' + file)
+    await copyFile(from, join(source, file))
+  }
 }
 
-// electron-builder deep-merges .js config with the registered production layout.
-const config = join(output, 'builder.cjs')
-const bundled = relative(root, join(output, 'app')).split(sep).join('/')
-// In the locked electron-builder, true leaves UNPACK_DIR_NAME undefined, so
-// NSIS uses a separate plugin directory for every installer process.
-const configuration = [
-  'const fs = require("node:fs")',
-  'const yaml = require("js-yaml")',
-  'const base = yaml.load(fs.readFileSync("electron-builder.yml", "utf8"))',
-  'module.exports = {',
-  '  ...base,',
-  '  appId: "com.kevin.kevinlauncher.trial", productName: "KevinLauncherTrial",',
-  '  electronDist: ' + JSON.stringify(electronDist) + ',',
-  `  directories: { output: ${JSON.stringify(output)} },`,
-  `  extraResources: base.extraResources.map(rule => rule.from === "out" ? { ...rule, from: ${JSON.stringify(bundled)} } : rule),`,
-  '  portable: { ...base.portable, unpackDirName: true }',
-  '}'
-].join('\n')
+async function main() {
+  if (process.platform !== 'win32') throw new Error('本地 Beta 安装包须在 Windows 上构建')
+  const { values } = parseArgs({ options: { version: { type: 'string' }, 'keep-unpacked': { type: 'boolean' } } })
+  const root = resolve(import.meta.dirname, '..')
+  const [manifest, lock] = await Promise.all(['package.json', 'package-lock.json'].map(async file =>
+    JSON.parse(await readFile(join(root, file), 'utf8'))))
+  const [betaManifest, betaLock] = betaPackageMetadata(manifest, lock, values.version)
 
-const builder = 'node_modules/electron-builder/cli.js'
-const unpacked = join(output, 'win-unpacked')
-const file = join(output, installer)
-try {
-  await mkdir(temp)
-  for (const command of ['npm.cmd run typecheck', 'npm.cmd test']) {
-    execFileSync('cmd.exe', ['/d', '/s', '/c', command], { cwd: root, stdio: 'inherit' })
-  }
-  node('node_modules/electron-vite/bin/electron-vite.js', 'build', '--outDir', join(output, 'app'))
-  node('scripts/build-windows-archive.mjs')
-  await writeFile(config, configuration)
-  node(builder, '--config', config, '--win', '--x64', '--dir', '--publish', 'never')
-  node(builder, '--config', config, '--win', '--x64', '--prepackaged', unpacked, '--publish', 'never')
-  const installerMode = 'requireAdministrator'
-  const entryMode = 'requireAdministrator'
-  const runtimeMode = 'asInvoker'
-  for (const [executable, mode] of [[file, installerMode], [join(unpacked, trialEntry), entryMode],
-    [join(unpacked, trialRuntime), runtimeMode]]) {
-    windowsExecutable.assertExecutionLevel(executable, mode)
-    console.log(`Verified ${mode} in ${executable}`)
-  }
-  const sha256 = createHash('sha256')
-  for await (const chunk of createReadStream(file)) sha256.update(chunk)
-  await writeFile(join(output, 'trial-verification.json'), JSON.stringify({
-    identity: 'trial', version, installer, installerMode, entryMode, runtimeMode,
-    size: (await stat(file)).size, sha256: sha256.digest('hex')
-  }, null, 2) + '\n')
-} catch (error) {
-  await rm(file, { force: true })
-  throw error
-} finally {
-  const check = relative(root, output)
-  if (check.startsWith('release-trial-') && !check.includes(sep)) {
-    for (const name of ['app', 'tmp', 'builder.cjs', 'builder-effective-config.yaml', 'builder-debug.yml',
-      `${packageName}-${version}-x64.nsis.7z`,
-      ...(values['keep-unpacked'] ? [] : ['win-unpacked'])]) {
-      await rm(join(output, name), { recursive: true, force: true, maxRetries: 3 })
+  const output = await mkdtemp(join(root, 'release-beta-'))
+  const source = join(output, 'source')
+  const modules = join(source, 'node_modules')
+  let installer
+  try {
+    await copyBetaBuildInputs(root, source)
+    for (const [file, content] of [['package.json', betaManifest], ['package-lock.json', betaLock]]) {
+      await writeFile(join(source, file), JSON.stringify(content, null, 2) + '\n')
     }
+    await cp(join(root, 'node_modules'), modules, { recursive: true })
+    for (const command of ['npm.cmd run typecheck', 'npm.cmd test']) {
+      execFileSync('cmd.exe', ['/d', '/s', '/c', command], { cwd: source, stdio: 'inherit' })
+    }
+    const build = buildWindowsInstaller(source)
+    const filename = basename(build.installer)
+    const sha = createHash('sha256')
+    for await (const chunk of createReadStream(build.installer)) sha.update(chunk)
+    if (values['keep-unpacked']) await rename(build.unpacked, join(output, 'win-unpacked'))
+    const verification = {
+      version: betaManifest.version, installer: filename, ...build.modes,
+      size: (await stat(build.installer)).size, sha256: sha.digest('hex')
+    }
+    installer = join(output, filename)
+    await rename(build.installer, installer)
+    await writeFile(join(output, 'beta-verification.json'), JSON.stringify(verification, null, 2) + '\n')
+  } catch (error) {
+    if (installer) await rm(installer, { force: true })
+    throw error
+  } finally {
+    await rm(source, { recursive: true, force: true, maxRetries: 3 })
   }
+  console.log(installer)
 }
-console.log(file)
+
+if (import.meta.main) await main()

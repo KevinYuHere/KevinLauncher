@@ -2,7 +2,7 @@ import { resolve } from 'path'
 import { defineConfig } from 'electron-vite'
 import react from '@vitejs/plugin-react'
 
-const buildIdentity = { __KEVIN_TRIAL_BUILD__: JSON.stringify(process.env.KEVIN_BUILD_IDENTITY === 'trial') }
+const buildIdentity = { __KEVIN_TRIAL_BUILD__: 'false' }
 
 // Dependencies are bundled (not externalised) on purpose: the packaged app keeps
 // its code in a versioned `resources/app-<version>/` directory that must be

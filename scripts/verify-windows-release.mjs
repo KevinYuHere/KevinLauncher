@@ -1,36 +1,77 @@
 import assert from 'node:assert/strict'
-import { spawn, spawnSync, execFileSync } from 'node:child_process'
+import { spawn, execFile, execFileSync } from 'node:child_process'
 import { once } from 'node:events'
-import { access, cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { access, cp, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
-import { basename, isAbsolute, join, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, parse, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { isNewerVersion } from '../src/shared/version.ts'
 import { downloadInstaller, releasedAssets } from './verify-release.mjs'
-import { verifyLocalAssets } from './release-assets.mjs'
+import { identifyFile, verifyLocalAssets } from './release-assets.mjs'
 import { readReleaseVersion } from './release-source.mjs'
 import windowsExecutable from './windows-executable.js'
 import { createRequire } from 'node:module'
+import { fileURLToPath } from 'node:url'
+import { promisify } from 'node:util'
 
 const windowsLayout = createRequire(import.meta.url)('../src/shared/windowsLayout.json')
+const windowsProbe = fileURLToPath(new URL('./verify-setup-windows.ps1', import.meta.url))
+const run = promisify(execFile)
+const samePath = (actual, expected) => actual?.toLowerCase() === expected.toLowerCase()
+const setupField = label => `[...document.querySelectorAll('.setup-field')].find(field =>
+  field.querySelector('.setup-field-label')?.textContent.trim() === ${JSON.stringify(label)})`
 
 if (process.platform !== 'win32' || process.env.GITHUB_ACTIONS !== 'true' ||
     process.env.RUNNER_ENVIRONMENT !== 'github-hosted' || !process.env.RUNNER_TEMP) {
   throw new Error('正式安装和覆盖升级验证需要一次性的 GitHub 托管 Windows 运行器')
 }
 const dir = resolve(process.argv[2])
-const fromWorktree = process.argv[3] === '--from-worktree'
+const beta = process.argv[3] === '--beta-from-worktree'
 const git = (...args) => execFileSync('git', args, { encoding: 'utf8', windowsHide: true }).trim()
-const source = fromWorktree ? {
-  ...readReleaseVersion(), sha: git('rev-parse', 'HEAD'), tree: git('rev-parse', 'HEAD^{tree}')
+const betaRecord = beta ? JSON.parse(await readFile(join(dir, 'beta-verification.json'), 'utf8')) : null
+if (beta && !/^\d+\.\d+\.\d+-beta\.[1-9]\d*$/.test(betaRecord.version)) throw new Error('预期本地 Beta 版本')
+const source = beta || process.argv[3] === '--from-worktree' ? {
+  ...(beta ? { version: betaRecord.version, electron: createRequire(import.meta.url)('../package.json').devDependencies.electron }
+    : readReleaseVersion()), sha: git('rev-parse', 'HEAD'), tree: git('rev-parse', 'HEAD^{tree}')
 } : JSON.parse(await readFile(process.argv[3], 'utf8'))
-const assets = await verifyLocalAssets(dir, source.version, source.electron)
 const installer = join(dir, 'KevinLauncher-Installer-' + source.version + '.exe')
-const root = await mkdtemp(join(process.env.RUNNER_TEMP, 'kl-release-check-'))
+const assets = beta ? await verifyBetaInstaller() : await verifyLocalAssets(dir, source.version, source.electron)
+const root = beta ? await betaFixtureRoot() : await mkdtemp(join(process.env.RUNNER_TEMP, 'kl-release-check-'))
 const children = new Set()
 let startupSequence = 0
-const sandboxData = name => join(root, name, 'KevinLauncherData')
-const sandboxInstall = name => join(root, name, 'KevinLauncher')
+const sandboxData = name => join(root, beta && name === 'fresh' ? '中文 数据位置' : name, 'KevinLauncherData')
+const sandboxInstall = name => join(root, beta && name === 'fresh' ? '中文 安装位置' : name, 'KevinLauncher')
+
+async function windows(action, ...args) {
+  const shell = join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  const { stdout } = await run(shell, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+    '-File', windowsProbe, '-Action', action, ...args], { windowsHide: true, timeout: 26000 })
+  return stdout.trim() ? JSON.parse(stdout.trim()) : null
+}
+
+async function verifyBetaInstaller() {
+  const actual = await identifyFile(installer)
+  assert.equal(betaRecord.installer, basename(installer))
+  assert.equal(betaRecord.size, actual.size)
+  assert.equal(betaRecord.sha256, actual.sha256)
+  windowsExecutable.assertExecutionLevel(installer, 'requireAdministrator')
+  windowsExecutable.assertExecutionLevel(join(dir, 'win-unpacked', windowsLayout.entry), 'requireAdministrator')
+  windowsExecutable.assertExecutionLevel(join(dir, 'win-unpacked', windowsLayout.runtime), 'asInvoker')
+  return { [basename(installer)]: actual }
+}
+
+async function betaFixtureRoot() {
+  const system = parse(process.env.LOCALAPPDATA).root
+  for (const volume of (await windows('volumes')).filter(candidate => !samePath(candidate, system))) {
+    try {
+      return await realpath(await mkdtemp(join(volume, 'kl-beta-check-')))
+    } catch (error) {
+      if (!['EACCES', 'EPERM', 'EROFS'].includes(error.code)) throw error
+      console.log(`Cannot create the verifier fixture on ${volume}: ${error.code}`)
+    }
+  }
+  return realpath(await mkdtemp(join(process.env.RUNNER_TEMP, 'kl-beta-check-')))
+}
 
 async function until(operation, description, timeout = 120_000, failed) {
   const end = Date.now() + timeout
@@ -92,7 +133,7 @@ async function launch(file, ...args) {
     delay(5000).then(() => { throw new Error('Electron 页面连接超时') })
   ])
   let id = 0
-  const run = (expression, timeout = 150_000) => new Promise((resolveRun, reject) => {
+  const command = (method, params, timeout = 150_000) => new Promise((resolveRun, reject) => {
     const expected = ++id
     const finish = () => {
       clearTimeout(timer)
@@ -111,18 +152,20 @@ async function launch(file, ...args) {
         reject(new Error(data.error?.message ?? data.result.exceptionDetails.exception?.description ??
           data.result.exceptionDetails.text))
       } else {
-        resolveRun(data.result.result.value)
+        resolveRun(data.result)
       }
     }
     const timer = setTimeout(() => {
       finish()
-      reject(new Error('Electron 页面调用超时：' + expression.slice(0, 60)))
+      reject(new Error('Electron 页面调用超时：' + method))
     }, timeout)
     socket.addEventListener('message', receive)
     socket.addEventListener('close', closed)
-    socket.send(JSON.stringify({ id: expected, method: 'Runtime.evaluate',
-      params: { expression, returnByValue: true, awaitPromise: true } }))
+    socket.send(JSON.stringify({ id: expected, method, params }))
   })
+  const run = async (expression, timeout) => (await command('Runtime.evaluate', {
+    expression, returnByValue: true, awaitPromise: true
+  }, timeout)).result.value
   await until(() => run('Boolean(window.api)'), '应用 IPC 就绪')
   const waitForExit = async () => {
     socket.close()
@@ -132,10 +175,61 @@ async function launch(file, ...args) {
     assert.equal(code, 0)
     children.delete(child)
   }
-  return { run, waitForExit, close: async () => {
+  return { run, command, pid: child.pid, waitForExit, close: async () => {
     await run('void window.api.windowClose()', 5000).catch(() => {})
     await waitForExit()
   } }
+}
+
+async function clickSetup(ui, expression, description) {
+  const point = await until(() => ui.run(`(() => {
+    const failure = document.querySelector('.setup-warn-block')?.textContent
+    if (failure) throw new Error(failure)
+    const button = ${expression}
+    if (!button || button.disabled || !button.checkVisibility({ visibilityProperty: true })) return null
+    button.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    const box = button.getBoundingClientRect()
+    const point = { x: box.left + box.width / 2, y: box.top + box.height / 2 }
+    return button.contains(document.elementFromPoint(point.x, point.y)) ? point : null
+  })()`), description, 10_000)
+  for (const type of ['mousePressed', 'mouseReleased']) {
+    await ui.command('Input.dispatchMouseEvent', { ...point, type, button: 'left', clickCount: 1 })
+  }
+}
+
+async function setupPath(ui, label, expected) {
+  await until(async () => samePath(await ui.run(`(${setupField(label)})?.querySelector('input')?.value`), expected),
+    label + ' 显示 ' + expected, 10_000)
+}
+
+async function pickSetupPath(ui, label, selected) {
+  await clickSetup(ui, `(${setupField(label)})?.querySelector('button')`, label + '可浏览')
+  assert.equal(await windows('choose-folder', '-ProcessId', String(ui.pid), '-Target', dirname(selected)), true)
+  await setupPath(ui, label, selected)
+}
+
+async function clickPrimary(ui, text) {
+  return clickSetup(ui, `[...document.querySelectorAll('.setup-actions button.primary')].find(button =>
+    button.textContent.trim() === ${JSON.stringify(text)})`, text + '可点击')
+}
+
+async function installThroughSetup(ui, info, target, data) {
+  await mkdir(dirname(target), { recursive: true })
+  await setupPath(ui, '安装位置', info.prefillDir)
+  await setupPath(ui, '用户数据目录', info.dataDir)
+  await pickSetupPath(ui, '安装位置', target)
+  await pickSetupPath(ui, '用户数据目录', data)
+  await clickPrimary(ui, '下一步')
+  const locations = await ui.run(`[...document.querySelectorAll('.setup-list em')].map(element => element.textContent)`)
+  assert(locations.some(path => samePath(path, target)), '确认页显示选中的程序目录')
+  assert(locations.some(path => samePath(path, data)), '确认页显示选中的数据目录')
+  await clickPrimary(ui, '开始安装')
+  await until(() => ui.run(`(() => {
+    const failure = document.querySelector('.setup-warn-block')?.textContent
+    if (failure) throw new Error(failure)
+    return document.querySelector('.setup-title-lg')?.textContent === '安装完成'
+  })()`), 'Beta 安装完成')
+  assert(samePath(await ui.run(`document.querySelector('.setup-panel .setup-sub b')?.textContent`), target))
 }
 
 async function install(file, name, version, previousVersion) {
@@ -149,8 +243,12 @@ async function install(file, name, version, previousVersion) {
     const inspection = await ui.run('window.api.installerInspect(' + JSON.stringify(target) + ')')
     assert.equal(inspection.version, previousVersion)
   }
-  const call = 'window.api.installerRun(' + JSON.stringify(target) + ',' + JSON.stringify(data) + ')'
-  assert.equal(await ui.run(call), true)
+  if (beta && name === 'fresh') {
+    await installThroughSetup(ui, info, target, data)
+  } else {
+    const call = 'window.api.installerRun(' + JSON.stringify(target) + ',' + JSON.stringify(data) + ')'
+    assert.equal(await ui.run(call), true)
+  }
   await ui.close()
   assert.equal((await readFile(join(target, 'resources', 'app-version.txt'), 'utf8')).trim(), version)
   return target
@@ -197,15 +295,55 @@ async function startInstalled(target, version, fixture) {
   await ui.close()
 }
 
+async function verifyBetaIntegration(target, data) {
+  const entry = join(target, windowsLayout.entry)
+  const runtime = join(target, windowsLayout.runtime)
+  for (const executable of [windowsLayout.entry, windowsLayout.runtime]) {
+    assert.deepEqual(await identifyFile(join(target, executable)), await identifyFile(join(dir, 'win-unpacked', executable)))
+  }
+  const { uninstall, program, data: registeredData, task } = await windows('integration')
+  assert.equal(uninstall.name, 'KevinLauncher')
+  assert.equal(uninstall.version, source.version)
+  assert(samePath(uninstall.path, target) && samePath(program, target))
+  assert(samePath(registeredData, data))
+  assert.equal(uninstall.command, `"${entry}" --uninstall`)
+  assert(samePath(task?.target?.replace(/^"|"$/g, ''), entry), '开机计划任务应启动所选程序目录的公开入口')
+  assert.match(task.level, /^Highest/i)
+  const links = await windows('links')
+  assert.equal(links?.length, 2)
+  for (const link of links) {
+    assert(samePath(link.target, entry) && samePath(link.workingDirectory, target))
+    assert.equal(link.arguments, '')
+  }
+  await windows('launch', '-Target', links[0].path)
+  const launched = await until(async () => {
+    const { processes, runnerIntegrityRid } = await windows('processes', '-Target', target)
+    const started = processes.find(process => samePath(process.path, entry))
+    const main = processes.find(process => process.parentId === started?.id && process.window && samePath(process.path, runtime))
+    const renderers = processes.filter(process => process.parentId === main?.id && process.renderer)
+    if (!started || !main || renderers.length === 0) return null
+    return { started, main, renderers, runnerIntegrityRid }
+  }, '从 Windows 快捷方式启动所选位置的 Beta')
+  assert(launched.started.elevated && launched.main.elevated)
+  assert(launched.renderers.every(renderer => !renderer.noSandbox && renderer.restricted && renderer.integrityRid <= 0x1000))
+  await windows('close', '-Target', runtime, '-ProcessId', String(launched.main.id))
+  await until(async () => !(await windows('processes', '-Target', target)).processes.length, '快捷方式启动的实例退出')
+  await assert.rejects(access(join(process.env.LOCALAPPDATA, 'Programs', 'KevinLauncher')), { code: 'ENOENT' })
+  return {
+    nativeFolderDialogs: 2, program: target, data,
+    differentSystemVolume: !samePath(parse(target).root, parse(process.env.LOCALAPPDATA).root),
+    defaultProgramUntouched: true, shortcutLaunched: true, productionRegistration: true,
+    startupTask: task.level, runnerIntegrityRid: launched.runnerIntegrityRid,
+    entryIntegrityRid: launched.started.integrityRid, runtimeIntegrityRid: launched.main.integrityRid,
+    rendererIntegrityRids: launched.renderers.map(renderer => renderer.integrityRid), rendererSandboxed: true,
+    uacPromptObserved: false
+  }
+}
+
 async function verifyUninstall(target, data) {
   const executable = join(target, windowsLayout.entry)
   const ownFile = join(target, '用户自放记录.txt')
-  const registration = () => spawnSync(join(process.env.SystemRoot, 'System32', 'reg.exe'), [
-    'query', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\KevinLauncher', '/v', 'InstallLocation'
-  ], { windowsHide: true, encoding: 'utf8' })
-  const registered = registration()
-  assert.equal(registered.status, 0, '鲜装后的卸载入口应存在')
-  assert.ok(registered.stdout.toLowerCase().includes(target.toLowerCase()))
+  assert(samePath((await windows('integration')).uninstall?.path, target), '鲜装后的卸载入口应存在')
   await writeFile(ownFile, 'preserve')
   const profileFiles = ['config.json', 'playtime.json']
   const beforeData = await Promise.all(profileFiles.map(file => readFile(join(data, file))))
@@ -240,16 +378,19 @@ async function verifyUninstall(target, data) {
   }
   assert.equal(await readFile(ownFile, 'utf8'), 'preserve')
   assert.deepEqual(await Promise.all(profileFiles.map(file => readFile(join(data, file)))), beforeData)
-  assert.equal(registration().status, 1, '卸载应清理原有 Windows 注册入口')
+  assert.equal((await windows('integration')).uninstall, null, '卸载应清理原有 Windows 注册入口')
+  if (beta) assert.equal(await windows('links'), null, '卸载应清理指向已卸载目录的快捷方式')
 }
 
 async function comparePayload(installed) {
-  const target = join(root, 'payload')
-  await mkdir(target)
-  execFileSync(join(process.env.SystemRoot, 'System32', 'tar.exe'),
-    ['-xf', join(dir, 'KevinLauncher-' + source.version + '-app.zip'), '-C', target], {
-      windowsHide: true, stdio: 'inherit'
-    })
+  const target = beta ? join(dir, 'win-unpacked', 'resources', 'app-' + source.version) : join(root, 'payload')
+  if (!beta) {
+    await mkdir(target)
+    execFileSync(join(process.env.SystemRoot, 'System32', 'tar.exe'),
+      ['-xf', join(dir, 'KevinLauncher-' + source.version + '-app.zip'), '-C', target], {
+        windowsHide: true, stdio: 'inherit'
+      })
+  }
   const files = async (base, profile = '') => {
     const entries = await readdir(join(base, profile), { withFileTypes: true })
     const indexed = {}
@@ -263,8 +404,10 @@ async function comparePayload(installed) {
   }
   const packed = await files(target)
   assert.deepEqual(packed, await files(join(installed, 'resources', 'app-' + source.version)))
-  const manifest = JSON.parse(await readFile(join(dir, 'update-manifest.json'), 'utf8'))
-  assert.equal(Object.values(packed).reduce((sum, file) => sum + file.length, 0), manifest.appSize)
+  if (!beta) {
+    const manifest = JSON.parse(await readFile(join(dir, 'update-manifest.json'), 'utf8'))
+    assert.equal(Object.values(packed).reduce((sum, file) => sum + file.length, 0), manifest.appSize)
+  }
 }
 
 try {
@@ -310,14 +453,15 @@ try {
   await comparePayload(fresh)
   console.log('Verified fresh install, startup and byte-for-byte app payload')
   const freshData = sandboxData('fresh')
+  const betaIntegration = beta ? await verifyBetaIntegration(fresh, freshData) : null
   const runningFresh = await launch(join(fresh, windowsLayout.entry))
   const tray = await runningFresh.run('window.api.setLauncherBehavior({ closeAction: "tray" })')
   assert.equal(tray.closeAction, 'tray')
   await verifyUninstall(fresh, freshData)
   await runningFresh.waitForExit()
   await checkProfile(freshData, fixture, history)
-  assert.deepEqual(await verifyLocalAssets(dir, source.version, source.electron), assets)
-  await writeFile(join(dir, 'windows-verification.json'), JSON.stringify({
+  assert.deepEqual(beta ? await verifyBetaInstaller() : await verifyLocalAssets(dir, source.version, source.electron), assets)
+  const verification = {
     sha: source.sha,
     tree: source.tree,
     runId: process.env.GITHUB_RUN_ID,
@@ -334,8 +478,11 @@ try {
     uninstalled: true,
     entryMode: 'requireAdministrator',
     runtimeMode: 'asInvoker',
+    ...(beta ? { betaIntegration } : {}),
     assets
-  }, null, 2) + '\n')
+  }
+  await writeFile(join(dir, 'windows-verification.json'), JSON.stringify(verification, null, 2) + '\n')
+  if (beta) console.log('Windows Beta verification: ' + JSON.stringify(verification))
   if (process.env.GITHUB_STEP_SUMMARY) {
     const summary = [
       '### Windows installer verification',
@@ -345,6 +492,7 @@ try {
       'Previous verified release: ' + previous.manifest.version,
       'Previous installer SHA-256: ' + previous.manifest.installerSha256,
       'Verified fresh install, launch, overwrite upgrade, backup, saved history, and managed uninstall.',
+      ...(beta ? ['Beta production integration: ' + JSON.stringify(betaIntegration)] : []),
       '',
       ...Object.entries(assets).map(([file, asset]) => '- ' + file + ': ' + asset.sha256)
     ].join('\n') + '\n'

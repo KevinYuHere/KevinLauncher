@@ -6,7 +6,7 @@
 
 默认安装位置为 `%LOCALAPPDATA%\Programs\KevinLauncher`，用户数据默认保存在 `%APPDATA%\kevin-launcher`。迁移数据可从「设置 → 启动器设置」操作。卸载可从 Windows 已安装的应用列表进入，并选择是否保留用户数据。
 
-## 本地构建与试用
+## 本地 Beta
 
 使用 Windows x64、Node.js 24 和 npm。解压验证使用 Windows 系统附带的 `tar.exe`，原生归档工具使用系统 .NET Framework 64 位目录中的 C# 编译器。依赖版本由仓库的 `package-lock.json` 固定，Electron 安装脚本校验对应运行库。
 
@@ -19,13 +19,11 @@ npm run package:test
 
 `npm run test:core` 运行与操作系统无关的核心回归。Windows CI 额外执行原生归档、快捷方式/安装相关的 Windows 测试，正式发布再运行同一批成品的安装与覆盖演练。`npm run lint` 校验变更空白、构建脚本语法和 JSON，现有文件按改动渐进整理。
 
-试用包与 SHA-256 校验记录位于本次命令打印的 `release-trial-*` 目录。加 `--keep-unpacked` 可保留独立的解包程序供诊断。在 Windows 资源管理器中双击试用安装包或已安装的 `KevinLauncherTrial.exe`，Windows 会请求管理员权限。取消 UAC 后本次启动结束。
+本地命令通过正式版打包流程生成 `KevinLauncher-Installer-<版本>-beta.N.exe`。安装包和 SHA-256 校验记录位于本次命令打印的 `release-beta-*` 目录。加 `--keep-unpacked` 可保留解包程序供诊断。
 
-试用程序安装在 Windows 的 `Program Files\KevinLauncherTrial\<账户 SID>`。数据和试用快捷方式继续使用 `%LOCALAPPDATA%\KevinLauncherTrial`。旧试用程序留在原目录，建议从安装完成页或更新后的试用快捷方式启动新版。试用版的真实应用启动、游戏更新、开机自启和远端启动器更新均已隔离。试用卸载可运行对应安装目录下的 `KevinLauncherTrial.exe --uninstall`，卸载旧版时选择保留数据可供新版继续使用。
+以源码版本 `2.0.5` 为例，默认构建 `2.0.6-beta.1`，指定后续编号可用 `npm run package:test -- --version 2.0.6-beta.2`。Beta 版本写入本次构建的源码副本。安装包保存在本机。
 
-需要复制一份现有设置时，先退出试用版，然后把源目录明确传给 `scripts/trial.ps1 -DataDir <目录>`。加 `-Reseed` 会替换已有试用数据。复制完成后才会切换试用数据目录。也可在 `npm run package:test -- --theme-policy <文件>` 中指定当前版本的试用策略；正式包的主题策略来自版本对应的已跟踪文件。
-
-要检查启动器更新界面，在试用数据目录中准备 `simulate-app-update.json` 后手动检查更新。要检查游戏更新界面，添加 `simulate.json`，内容可为 `{"appId":"应用 ID","mode":"both"}`，然后启动试用版。覆盖安装使用正式身份验证，由隔离的 Windows CI 完成。
+Beta 使用安装器检测到的 KevinLauncher 程序和数据目录作为默认值。两处都可以在安装界面选择。覆盖安装沿用正式版的数据备份机制，并更新同一组快捷方式和卸载入口。Beta 继续检查正式更新，并在 `2.0.6` 等更高的正式版本发布后提供更新。
 
 ## 正式版本
 
@@ -37,11 +35,11 @@ npm run package:test
 
 GitHub 仓库可启用 [Immutable releases](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository) 锁定已公开资产。自动审阅的配置与触发方式见 [GitHub PR 的 Codex 审阅](https://learn.chatgpt.com/docs/third-party/github)。
 
-同仓库 `verify/*` 分支的 PR 会触发 Windows trial acceptance。试用任务启动独立包两次，确认旧策略下首次应用及重启后保留手动设置。安装任务验证一次性 Windows 中的全新安装、上一正式版覆盖升级、启动和保留数据卸载。结果记录在 Actions 摘要，供审阅人员核对所测提交及工件哈希。
+同仓库 `verify/*` 分支的 PR 会触发 Windows 安装验收。在一次性 Windows 环境中验证 Beta 自定义安装位置，以及正式版的全新安装、上一正式版覆盖升级、启动和保留数据卸载。
 
 调整启动壳、安装协议或持久化格式时，同步更新 `scripts/release-compatibility.json` 相应协议号。热更新会核对 Electron、宿主文件、协议和数据格式，遇到变化时使用完整安装程序。热更新启动连续两次失败会使用上一健康代码，保留同格式的用户数据和更新前备份。
 
-正式版与试用版的安装器和启动入口均声明管理员权限。`KevinLauncher.exe` 和 `KevinLauncherTrial.exe` 是各自的小型入口，会等待同目录的 `KevinLauncherRuntime.exe` 或 `KevinLauncherTrialRuntime.exe` 并传递退出码。Electron 浏览器继承管理员令牌，GPU 和渲染子进程继续使用 Chromium 沙箱。构建时检查安装器、启动入口与内部运行库的 Windows 清单。
+正式版与 Beta 的安装器和启动入口均会请求管理员权限。`KevinLauncher.exe` 会等待同目录的 `KevinLauncherRuntime.exe` 并传递退出码。Electron 浏览器继承管理员令牌，GPU 和渲染子进程继续使用 Chromium 沙箱。构建时检查安装器、启动入口与内部运行库的 Windows 清单。
 
 ## 可选网络验证
 
