@@ -1,0 +1,7272 @@
+/* =========================================================================
+   KevinLauncher — Starward-style layout
+   Full-bleed game art + frosted translucent overlays, left icon rail,
+   top-left game switcher, bottom-right playtime + start button.
+   Accent colour kept from the miHoYo official site (#3778e5).
+   ========================================================================= */
+
+:root {
+  --brand: #3778e5;
+  --brand-hover: #4d86e9;
+  --brand-dim: rgba(55, 120, 229, 0.18);
+  --brand-line: rgba(55, 120, 229, 0.5);
+  --on-brand: #ffffff;
+  --on-brand-soft: rgba(255, 255, 255, 0.6);
+
+  --error: #ff5a5f;
+  --success: #4cd964;
+  --purple: #b98cff;
+
+  --r-top: #e7b45c;
+  --r-second: #b98cff;
+  --r-third: #5b9dff;
+
+  --fg: #ffffff;
+  --fg-2: rgba(255, 255, 255, 0.72);
+  --fg-3: rgba(255, 255, 255, 0.5);
+  --fg-4: rgba(255, 255, 255, 0.32);
+
+  /* Over-background foreground (page titles, rail, top bar): black or white,
+     chosen by the theme colour. `applyTheme` overrides these. */
+  --chrome-fg: #ffffff;
+  --chrome-fg-2: rgba(255, 255, 255, 0.72);
+  --chrome-fg-3: rgba(255, 255, 255, 0.5);
+
+  --line: rgba(255, 255, 255, 0.14);
+  --line-strong: rgba(255, 255, 255, 0.26);
+  /* Backdrop scrim colour (dark veil for a dark UI, light veil for a light UI). */
+  --scrim-rgb: 8, 10, 15;
+
+  --glass: rgba(18, 20, 26, 0.44);
+  --glass-2: rgba(18, 20, 26, 0.62);
+  --glass-overlay: rgba(18, 20, 26, 0.5);
+  --glass-hover: rgba(255, 255, 255, 0.12);
+  --field-bg: rgba(0, 0, 0, 0.28);
+
+  /* Material system (overridden per app by applyGlass + [data-material]). */
+  --glass-blur: 18px;
+  --glass-saturate: 120%;
+  --glass-backdrop: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  --glass-rim: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  --glass-sheen: none;
+  --glass-repeat: no-repeat;
+  --glass-size: auto;
+
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+/* ---- Glass materials (selected per app; colour tokens are set inline by
+   applyGlass, the material class by `data-material` on <html>). ---- */
+:root[data-material='blur'] {
+  --glass-backdrop: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+}
+:root[data-material='mica'] {
+  --glass-backdrop: blur(calc(var(--glass-blur) * 1.7)) saturate(var(--glass-saturate))
+    brightness(1.03);
+  --glass-rim: inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+:root[data-material='liquid'] {
+  /* The edge refraction is a per-surface SVG filter applied by liquidMaterial.ts
+     (a shared url() token can't know each element's size/radius); this is the
+     fallback blur/saturation for surfaces the engine does not touch. No extra
+     brightness — it would make unfiltered areas look lighter than the rest. */
+  --glass-backdrop: blur(var(--glass-blur)) saturate(calc(var(--glass-saturate) * 1.3));
+}
+:root[data-material='shine'] {
+  --glass-backdrop: blur(var(--glass-blur)) saturate(calc(var(--glass-saturate) * 1.45));
+  /* rdev-style highlight: a soft inset rim (the diagonal light band comes from
+     the `--glass-sheen` set by applyGlass). */
+  --glass-rim:
+    inset 0 1px 0 rgba(255, 255, 255, 0.55),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.16),
+    inset 0 0 22px rgba(255, 255, 255, 0.12);
+}
+/* The zero-size host <svg> must stay rendered (not display:none). */
+.glass-defs {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+
+html {
+  /* No dark tap flash on touch (looked like the option "darkening" on click). */
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  background: #0b0d12;
+  color: var(--fg);
+  font-family: var(--app-font, "Segoe UI"), "Microsoft YaHei UI", system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  user-select: none;
+  overflow: hidden;
+}
+
+/* Form controls (buttons, inputs …) do not inherit `font-family` by default —
+   without this they would keep the browser's own font and ignore the font
+   chosen in the settings. */
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+}
+
+/* Native scrollbars take no width (overlay-style) so content never shifts when
+   a list starts/stops scrolling. */
+::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+/* ------------------------------------------------------------------ app */
+.app {
+  position: relative;
+  height: 100%;
+  background: #0b0d12;
+}
+
+.bg-layer {
+  position: fixed;
+  inset: -64px;
+  width: calc(100% + 128px);
+  height: calc(100% + 128px);
+  object-fit: cover;
+  z-index: 0;
+}
+
+.bg-scrim {
+  position: fixed;
+  inset: -64px;
+  z-index: 1;
+  background:
+    linear-gradient(
+      180deg,
+      rgba(var(--scrim-rgb), 0.5) 0%,
+      rgba(var(--scrim-rgb), 0.12) 26%,
+      rgba(var(--scrim-rgb), 0.72) 100%
+    ),
+    linear-gradient(90deg, rgba(var(--scrim-rgb), 0.55) 0%, rgba(var(--scrim-rgb), 0) 22%);
+  /* Strength = background influence; 0 at opacity 100 (fully clear). */
+  opacity: var(--scrim-strength, 1);
+  pointer-events: none;
+}
+/* Extra darkening on top of the scrim (controlled per app). */
+.bg-dim {
+  position: fixed;
+  inset: -64px;
+  z-index: 1;
+  background: #000000;
+  pointer-events: none;
+}
+
+.glass {
+  background-color: var(--glass);
+  background-image: var(--glass-sheen);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  border: 1px solid var(--line);
+  box-shadow: var(--glass-rim);
+}
+
+/* ---------------------------------------------------------------- rail */
+.rail {
+  position: fixed;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 64px;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  touch-action: none;
+  gap: 6px;
+  /* Left blank narrowed by half the little bar's width (average of before/after). */
+  padding: 10px 3px 10px 0;
+}
+
+/* Moving themed highlight + moving left bar (the rail acts as a segmented
+   control; both are spring-animated by useJelly). */
+.rail-thumb {
+  position: absolute;
+  left: 7.5px;
+  top: 0;
+  width: 46px;
+  border-radius: 12px;
+  background: var(--brand);
+  z-index: 0;
+  pointer-events: none;
+  will-change: transform;
+}
+.rail-bar {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 3px;
+  height: 22px;
+  border-radius: 0 3px 3px 0;
+  background: var(--on-brand);
+  z-index: 0;
+  pointer-events: none;
+  will-change: transform;
+}
+
+.rail-item {
+  position: relative;
+  z-index: 1;
+  width: 46px;
+  height: 46px;
+  display: grid;
+  place-items: center;
+  border: none;
+  background: transparent;
+  /* Over the game background → black/white by the theme colour. */
+  color: var(--chrome-fg-2);
+  cursor: pointer;
+  border-radius: 12px;
+  transition: background 0.15s var(--ease), color 0.15s var(--ease);
+}
+/* Hover just brightens the icon (no grey background), matching the other
+   segmented controls. */
+.rail-item:hover {
+  color: var(--chrome-fg);
+}
+.rail-item.active {
+  color: var(--on-brand);
+}
+/* Sidebar applies the current app's material: a glass strip behind the icons.
+   Its right edge stops between the rail icons and the first game icon (a little
+   narrower than the 64px rail). */
+/* With material on, the rail is a glass surface → its icons follow the glass
+   brightness (so sliding the brightness changes them), like other glass text. */
+:root[data-sidebar-material='true'] .rail-item {
+  color: var(--fg-2);
+}
+:root[data-sidebar-material='true'] .rail-item:hover {
+  color: var(--fg);
+}
+/* The active item's background is the theme colour → highest precedence: its
+   icon follows the theme colour regardless of the sidebar material. */
+:root[data-sidebar-material='true'] .rail-item.active {
+  color: var(--on-brand);
+}
+:root[data-sidebar-material='true'] .rail-update-btn {
+  color: var(--fg-2);
+}
+:root[data-sidebar-material='true'] .rail-update-btn:hover {
+  color: var(--fg);
+}
+.rail-glass {
+  display: none;
+}
+:root[data-sidebar-material='true'] .rail-glass {
+  display: block;
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 62px;
+  z-index: 0;
+  border-radius: 0;
+  background-color: var(--glass);
+  background-image: var(--glass-sheen);
+  background-repeat: var(--glass-repeat, no-repeat);
+  background-size: var(--glass-size, auto);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  border-right: 1px solid var(--line);
+}
+.rail-item,
+.rail-spacer,
+.rail-update {
+  position: relative;
+  z-index: 1;
+}
+.rail-spacer {
+  flex: 1;
+}
+
+/* -------------------------------------------------------------- topbar */
+.topbar {
+  position: fixed;
+  left: 64px;
+  right: 0;
+  top: 0;
+  height: 66px;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 8px 0 4px;
+  -webkit-app-region: drag;
+}
+.games {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  -webkit-app-region: no-drag;
+}
+.game-chip {
+  flex: 0 0 auto;
+  width: 46px;
+  height: 46px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 12px;
+  border: 1.5px solid transparent;
+  background: var(--glass-hover);
+  color: var(--chrome-fg);
+  font-weight: 700;
+  font-size: 16px;
+  cursor: pointer;
+  touch-action: none;
+  transition:
+    transform 0.35s cubic-bezier(0.34, 1.4, 0.4, 1),
+    border-color 0.15s var(--ease),
+    box-shadow 0.2s var(--ease);
+  will-change: transform;
+}
+.game-chip img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  -webkit-user-drag: none;
+  user-select: none;
+}
+.game-chip:hover {
+  border-color: var(--line-strong);
+}
+.game-chip.active {
+  border-color: var(--chrome-fg);
+}
+.game-add {
+  flex: 0 0 auto;
+  width: 46px;
+  height: 46px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  border: 1px dashed var(--line-strong);
+  background: transparent;
+  color: var(--chrome-fg);
+  cursor: pointer;
+}
+.game-add:hover {
+  background: var(--glass-hover);
+  border-color: var(--chrome-fg);
+}
+.game-chip[draggable='true'] {
+  cursor: grab;
+}
+.game-chip:active {
+  cursor: grabbing;
+}
+.game-chip.drop-target {
+  border-color: var(--brand);
+  box-shadow: 0 0 0 2px var(--brand-dim);
+}
+.game-chip.dragging {
+  opacity: 1;
+  z-index: 20;
+  cursor: grabbing;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+  transition: none;
+}
+.games-wrap {
+  display: flex;
+  align-items: flex-start;
+  /* Aligns the chips with the rail's home icon (top offset + top alignment). */
+  align-self: flex-start;
+  gap: 0;
+  margin-top: 10px;
+  /* Hover area extends past the capsules' scrollbar so reaching it does not
+     count as leaving the row (which would collapse it again). */
+  padding-bottom: 14px;
+  -webkit-app-region: no-drag;
+}
+.games-collapser {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr;
+  transition:
+    grid-template-columns 0.32s var(--ease),
+    opacity 0.24s var(--ease);
+}
+.games-collapser.collapsed {
+  grid-template-columns: 0fr;
+  opacity: 0;
+  pointer-events: none;
+}
+/* While dragging, don't clip the dragged chip (its large shadow / bulge). */
+.games-collapser > .games:has(.sortable-dragging) {
+  overflow: visible;
+}
+.games-collapser > .games {
+  /* Clip far outside the box so the collapse still hides the row, but leave
+     enough margin for the chips' hover / active shadows (8px 22px ≈ 30px). */
+  overflow: clip;
+  overflow-clip-margin: 32px;
+  min-width: 0;
+}
+.games-toggle {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 46px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--chrome-fg-3);
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+  transition:
+    background 0.15s var(--ease),
+    color 0.15s var(--ease),
+    margin-left 0.32s var(--ease);
+}
+.games-toggle:hover {
+  background: var(--glass-hover);
+  color: var(--chrome-fg);
+}
+/* Collapsed row: keep the expand chevron just right of the rail (it used to be
+   pulled 13 px left, i.e. partly on top of the sidebar). */
+.games-wrap.collapsed .games-toggle {
+  margin-left: 0;
+}
+.topbar-drag {
+  flex: 1;
+  height: 100%;
+}
+.win-controls {
+  display: flex;
+  -webkit-app-region: no-drag;
+}
+.win-btn {
+  width: 44px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--chrome-fg-2);
+  cursor: pointer;
+  font-size: 13px;
+  transition: background 0.12s var(--ease), color 0.12s var(--ease);
+}
+.win-btn:hover {
+  background: var(--glass-hover);
+  color: var(--chrome-fg);
+}
+.win-btn.close:hover {
+  background: var(--error);
+  color: #fff;
+}
+
+/* --------------------------------------------------------------- stage */
+.stage {
+  position: fixed;
+  left: 64px;
+  top: 66px;
+  right: 0;
+  bottom: 0;
+  z-index: 4;
+  overflow: hidden;
+}
+
+/* ---------------------------------------------------------------- home */
+.home {
+  position: absolute;
+  inset: 0;
+}
+.home-info {
+  max-width: 440px;
+  padding: 20px 22px;
+  border-radius: 18px;
+}
+.hi-title {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--fg);
+}
+.hi-sub {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  color: var(--fg-2);
+  font-size: 13px;
+}
+.hi-sub .sep {
+  width: 1px;
+  height: 12px;
+  background: var(--line-strong);
+}
+.hi-stats {
+  margin-top: 14px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--fg);
+  font-size: 13px;
+  cursor: pointer;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.5);
+}
+.hi-stats:hover {
+  color: #cfe0ff;
+}
+.live {
+  color: var(--success);
+}
+
+/* Positionable home modules (see HomeView.tsx). */
+.home-module {
+  position: absolute;
+  z-index: 5;
+  /* max-content: an absolutely-positioned box with `left` set would otherwise
+     shrink-to-fit the space left of the container edge (module got narrower as it
+     was dragged right). */
+  width: max-content;
+  max-width: calc(100% - 8px);
+  will-change: transform;
+  /* Touch must not be taken over as a pan/scroll gesture (else the browser
+     fires `pointercancel` and the drag aborts). */
+  touch-action: none;
+  transition: transform 0.42s cubic-bezier(0.22, 1.4, 0.36, 1);
+}
+.home-module.draggable {
+  cursor: grab;
+}
+.home-module.dragging {
+  cursor: grabbing;
+  transition: none;
+}
+.start-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+/* Pre-download: a small circle inside the launch button's left rounded cap. */
+.pre-wrap {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  /* The cap ring owns the cap: keep it above the themed launch mark (which is
+     centred on it) so progress / pause stay readable. */
+  z-index: 4;
+}
+/* Sits concentrically with the launch pill's left rounded cap (54 px tall). */
+.pre-circle {
+  width: 54px;
+  height: 54px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  position: relative;
+  border-radius: 50%;
+  background: none;
+  /* Pre-download: theme-coloured progress on a light-grey track. */
+  color: var(--brand);
+  --ring-track: rgba(17, 24, 39, 0.14);
+  --ring-track-opacity: 1;
+  cursor: pointer;
+  transition: filter 0.15s var(--ease), transform 0.15s var(--ease);
+}
+/* Game update: white progress on a light-white track (the button is themed). */
+.pre-circle.update-circle {
+  color: #ffffff;
+  --ring-track: rgba(255, 255, 255, 0.5);
+}
+.ring-track {
+  stroke: var(--ring-track, currentColor);
+  stroke-opacity: var(--ring-track-opacity, 0.22);
+}
+/* The cap circles own their colour (theme / white); the global `.ring { --fg }`
+   must not leak into them. The wrapper is a 0-line-height grid so the SVG sits
+   exactly on the circle's centre (an inline span used to be ~2px high). */
+.pre-circle .ring-layer {
+  display: grid;
+  place-items: center;
+  line-height: 0;
+}
+.pre-circle .ring {
+  color: inherit;
+  display: block;
+}
+.pre-ring {
+  display: block;
+}
+.pre-icon,
+.pre-state {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: inherit;
+  pointer-events: none;
+}
+.pre-circle:hover {
+  filter: brightness(1.18);
+}
+.pre-circle:active {
+  transform: scale(0.94);
+}
+.pre-wrap .dl-pop {
+  left: 50%;
+  right: auto;
+  transform: translate(-50%, 4px);
+}
+.pre-wrap:hover .dl-pop {
+  transform: translate(-50%, 0);
+}
+
+.module-controls {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+/* Per-module settings: a caret that expands an inline settings panel. */
+.module-caret {
+  display: grid;
+  place-items: center;
+  padding: 6px;
+  transition: transform 0.2s var(--ease);
+}
+.module-caret.open {
+  transform: rotate(180deg);
+}
+/* Animated reveal (see components/Collapse.tsx): the panel stays mounted and
+   animates its height (0fr → 1fr). No inner padding while closed so it fully
+   collapses (nothing leaks out). */
+.collapse {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.26s var(--ease);
+}
+.collapse.open {
+  grid-template-rows: 1fr;
+}
+/* One 3px vertical line down the whole drawer, inset from the left, coloured
+   with the current text colour; rows keep a gap to its right. */
+.collapse-inner {
+  position: relative;
+  overflow: hidden;
+  min-height: 0;
+}
+.collapse-inner::before {
+  content: '';
+  position: absolute;
+  left: 7px;
+  top: 6px;
+  bottom: 6px;
+  width: 1.5px;
+  border-radius: 2px;
+  background: currentColor;
+}
+.collapse-inner .settings-row {
+  padding-left: 22px;
+  padding-right: 18px;
+}
+.collapse-inner .input {
+  width: min(320px, 46vw);
+}
+/* Inside a collapse the settings group is a plain list (no rounded card), so it
+   matches the info-card section and shares the same control darkening. */
+.collapse-inner .settings {
+  border: none;
+  border-radius: 0;
+  background: none;
+  background-image: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  overflow: visible;
+}
+.playtime-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 13px 20px;
+  border-radius: 999px;
+  color: var(--fg);
+  font-size: 14px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.start-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px 44px;
+  border: none;
+  border-radius: 999px;
+  background: #fff;
+  color: #16181d;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: background 0.15s var(--ease);
+}
+.start-btn:hover {
+  background: #e9edf3;
+}
+.start-btn.stop {
+  background: var(--error);
+  color: #fff;
+}
+.start-btn.stop:hover {
+  background: #e34b50;
+}
+.start-btn.update {
+  background: #f5a623;
+  color: #1a1400;
+}
+.start-btn.update:hover {
+  background: #ffb63d;
+}
+.gear-btn {
+  width: 50px;
+  height: 50px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  color: var(--fg);
+  cursor: pointer;
+}
+.gear-btn:hover {
+  background: var(--glass-hover);
+}
+
+/* ------------------------------------------------------------------ page */
+.page {
+  position: absolute;
+  inset: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  padding: 11px 30px 30px;
+}
+.page-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line-strong);
+}
+.page-title {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--chrome-fg);
+}
+.page-subtitle {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: var(--chrome-fg-3);
+}
+.page-actions {
+  display: flex;
+  gap: 8px;
+}
+.page-body {
+  padding-top: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* ---------------------------------------------------------------- panels */
+.panel {
+  background: var(--glass);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+}
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--line);
+}
+.panel-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.panel-body {
+  padding: 18px;
+}
+
+/* ---------------------------------------------------------------- stats */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+}
+.stat-card {
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--glass);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+}
+.stat-value {
+  font-size: 30px;
+  font-weight: 700;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+}
+.stat-label {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--fg-3);
+}
+
+/* ---------------------------------------------------------------- pity */
+.pity-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+}
+.pity-card {
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--glass);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.pity-banner {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.pity-rows {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+.pity-row {
+  padding-top: 8px;
+  border-top: 2px solid rgba(255, 255, 255, 0.6);
+}
+.pity-row.second {
+  border-top-color: var(--line-strong);
+}
+.pity-tier {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-3);
+}
+.pity-count {
+  font-size: 30px;
+  font-weight: 700;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+}
+.pity-unit {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--fg-3);
+  margin-left: 4px;
+}
+.pity-last {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--fg-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------------ list */
+.list {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--glass);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+}
+.list-row {
+  display: grid;
+  grid-template-columns: 64px 1fr 170px 116px 150px;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 18px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  font-size: 14px;
+}
+.list-row:last-child {
+  border-bottom: none;
+}
+.list-row:not(.list-head):hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+.list-head {
+  border-bottom: 1px solid var(--line-strong);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-3);
+}
+.rank {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.rank-top {
+  color: var(--r-top);
+}
+.rank-second {
+  color: var(--r-second);
+}
+.rank-third {
+  color: var(--r-third);
+}
+.cell-main {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+}
+.cell-banner {
+  min-width: 0;
+  color: var(--fg-3);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cell-time {
+  text-align: right;
+  color: var(--fg-3);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.cell-pity {
+  text-align: right;
+  color: var(--fg-2);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --------------------------------------------------------------- empty */
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 60px 20px;
+  color: var(--fg-3);
+  text-align: center;
+}
+.empty-icon {
+  width: 60px;
+  height: 60px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  font-size: 24px;
+  color: var(--brand);
+  background: var(--brand-dim);
+}
+.empty-title {
+  color: var(--fg-2);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+/* ------------------------------------------------------------ settings */
+.settings {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--glass);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+}
+.settings-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  min-height: 64px;
+  padding: 12px 18px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.settings-row:last-child {
+  border-bottom: none;
+}
+.settings-main {
+  min-width: 0;
+}
+.settings-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.settings-desc {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--fg-3);
+  word-break: break-all;
+}
+.settings-action {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+/* Controls keep their natural size; only inline editors are width-bounded. */
+.settings-action > * {
+  flex: 0 0 auto;
+}
+.settings-action .inline-edit {
+  max-width: 42vw;
+  justify-content: flex-end;
+}
+.settings-action .inline-edit.wide {
+  max-width: 52vw;
+}
+/* Keep the dropdown wide enough inside settings rows. */
+.settings-action .select-box {
+  min-width: 200px;
+}
+/* A right-aligned field right-aligns its text / placeholder too. */
+.settings-action .inline-edit-text {
+  text-align: right;
+}
+.settings-action .inline-edit-input {
+  text-align: right;
+}
+/* Card-layout method header: grip + number + name inline. */
+.method-head-inline {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+/* --------------------------------------------------------------- modal */
+.modal-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  /* Light veil only (no blur) so the dialog's own backdrop-filter shows the
+     actual wallpaper, not a greyed/blurred mask. */
+  background: rgba(6, 8, 12, 0.26);
+  animation: maskIn 0.18s var(--ease) both;
+}
+@keyframes maskIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.modal-mask.closing {
+  animation: maskOut 0.18s var(--ease) both;
+}
+@keyframes maskOut {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+.modal.closing {
+  animation: popOut 0.18s var(--ease) both;
+}
+@keyframes popOut {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.55);
+  }
+}
+.modal {
+  width: min(640px, 92vw);
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  /* Lower opacity than `--glass-2` so the *current* background shows through the
+     material (not a flat grey fill). */
+  background-color: var(--glass);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  border: 1px solid var(--line-strong);
+  border-radius: 16px;
+  overflow: hidden;
+  /* Expand-in / collapse back to where the dialog was OPENED (snapshotted onto
+     the modal as --open-dx/--open-dy); dialogs without a clear origin stay
+     centred. */
+  transform-origin: calc(50% + var(--open-dx, 0px)) calc(50% + var(--open-dy, 0px));
+  animation: popIn 0.24s cubic-bezier(0.22, 1.4, 0.36, 1) both;
+}
+@keyframes popIn {
+  from {
+    opacity: 0;
+    transform: scale(0.55);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 22px;
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+.modal-header h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.modal-close {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg-3);
+  cursor: pointer;
+}
+.modal-close:hover {
+  background: var(--glass-hover);
+  color: var(--fg);
+}
+.modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+/* Cards keep their content height so the body scrolls instead of shrinking and
+   clipping them. */
+.modal-body > * {
+  flex: 0 0 auto;
+}
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 14px 22px;
+  border-top: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+
+/* Dialog buttons share the frosted "card" look of the gacha panels. */
+.modal .btn {
+  height: 38px;
+  padding: 0 20px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--glass);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  box-shadow:
+    0 8px 22px rgba(0, 0, 0, 0.25),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  transition:
+    background 0.15s var(--ease),
+    border-color 0.15s var(--ease),
+    box-shadow 0.2s var(--ease);
+}
+.modal .btn:hover {
+  background: var(--glass-hover);
+  border-color: var(--line-strong);
+  box-shadow:
+    0 10px 26px rgba(0, 0, 0, 0.32),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+.modal .btn.primary {
+  background: var(--brand);
+  border-color: transparent;
+  box-shadow:
+    0 10px 26px rgba(55, 120, 229, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.25);
+}
+.modal .btn.primary:hover {
+  background: var(--brand-hover);
+}
+.modal .btn.ghost {
+  background: var(--glass);
+  border-color: var(--line);
+}
+.modal .btn.ghost:hover {
+  background: var(--glass-hover);
+}
+.modal .btn.danger {
+  background: rgba(255, 90, 95, 0.1);
+  border-color: rgba(255, 90, 95, 0.5);
+  color: var(--error);
+}
+.modal .btn.danger:hover {
+  background: var(--error);
+  color: #fff;
+}
+.modal .btn.sm {
+  height: 32px;
+  padding: 0 14px;
+}
+.form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+/* ----------------------------------------------------------- descriptions */
+.desc {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: 0;
+  font-size: 14px;
+}
+.desc dt,
+.desc dd {
+  padding: 11px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.desc dt {
+  color: var(--fg-3);
+  font-size: 12px;
+}
+.desc dd {
+  margin: 0;
+  color: var(--fg);
+  word-break: break-all;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --------------------------------------------------------------- media */
+.media-preview {
+  width: 60px;
+  height: 60px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 14px;
+  background: var(--glass-hover);
+  border: 1px solid var(--line);
+  color: var(--fg);
+  font-weight: 700;
+  font-size: 18px;
+  flex-shrink: 0;
+}
+.media-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.media-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+/* --------------------------------------------------------------- chart */
+.chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 150px;
+}
+.chart-col {
+  flex: 1;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.chart-bar {
+  width: 100%;
+  display: flex;
+  align-items: flex-end;
+  flex: 1;
+}
+.chart-fill {
+  width: 100%;
+  min-height: 2px;
+  border-radius: 3px 3px 0 0;
+  background: var(--brand);
+}
+.chart-label {
+  font-size: 10px;
+  color: var(--fg-4);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --------------------------------------------------------------- toast */
+/* The dialog layer re-renders its own wallpaper so the dialog material renders
+   over the real background (see components/ModalBackdrop.tsx). */
+/* Full-window launch transition (see components/LaunchTransition.tsx). */
+.launch-fx {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 85;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.12s linear;
+}
+.launch-fx.on {
+  opacity: 1;
+}
+.launch-shatter {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  overflow: hidden;
+  pointer-events: none;
+}
+.launch-shatter-void {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background: radial-gradient(
+    circle at var(--ox, 50%) var(--oy, 50%),
+    #070b16,
+    #02040a 72%
+  );
+}
+.launch-intact {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background-repeat: no-repeat;
+  pointer-events: none;
+}
+.launch-shards {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  overflow: hidden;
+}
+.launch-shard {
+  position: absolute;
+  display: block;
+  background-color: #05070f;
+  background-repeat: no-repeat;
+  transform-origin: center;
+  will-change: transform, opacity;
+}
+.launch-singularity {
+  position: absolute;
+  z-index: 2;
+  width: 0;
+  height: 0;
+  transform: translate(-50%, -50%);
+}
+.launch-atom {
+  position: absolute;
+  z-index: 3;
+  width: 88px;
+  height: 88px;
+  margin: -44px 0 0 -44px;
+  transform-origin: center;
+  filter: drop-shadow(0 0 16px rgba(139, 92, 246, 0.9));
+  animation: launch-atom-devour 0.9s cubic-bezier(0.42, 0, 0.72, 1) forwards;
+}
+/* Gravitational-lens swirl around the atom: concentric rotating light rings
+   masked into a thin annulus, so the shards appear to twist into the nucleus. */
+.launch-distortion {
+  position: absolute;
+  z-index: 2;
+  width: 300px;
+  height: 300px;
+  margin: -150px 0 0 -150px;
+  border-radius: 50%;
+  pointer-events: none;
+  mix-blend-mode: screen;
+  opacity: 0.9;
+  transform-origin: center;
+  background:
+    repeating-conic-gradient(
+      from 0deg,
+      rgba(196, 181, 253, 0.42) 0deg 3deg,
+      transparent 3deg 15deg
+    ),
+    radial-gradient(circle, transparent 0 32%, rgba(139, 92, 246, 0.22) 42%, transparent 70%);
+  -webkit-mask: radial-gradient(
+    circle,
+    transparent 0 25%,
+    #000 33%,
+    #000 61%,
+    transparent 73%
+  );
+  mask: radial-gradient(circle, transparent 0 25%, #000 33%, #000 61%, transparent 73%);
+  filter: blur(1.1px) drop-shadow(0 0 16px rgba(139, 92, 246, 0.7));
+  animation: launch-warp 0.9s ease-out forwards;
+}
+.launch-distortion::before,
+.launch-distortion::after {
+  content: '';
+  position: absolute;
+  border-radius: 50%;
+  pointer-events: none;
+}
+.launch-distortion::before {
+  inset: 23%;
+  border: 1px solid rgba(125, 211, 252, 0.48);
+  border-style: dashed;
+  animation: launch-warp-spin 3.2s linear infinite reverse;
+}
+.launch-distortion::after {
+  inset: 35%;
+  border: 1px solid rgba(245, 212, 138, 0.35);
+  animation: launch-warp-spin 2.1s linear infinite;
+}
+@keyframes launch-warp {
+  0% {
+    transform: scale(0.35) rotate(0deg);
+    opacity: 0;
+  }
+  25% {
+    opacity: 0.95;
+  }
+  70% {
+    transform: scale(1.35) rotate(90deg);
+    opacity: 0.75;
+  }
+  100% {
+    transform: scale(1.85) rotate(150deg);
+    opacity: 0;
+  }
+}
+@keyframes launch-warp-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.launch-atom .atom-halo,
+.launch-atom .atom-shield-frame {
+  display: none;
+}
+@keyframes launch-atom-devour {
+  0% {
+    transform: scale(0.98);
+    opacity: 0;
+  }
+  10% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  55% {
+    transform: scale(1.04);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1.04);
+    opacity: 1;
+  }
+}
+.sing-core {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 16vmin;
+  height: 16vmin;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  background: radial-gradient(
+    circle,
+    #fff 0 14%,
+    #dff6ff 28%,
+    #9ed9ff 46%,
+    #8b7cf6 68%,
+    rgba(139, 124, 246, 0) 74%
+  );
+  box-shadow:
+    0 0 28px rgba(159, 220, 255, 0.9),
+    0 0 80px rgba(139, 124, 246, 0.55);
+  animation: sing-bloom 1.55s cubic-bezier(0.2, 0.7, 0.2, 1) forwards;
+}
+.sing-ring {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 34vmin;
+  height: 34vmin;
+  border-radius: 50%;
+  border: 1px solid rgba(196, 181, 253, 0.75);
+  transform: translate(-50%, -50%) scale(0.1);
+  opacity: 0;
+  animation: sing-ring 1.42s cubic-bezier(0.2, 0.7, 0.2, 1) forwards;
+}
+.sing-ring-b {
+  width: 22vmin;
+  height: 22vmin;
+  border-color: rgba(125, 211, 252, 0.85);
+  border-style: dashed;
+  animation-delay: 0.08s;
+  animation-direction: reverse;
+}
+.launch-burst .launch-shard {
+  filter: brightness(1.18) saturate(1.15);
+}
+.launch-burst-canvas {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  width: 100%;
+  height: 100%;
+}
+.launch-shatter-flash {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  background: radial-gradient(
+    circle at var(--ox, 50%) var(--oy, 50%),
+    rgba(255, 255, 255, 0.95),
+    rgba(255, 255, 255, 0) 62%
+  );
+  opacity: 0;
+  animation: shatter-flash 0.3s 0.45s ease-out forwards;
+}
+@keyframes sing-bloom {
+  0% {
+    transform: translate(-50%, -50%) scale(0.04);
+    opacity: 0;
+  }
+  35% {
+    opacity: 1;
+  }
+  100% {
+    transform: translate(-50%, -50%) scale(1.3);
+    opacity: 0;
+  }
+}
+@keyframes sing-ring {
+  0% {
+    transform: translate(-50%, -50%) scale(0.08) rotate(0deg);
+    opacity: 0;
+  }
+  30% {
+    opacity: 0.9;
+  }
+  100% {
+    transform: translate(-50%, -50%) scale(1.45) rotate(140deg);
+    opacity: 0;
+  }
+}
+@keyframes shatter-flash {
+  0% {
+    opacity: 0;
+  }
+  30% {
+    opacity: 0.55;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+.modal-mask > .modal {
+  position: relative;
+  z-index: 1;
+}
+
+/* Toast host: stacks multiple toasts (see components/toast.tsx). */
+.toast-stack {
+  position: fixed;
+  top: 78px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 80;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+}
+.toast {
+  position: static;
+  cursor: pointer;
+  pointer-events: auto;
+  padding: 10px 18px;
+  border-radius: 10px;
+  border: 1px solid var(--line-strong);
+  background-color: var(--glass-2);
+  background-image: var(--glass-sheen);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  box-shadow: var(--glass-rim);
+  font-size: 13px;
+  color: var(--fg);
+  animation: glassPopIn 0.18s cubic-bezier(0.22, 1.3, 0.36, 1) both;
+}
+.toast.closing {
+  animation: glassPopOut 0.17s var(--ease) both;
+}
+.select-menu.closing {
+  animation: glassPopOut 0.15s var(--ease) both;
+}
+/* Whole-page overlays (installer / uninstaller / gallery viewer) fade+scale in. */
+.setup,
+.viewer {
+  animation: overlayIn 0.24s var(--ease) both;
+}
+@keyframes overlayIn {
+  from {
+    opacity: 0;
+    transform: scale(0.99);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes glassPopOut {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.9) translateY(-4px);
+  }
+}
+
+/* --------------------------------------------------------------- welcome */
+.welcome {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 40px 48px;
+  border-radius: 20px;
+  text-align: center;
+}
+.welcome-logo {
+  width: 72px;
+  height: 72px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 20px;
+  background: var(--brand);
+  color: var(--on-brand);
+  font-size: 34px;
+  font-weight: 800;
+}
+.welcome-logo img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.welcome h2 {
+  margin: 4px 0 0;
+  font-size: 22px;
+  color: var(--fg);
+}
+.welcome p {
+  margin: 0 0 8px;
+  color: var(--fg-2);
+}
+
+/* --------------------------------------------------------------- buttons */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 16px;
+  /* Same frosted glass fill as the cards, so buttons track the current
+     material (blur/refraction …) too. */
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--glass);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  color: var(--fg);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  transition:
+    background 0.12s var(--ease),
+    border-color 0.12s var(--ease),
+    transform 0.12s var(--ease);
+}
+.btn:hover {
+  background: var(--glass-hover);
+  border-color: var(--line-strong);
+}
+/* Press feedback (a small zoom, à la the liquid-glass demos). */
+.btn:active {
+  transform: scale(0.96);
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.btn.primary {
+  border-color: var(--brand);
+  background: var(--brand);
+  color: var(--on-brand);
+}
+.btn.primary:hover {
+  background: var(--brand-hover);
+  border-color: var(--brand-hover);
+}
+.btn.danger {
+  border-color: rgba(255, 90, 95, 0.6);
+  background: transparent;
+  color: var(--error);
+}
+.btn.danger:hover {
+  background: var(--error);
+  color: #fff;
+}
+.btn.ghost {
+  border-color: transparent;
+  /* Frosted glass fill like the cards (never the theme colour). */
+  background: var(--glass);
+  color: var(--fg-2);
+}
+.btn.ghost:hover {
+  background: var(--glass-hover);
+  color: var(--fg);
+}
+.btn.sm {
+  height: 28px;
+  padding: 0 12px;
+  font-size: 12px;
+}
+/* Keep text/glyphs optically centred in every button-like control. */
+.win-btn,
+.seg,
+.games-toggle,
+.game-chip,
+.game-add,
+.rail-item,
+.gear-btn,
+.playtime-pill,
+.start-btn,
+.modal-close {
+  line-height: 1;
+}
+
+/* ------------------------------------------------------- segmented control */
+.segmented {
+  position: relative;
+  display: inline-flex;
+  gap: 3px;
+  padding: 3px;
+  touch-action: none;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  /* A card-style glass surface (same tokens as `.glass`), so the row reads as
+     part of the material rather than a flat veil. */
+  background-color: var(--glass);
+  background-image: var(--glass-sheen);
+  background-repeat: var(--glass-repeat, no-repeat);
+  background-size: var(--glass-size, auto);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  box-shadow: var(--glass-rim);
+}
+.seg {
+  position: relative;
+  z-index: 1;
+  height: 28px;
+  padding: 0 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--fg-2);
+  font-size: 12px;
+  cursor: pointer;
+  transition: color 0.15s var(--ease);
+}
+.seg:hover {
+  color: var(--fg);
+}
+.seg.active {
+  color: var(--on-brand);
+}
+/* Sliding highlight (see components/Segmented.tsx): a themed pill for the active
+   option, on top of the control's card-glass surface. Its label uses `--on-brand`
+   (black or white, chosen from the theme colour). */
+.seg-thumb,
+.tab-thumb {
+  position: absolute;
+  left: 0;
+  z-index: 0;
+  background: var(--brand);
+  pointer-events: none;
+  /* `transform` is driven by useJelly (springs); only width transitions here. */
+  transition: width 0.28s var(--ease);
+}
+.seg-thumb {
+  top: 3px;
+  bottom: 3px;
+  border-radius: 7px;
+}
+
+/* --------------------------------------------------------------- slider */
+.slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 190px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--line-strong);
+  outline: none;
+  cursor: pointer;
+}
+.slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--brand);
+  border: 2px solid var(--on-brand);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+  transition:
+    transform 0.28s cubic-bezier(0.22, 1.5, 0.36, 1),
+    box-shadow 0.15s var(--ease);
+}
+.slider:hover::-webkit-slider-thumb {
+  transform: scale(1.2);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.5);
+}
+.slider:active::-webkit-slider-thumb {
+  transform: scale(1.35);
+}
+.slider::-webkit-slider-thumb:hover {
+  background: var(--brand-hover);
+}
+
+/* ----------------------------------------------------------------- tabs */
+.tabs {
+  position: relative;
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  touch-action: none;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background-color: var(--glass);
+  background-image: var(--glass-sheen);
+  background-repeat: var(--glass-repeat, no-repeat);
+  background-size: var(--glass-size, auto);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  box-shadow: var(--glass-rim);
+}
+.tab {
+  position: relative;
+  z-index: 1;
+  height: 34px;
+  padding: 0 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--fg-2);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 0.15s var(--ease);
+}
+.tab:hover {
+  color: var(--fg);
+}
+.tab.active {
+  color: var(--on-brand);
+}
+.tab-thumb {
+  top: 4px;
+  bottom: 4px;
+  border-radius: 9px;
+}
+/* Settings tab switch: the same translate-only transition as the top views.
+   No `opacity` (it flashes the glass card's backdrop-filter) and the panel
+   element is stable, so repeated switching cannot leave a compositing offset. */
+.tab-anim-run {
+  animation: tab-slide 0.32s cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes tab-slide {
+  from {
+    transform: translateX(var(--tab-x, 26px));
+  }
+  to {
+    transform: none;
+  }
+}
+
+/* ------------------------------------------------------ launcher settings */
+.launcher-brand {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 20px 22px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.launcher-icon {
+  flex: 0 0 auto;
+  width: 112px;
+  height: 112px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 22px;
+  background: var(--brand);
+  color: var(--on-brand);
+  font-size: 44px;
+  font-weight: 800;
+  cursor: pointer;
+  transition: border-color 0.15s var(--ease);
+}
+.launcher-icon:hover {
+  border-color: var(--fg);
+}
+.launcher-icon img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.launcher-icon.has-image {
+  border-color: transparent;
+  background: transparent;
+}
+.launcher-brand-side {
+  min-width: 0;
+}
+.font-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 8px;
+  padding: 14px 18px;
+  max-height: 320px;
+  overflow-y: auto;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.font-item {
+  height: 42px;
+  padding: 0 14px;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--fg);
+  font-size: 14px;
+  cursor: pointer;
+  transition:
+    background 0.15s var(--ease),
+    border-color 0.15s var(--ease);
+}
+.font-item:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+.font-item.active {
+  border-color: var(--brand);
+  box-shadow: 0 0 0 1px var(--brand);
+}
+.font-empty {
+  grid-column: 1 / -1;
+  padding: 10px 2px;
+  color: var(--fg-3);
+  font-size: 13px;
+}
+.sm-input {
+  width: 240px;
+}
+.env-input {
+  width: 280px;
+  min-height: 64px;
+  padding: 8px 10px;
+  resize: vertical;
+  font-family: ui-monospace, "Consolas", monospace;
+  font-size: 12px;
+}
+
+/* ------------------------------------------------------------ crop dialog */
+.crop-stage {
+  position: relative;
+  overflow: hidden;
+  margin: 0 auto;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.5);
+  touch-action: none;
+  cursor: grab;
+}
+.crop-img {
+  position: absolute;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+.crop-box {
+  position: absolute;
+  box-sizing: border-box;
+  border: 2px solid #ffffff;
+  border-radius: 4px;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+}
+.crop-zoom {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+  font-size: 12px;
+  color: var(--fg-3);
+}
+.crop-zoom .slider {
+  flex: 1;
+  width: auto;
+}
+.crop-hint {
+  margin-top: 8px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--fg-3);
+}
+
+/* ---------------------------------------------------------------- inputs */
+.input,
+.select {
+  width: 100%;
+  height: 34px;
+  padding: 0 11px;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  background: var(--field-bg);
+  color: var(--fg);
+  font-size: 14px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.12s var(--ease);
+}
+.input::placeholder {
+  color: var(--fg-4);
+}
+.input:focus,
+.select:focus {
+  border-color: var(--brand);
+}
+/* Keep the browse button the same height as the input beside it. */
+.row .btn {
+  height: 34px;
+}
+.select {
+  cursor: pointer;
+}
+.select option {
+  color: #16181d;
+}
+
+/* ----------------------------------------------------------- custom select */
+.select-box {
+  position: relative;
+  width: 100%;
+}
+.select-trigger {
+  width: 100%;
+  height: 34px;
+  padding: 0 11px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  background: var(--field-bg);
+  color: var(--fg);
+  font-size: 14px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: border-color 0.12s var(--ease);
+}
+.select-trigger:hover {
+  border-color: var(--brand-line);
+}
+.select-trigger.open {
+  border-color: var(--brand);
+}
+.select-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.select-caret {
+  flex: 0 0 auto;
+  color: var(--fg-3);
+  font-size: 11px;
+}
+.select-menu {
+  position: fixed;
+  z-index: 60;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--glass-2);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+  animation: selectIn 0.14s var(--ease);
+}
+@keyframes selectIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.select-option {
+  height: 36px;
+  padding: 0 10px;
+  display: flex;
+  align-items: center;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg);
+  font-size: 14px;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s var(--ease);
+}
+.select-option-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.select-option:hover {
+  background: var(--glass-hover);
+}
+.select-option.active {
+  background: var(--brand);
+  color: var(--on-brand);
+}
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.label {
+  font-size: 13px;
+  color: var(--fg-2);
+}
+.label .req {
+  color: var(--error);
+  margin-left: 3px;
+}
+.field-hint {
+  font-size: 12px;
+  color: var(--fg-3);
+}
+.row {
+  display: flex;
+  gap: 8px;
+}
+.row .input {
+  flex: 1;
+}
+.checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: var(--fg);
+  cursor: pointer;
+}
+.checkbox input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--brand);
+}
+
+.error {
+  color: var(--error);
+  font-size: 13px;
+}
+.hint {
+  font-size: 12px;
+  color: var(--fg-3);
+}
+
+/* ----------------------------------------------------------- gacha pools */
+.pools-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+/* Over the game background (not inside a glass card) → theme-colour foreground. */
+.pools-bar .panel-title {
+  color: var(--chrome-fg);
+}
+.gacha-progress {
+  font-size: 12px;
+  color: var(--chrome-fg-2);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Download progress row (ring + percent + speed/size + ETA) on the update page */
+.dl-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+.dl-row-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.dl-row-percent {
+  font-size: 22px;
+  font-weight: 800;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+.dl-row-sub {
+  font-size: 12px;
+  color: var(--fg-3);
+  font-variant-numeric: tabular-nums;
+}
+.dl-row-eta {
+  font-size: 13px;
+  color: var(--fg-2);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Non-blocking notification shown while gacha records are being fetched. */
+.gacha-toast {
+  position: fixed;
+  top: 78px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 18px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--glass-2);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.4);
+  color: var(--fg);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  animation: toastIn 0.18s var(--ease);
+}
+.gacha-toast-spinner {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  border: 2px solid var(--brand-line);
+  border-top-color: var(--brand);
+  animation: gachaSpin 0.8s linear infinite;
+}
+@keyframes gachaSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.pools {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  overflow-x: auto;
+  /* space so card shadows are not clipped by the scroll container */
+  padding: 2px 2px 30px;
+}
+.pool-col {
+  flex: 0 0 auto;
+  width: 260px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--glass);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  overflow: hidden;
+}
+.pool-col-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line);
+}
+.pool-col-name {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pool-col-count {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--fg-3);
+  font-variant-numeric: tabular-nums;
+}
+.pool-pity {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pool-pity-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.pp-tier {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-3);
+}
+.pp-val {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+.pool-records {
+  display: flex;
+  flex-direction: column;
+}
+.pool-row {
+  display: grid;
+  grid-template-columns: 44px 1fr 40px;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  font-size: 13px;
+}
+.pool-row:last-child {
+  border-bottom: none;
+}
+.pool-row:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+.pool-row-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+}
+.pool-row-pity {
+  text-align: right;
+  color: var(--fg-3);
+  font-variant-numeric: tabular-nums;
+}
+.pool-empty {
+  padding: 18px 14px;
+  text-align: center;
+  color: var(--fg-3);
+  font-size: 12px;
+}
+
+/* Content slides; the rail / topbar stay visually still via a counter-animation
+   so backdrop-filter keeps working without a flicker. The wallpaper layers sit
+   outside `.app-anim` (see App.tsx) so the full-window background is not
+   re-composited on every frame of the slide. */
+.app-anim {
+  position: absolute;
+  inset: 0;
+}
+.app-anim-run {
+  animation: appIn 0.32s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.app-anim-run .rail,
+.app-anim-run .topbar {
+  animation: appCounter 0.32s cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes appIn {
+  from {
+    transform: translateX(var(--anim-x, 26px));
+  }
+  to {
+    transform: none;
+  }
+}
+@keyframes appCounter {
+  from {
+    transform: translateX(calc(var(--anim-x, 26px) * -1));
+  }
+  to {
+    transform: none;
+  }
+}
+
+/* ------------------------------------------------------------- switch */
+.switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--fg-2);
+}
+.switch.disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.switch-track {
+  position: relative;
+  flex: 0 0 auto;
+  width: 38px;
+  height: 22px;
+  border-radius: 999px;
+  background: var(--field-bg);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  cursor: pointer;
+  touch-action: none;
+  outline: none;
+  transition: background 0.2s var(--ease);
+}
+.switch-track[data-on='true'] {
+  background: var(--brand);
+}
+.switch-track:focus-visible {
+  box-shadow: 0 0 0 2px var(--brand-line);
+}
+.switch-knob {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  /* Centred by construction: no manual `top`, so a border or a height change
+     can never push the knob slightly down. */
+  margin-block: auto;
+  border-radius: 999px;
+  background: var(--on-brand);
+  /* A downward drop shadow made the knob read as sitting ~1-2 px low. */
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+  /* transform (position + jelly pop) is driven by useJelly. */
+  transition: width 0.18s var(--ease), height 0.18s var(--ease);
+}
+/* iOS-style: the knob stretches while being dragged — wider *and* taller, so it
+   bulges both horizontally and vertically (fills the track's height). */
+/* Very restrained drag deformation (knob barely grows). */
+.switch-track[data-dragging='true'] .switch-knob {
+  width: 17px;
+  height: 16.5px;
+}
+.switch-track:active .switch-knob {
+  filter: brightness(1.02);
+}
+
+/* -------------------------------------------------------- color picker */
+/* In-app, glass-aware picker (the OS <input type="color"> dialog cannot be
+   themed). Trigger swatch + a floating popup of sliders and presets. */
+.color-trigger {
+  width: 42px;
+  height: 28px;
+  padding: 3px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--field-bg);
+  cursor: pointer;
+}
+.color-trigger-fill {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 5px;
+}
+/* Colour editor — react-colorful inside a glass popup (follows the material). */
+.color-popup {
+  width: 240px;
+}
+.color-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.color-editor .react-colorful {
+  width: 100%;
+  height: 168px;
+  border-radius: 10px;
+}
+.color-editor .react-colorful__saturation {
+  border-radius: 10px 10px 0 0;
+  border-bottom: none;
+}
+.color-editor .react-colorful__hue {
+  height: 18px;
+  border-radius: 0 0 10px 10px;
+}
+.color-editor .react-colorful__pointer {
+  width: 18px;
+  height: 18px;
+  border-width: 2px;
+}
+.color-editor-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.color-preview {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+}
+.color-text {
+  flex: 1;
+  min-width: 0;
+}
+.color-presets {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 6px;
+}
+.color-swatch {
+  width: 100%;
+  aspect-ratio: 1;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+/* ----------------------------------------------------------- gallery */
+.gallery-grid {
+  /* Masonry container: tiles are absolutely positioned by GalleryView (each
+     placed into the shortest column, in order), so only the height is set. */
+  position: relative;
+}
+.gallery-thumb {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--glass);
+  cursor: pointer;
+  break-inside: avoid;
+  content-visibility: auto;
+  contain-intrinsic-size: 220px 150px;
+  transition: border-color 0.12s var(--ease), transform 0.12s var(--ease);
+}
+.gallery-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.gallery-thumb:hover {
+  border-color: var(--brand-line);
+}
+.thumb-skeleton {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.06) 0%,
+    rgba(255, 255, 255, 0.14) 50%,
+    rgba(255, 255, 255, 0.06) 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.3s linear infinite;
+}
+@keyframes shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+/* ----------------------------------------------------------- update */
+.update-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.progress {
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  background: var(--brand);
+  transition: width 0.2s var(--ease);
+}
+.update-progress-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--fg-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ----------------------------------------------------------- viewer */
+.viewer {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: #0b0d12;
+}
+/* The self-update dialog has no clear click origin → expand from the centre. */
+.update-modal {
+  transform-origin: center center !important;
+}
+
+.viewer-bar {
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 8px 0 14px;
+  -webkit-app-region: drag;
+  background: rgba(18, 20, 26, 0.7);
+  border-bottom: 1px solid var(--line);
+}
+.viewer-name {
+  font-size: 13px;
+  color: var(--fg-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.viewer-actions {
+  display: flex;
+  -webkit-app-region: no-drag;
+}
+.viewer-stage {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  padding: 12px;
+}
+.viewer-img {
+  transform-origin: center center;
+  will-change: transform;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+/* Circular prev/next buttons: fixed gaussian blur + jelly press. `top` uses a
+   calc (not translateY) so the press-jelly `transform: scale()` doesn't fight it. */
+.viewer-nav {
+  position: absolute;
+  top: calc(50% - 28px);
+  width: 56px;
+  height: 56px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: rgba(20, 20, 24, 0.32);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  color: #ffffff;
+  font-size: 36px;
+  line-height: 1;
+  padding-bottom: 4px;
+  cursor: pointer;
+  z-index: 2;
+  transition:
+    opacity 0.25s var(--ease),
+    background 0.15s var(--ease);
+}
+.viewer-nav.prev {
+  left: 16px;
+}
+.viewer-nav.next {
+  right: 16px;
+}
+.viewer-nav:hover {
+  background: rgba(40, 40, 46, 0.5);
+}
+/* Fade out after the pointer is idle (see Viewer.tsx). */
+.viewer-nav.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* =========================================================================
+   Visual polish
+   ========================================================================= */
+
+body {
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+/* Text fields already get a ring from their focus style — avoid a double outline. */
+.input:focus-visible,
+.select:focus-visible,
+textarea:focus-visible {
+  outline: none;
+}
+
+/* Frosted panels get a soft elevation and a hairline top highlight. */
+.panel,
+.settings,
+.list,
+.pool-col,
+.stat-card,
+.glass,
+.pt-card,
+.modal {
+  box-shadow:
+    0 12px 34px rgba(0, 0, 0, 0.3),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+/* ---------- buttons ---------- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  height: 36px;
+  border-radius: 10px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  transition:
+    background 0.15s var(--ease),
+    border-color 0.15s var(--ease),
+    box-shadow 0.15s var(--ease);
+}
+.btn.primary {
+  background: var(--brand);
+}
+.btn.primary:hover {
+  background: var(--brand-hover);
+}
+.btn.sm {
+  height: 30px;
+  border-radius: 8px;
+}
+
+/* ---------- rail ---------- */
+.rail-item {
+  transition:
+    background 0.15s var(--ease),
+    color 0.15s var(--ease);
+}
+.rail-item.active {
+  /* The themed thumb provides the background now; the icon follows the theme
+     colour (black or white), not the wallpaper. */
+  color: var(--on-brand);
+}
+
+/* ---------- top game switcher ---------- */
+.game-chip:hover {
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
+}
+.game-chip.active {
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.4);
+}
+
+/* ---------- home ---------- */
+.hero-title {
+  font-size: 32px;
+  letter-spacing: -0.02em;
+}
+.home-info,
+.playtime-pill {
+  background: var(--glass-overlay);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  border: 1px solid var(--line);
+  box-shadow:
+    0 10px 30px rgba(0, 0, 0, 0.3),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+.playtime-pill,
+.start-btn {
+  height: 54px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.playtime-pill {
+  padding: 0 22px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  color: var(--fg);
+}
+.playtime-pill:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+/* Start button: subtle theme glow + a white reflection that sweeps on hover. */
+.start-btn {
+  --glow: var(--brand);
+  position: relative;
+  overflow: hidden;
+  /* Fixed width so every state (启动 / 开始更新 / 停止 / 进度) keeps the same
+     footprint and the home modules never shift. */
+  width: 138px;
+  box-sizing: border-box;
+  padding: 0;
+  background: #ffffff;
+  letter-spacing: 0.16em;
+  box-shadow:
+    0 12px 30px rgba(0, 0, 0, 0.34),
+    0 0 8px -3px var(--glow);
+  transition:
+    box-shadow 0.25s var(--ease),
+    transform 0.1s var(--ease);
+}
+/* States with a cap circle keep the label a fixed gap to the right of it, so
+   the pre-download ("启动") and update ("42%") labels line up. */
+.start-btn.has-circle {
+  justify-content: flex-start;
+  padding-left: 62px;
+}
+.start-btn::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    115deg,
+    rgba(255, 255, 255, 0) 34%,
+    rgba(255, 255, 255, 0.98) 50%,
+    rgba(255, 255, 255, 0) 66%
+  );
+  transform: translateX(-130%);
+  opacity: 0;
+  pointer-events: none;
+}
+.start-btn:hover {
+  background: linear-gradient(180deg, #ffffff 0%, #eaeef6 100%);
+  box-shadow:
+    0 16px 40px rgba(0, 0, 0, 0.42),
+    0 0 13px -2px var(--glow),
+    0 0 22px -5px var(--glow);
+}
+.start-btn:hover::after {
+  opacity: 1;
+  animation: btnFlow 1.9s var(--ease) infinite;
+}
+@keyframes btnFlow {
+  0% {
+    transform: translateX(-130%);
+  }
+  55%,
+  100% {
+    transform: translateX(130%);
+  }
+}
+.start-btn:active {
+  transform: scale(0.975);
+}
+.start-btn.update {
+  --glow: var(--brand);
+  background: var(--brand);
+  color: var(--on-brand);
+}
+.start-btn.update:hover {
+  background: var(--brand-hover);
+}
+.start-btn.stop {
+  --glow: var(--error);
+  background: var(--error);
+}
+.start-btn.stop:hover {
+  background: #e34b50;
+}
+
+.confirm-modal {
+  width: min(400px, 88vw);
+}
+.confirm-text {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--fg);
+}
+
+/* ------------------------------------------------------ download controls */
+.dl-wrap {
+  position: relative;
+}
+.ring {
+  color: var(--fg);
+}
+/* Update progress shows a percentage; keep the digits from jittering. */
+.start-btn.update {
+  font-variant-numeric: tabular-nums;
+}
+/* Hover detail popup — attached right above the control. */
+.dl-pop {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  min-width: 172px;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--glass-2);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.42);
+  opacity: 0;
+  transform: translateY(4px) scale(0.94);
+  transform-origin: bottom right;
+  pointer-events: none;
+  white-space: nowrap;
+  transition:
+    opacity 0.15s var(--ease),
+    transform 0.15s var(--ease);
+}
+.dl-wrap:hover .dl-pop {
+  opacity: 1;
+  transform: scale(1);
+}
+.dl-pop-speed {
+  font-size: 13px;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+.dl-pop-row {
+  margin-top: 4px;
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  font-size: 12px;
+  color: var(--fg-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- page ---------- */
+.page-title {
+  font-size: 24px;
+  letter-spacing: -0.02em;
+}
+.page-subtitle {
+  letter-spacing: 0.02em;
+}
+.panel-title {
+  letter-spacing: 0.01em;
+}
+
+/* ---------- stats ---------- */
+
+/* ---------- progress ---------- */
+.progress {
+  height: 10px;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.35);
+}
+.progress-fill {
+  background: linear-gradient(90deg, var(--brand), var(--brand-hover));
+  box-shadow: 0 0 12px rgba(55, 120, 229, 0.6);
+}
+
+/* ---------- inputs ---------- */
+.input:focus,
+.select:focus {
+  box-shadow: 0 0 0 3px var(--brand-dim);
+}
+
+/* ---------- gallery / pools ---------- */
+.gallery-thumb {
+  transition:
+    transform 0.15s var(--ease),
+    border-color 0.15s var(--ease),
+    box-shadow 0.15s var(--ease);
+}
+.gallery-thumb:hover {
+  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.4);
+}
+.pool-col:hover {
+  border-color: var(--brand-line);
+}
+
+/* ---------- modal ---------- */
+.modal {
+  border-radius: 18px;
+}
+
+/* ---------- toast ---------- */
+.toast {
+  border-radius: 12px;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.45);
+}
+
+/* ---------- scrollbar ---------- */
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+/* ---------- play-time heatmap (GitHub-style) ---------- */
+.heatmap-wrap {
+  overflow-x: auto;
+  overflow-y: hidden;
+  /* Room for the cell outline: it is drawn outside the cell and would otherwise
+     be clipped by `overflow` (worst on the top row). */
+  padding: 4px;
+}
+.heatmap {
+  display: grid;
+  grid-auto-flow: column;
+  grid-template-rows: repeat(7, var(--hm-cell, 13px));
+  grid-auto-columns: var(--hm-cell, 13px);
+  gap: var(--hm-gap, 3px);
+  width: max-content;
+}
+.hm-cell {
+  width: var(--hm-cell, 13px);
+  height: var(--hm-cell, 13px);
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.06);
+  border: none;
+  padding: 0;
+  /* Selection follows the pointer (see PlayTimeView), so no pointer cursor. */
+  cursor: default;
+  transition: outline-color 0.12s var(--ease);
+  outline: 1px solid transparent;
+  outline-offset: 0;
+}
+.hm-cell:hover {
+  outline-color: var(--on-brand-soft);
+}
+.hm-cell.selected {
+  outline: 1.5px solid var(--on-brand);
+}
+.hm-cell.empty {
+  display: block;
+  padding: 0;
+  gap: 0;
+  background: transparent;
+  cursor: default;
+  pointer-events: none;
+}
+.hm-legend {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--fg-3);
+}
+.hm-legend .hm-cell {
+  width: 12px;
+  height: 12px;
+  cursor: default;
+}
+.hm-legend .hm-cell:hover {
+  outline-color: transparent;
+}
+.hm-selected {
+  margin-top: 10px;
+  font-size: 13px;
+  color: var(--fg-2);
+  min-height: 18px;
+}
+.hm-selected b {
+  color: var(--fg);
+}
+
+/* -------------------------------------------------- settings · about box */
+.settings-section {
+  /* Same 18px left/right inset as `.settings-row` so nothing looks flush. */
+  padding: 18px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+.settings-section-title {
+  margin-bottom: 12px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  opacity: 0.55;
+}
+/* Group heading inside a settings list / form. */
+.settings-group-title {
+  padding: 20px 18px 6px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  opacity: 0.5;
+}
+.settings-group-title:first-child {
+  /* The gap to the card's top edge must match the gap a later title has to the
+     previous row's border (which equals the title's own top padding). */
+  padding-top: 20px;
+}
+.about-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 8px 0;
+}
+.about-line.column {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+.about-key {
+  font-size: 13px;
+  font-weight: 600;
+  opacity: 0.7;
+}
+.usage-value {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.75;
+}
+.about-deps {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.about-dep {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 13px;
+}
+.about-dep > span {
+  flex: 0 0 auto;
+  font-weight: 600;
+}
+.about-dep > em {
+  flex: 1 1 auto;
+  font-style: normal;
+  font-size: 12px;
+  opacity: 0.6;
+}
+.about-link {
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--brand);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  text-align: right;
+}
+.about-link:hover {
+  text-decoration: underline;
+}
+.about-disclaimer {
+  margin: 14px 0 0;
+  font-size: 12px;
+  line-height: 1.7;
+  opacity: 0.5;
+}
+
+/* ------------------------------------------- rail: launcher update slot */
+/* Launcher-update slot: colours follow the other rail icons (white/black per
+   theme), not the theme colour. */
+.rail-update {
+  position: relative;
+}
+.rail-update-btn {
+  color: var(--chrome-fg-2);
+}
+.rail-update-btn:hover {
+  color: var(--chrome-fg);
+}
+.rail-update-icon {
+  position: relative;
+  display: grid;
+  place-items: center;
+}
+.rail-update-dot {
+  position: absolute;
+  top: -1px;
+  right: -1px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.35);
+}
+.rail-ring {
+  position: relative;
+  display: grid;
+  place-items: center;
+  color: inherit;
+}
+.rail-ring .ring {
+  color: currentColor;
+}
+/* Sidebar update ring: the same atom ring language, but white. */
+.rail-ring .atom-halo {
+  fill: transparent;
+}
+.rail-ring .atom-progress {
+  stroke: #ffffff;
+  filter: drop-shadow(0 0 3px rgba(255, 255, 255, 0.7));
+}
+.rail-ring .atom-progress-track {
+  stroke: rgba(255, 255, 255, 0.26);
+}
+.rail-ring .atom-orbit {
+  stroke: rgba(255, 255, 255, 0.42);
+}
+.rail-ring .rail-shield {
+  inset: -8px;
+}
+.rail-update-icon .rail-shield {
+  inset: -12px;
+}
+.atom-shield.is-downloading .atom-core,
+.atom-shield.is-paused .atom-core,
+.atom-shield.is-preparing .atom-core,
+.atom-shield.is-applying .atom-core {
+  display: none;
+}
+.rail-ring-percent {
+  position: absolute;
+  z-index: 4;
+  font-size: 9px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+}
+/* Opens to the right of the rail, like the game download popover. */
+.rail-pop {
+  position: absolute;
+  left: calc(100% + 10px);
+  bottom: -4px;
+  width: 236px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 30;
+  animation: railPopIn 0.18s cubic-bezier(0.22, 1.3, 0.36, 1) both;
+}
+@keyframes railPopIn {
+  from {
+    opacity: 0;
+    transform: translateX(-6px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.rail-pop-head {
+  font-size: 12px;
+  opacity: 0.65;
+}
+.rail-pop-percent {
+  margin-top: 2px;
+  font-size: 24px;
+  font-weight: 800;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+.rail-pop-row {
+  margin-top: 5px;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 11px;
+  opacity: 0.7;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ------------------------------------- self-drawn installer / uninstaller */
+.setup {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+}
+.setup-drag {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 40px;
+  -webkit-app-region: drag;
+}
+.setup-card {
+  width: 100%;
+  max-width: 560px;
+  display: flex;
+  flex-direction: column;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  background: var(--glass);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  overflow: hidden;
+}
+.setup-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--line);
+}
+.setup-logo {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+}
+.setup-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--fg);
+}
+.setup-sub {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--fg-3);
+}
+.setup-close {
+  margin-left: auto;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg-2);
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+.setup-close:hover {
+  background: var(--glass-hover);
+  color: var(--fg);
+}
+.setup-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 232px;
+  padding: 18px;
+}
+.setup-label {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  opacity: 0.55;
+}
+.setup-path {
+  display: flex;
+  gap: 8px;
+  -webkit-app-region: no-drag;
+}
+.setup-path input {
+  flex: 1;
+  min-width: 0;
+  height: 34px;
+  padding: 0 10px;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--fg);
+  font-size: 13px;
+}
+.setup-note {
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--fg-2);
+  word-break: break-all;
+}
+.setup-warn {
+  margin-top: 6px;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: #f0b429;
+}
+.setup-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--fg-3);
+  font-variant-numeric: tabular-nums;
+}
+.setup-current {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.setup-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.setup-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  font-size: 13px;
+  color: var(--fg);
+}
+.setup-list em {
+  font-style: normal;
+  text-align: right;
+  color: var(--fg-3);
+  word-break: break-all;
+}
+.setup-check {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--fg);
+  cursor: pointer;
+}
+.setup-check-path {
+  display: block;
+  font-style: normal;
+  font-size: 11.5px;
+  color: var(--fg-3);
+  word-break: break-all;
+}
+/* Plain theme-coloured progress bar — the ring is reserved for upgrades. */
+.setup-bar {
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+  overflow: hidden;
+}
+.setup-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--brand);
+  transition: width 0.2s ease;
+}
+.setup-bar-indeterminate {
+  width: 35%;
+  animation: setup-bar-run 1.1s ease-in-out infinite;
+}
+@keyframes setup-bar-run {
+  0% {
+    margin-left: -35%;
+  }
+  100% {
+    margin-left: 100%;
+  }
+}
+.setup-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 14px 18px;
+  border-top: 1px solid var(--line);
+}
+
+/* -------------------------------------------------- launcher update dialog */
+.update-modal {
+  width: min(520px, 90vw);
+}
+.update-notes {
+  max-height: 46vh;
+  overflow-y: auto;
+  font-size: 13px;
+  line-height: 1.75;
+  white-space: pre-wrap;
+  word-break: break-word;
+  opacity: 0.85;
+}
+.update-error {
+  margin: 12px 0 0;
+  font-size: 12px;
+  color: var(--error);
+}
+.update-progress {
+  margin-top: 14px;
+}
+.update-progress-track {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+  overflow: hidden;
+}
+.update-progress-track > span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--brand);
+  transition: width 0.25s ease;
+}
+.update-progress-text {
+  margin-top: 7px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.65;
+}
+
+/* ------------------------- installer / uninstaller: full-window redesign ---
+   (later rules override the earlier dialog-style .setup block) */
+.setup {
+  display: flex;
+  flex-direction: column;
+  place-items: unset;
+  padding: 30px 40px 24px;
+  overflow: hidden;
+  background: radial-gradient(120% 130% at 8% 0%, #0f5f86 0%, #0d2a4c 46%, #080e1a 100%);
+}
+/* Aurora: blurred blobs in the theme colour (+ two complements), slowly moving. */
+.setup-aurora {
+  position: absolute;
+  inset: -25%;
+  z-index: 0;
+  pointer-events: none;
+}
+.setup-aurora > span {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(90px);
+  opacity: 0.5;
+  will-change: transform;
+}
+.aurora-a {
+  width: 46vw;
+  height: 46vw;
+  left: 0;
+  top: -10%;
+  background: radial-gradient(circle at 40% 40%, var(--brand), transparent 68%);
+  animation: aurora-a 22s ease-in-out infinite;
+}
+.aurora-b {
+  width: 40vw;
+  height: 40vw;
+  right: 2%;
+  top: 6%;
+  opacity: 0.36;
+  background: radial-gradient(circle at 50% 50%, #26d0c8, transparent 70%);
+  animation: aurora-b 26s ease-in-out infinite;
+}
+.aurora-c {
+  width: 52vw;
+  height: 52vw;
+  left: 20%;
+  bottom: -28%;
+  opacity: 0.32;
+  background: radial-gradient(circle at 50% 50%, #6f5bff, transparent 70%);
+  animation: aurora-c 30s ease-in-out infinite;
+}
+@keyframes aurora-a {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(6%, 9%, 0) scale(1.18);
+  }
+}
+@keyframes aurora-b {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1.05);
+  }
+  50% {
+    transform: translate3d(-9%, 7%, 0) scale(0.92);
+  }
+}
+@keyframes aurora-c {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(10%, -7%, 0) scale(1.12);
+  }
+}
+/* Faint grid fading out towards the bottom, for a more "designed" feel. */
+.setup-grid {
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.045) 1px, transparent 1px);
+  background-size: 46px 46px;
+  -webkit-mask-image: radial-gradient(130% 95% at 50% 0%, #000 28%, transparent 76%);
+  mask-image: radial-gradient(130% 95% at 50% 0%, #000 28%, transparent 76%);
+}
+.setup-top {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+.setup-logo {
+  width: 64px;
+  height: 64px;
+  border-radius: 16px;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.45);
+}
+.setup-brand-name {
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  color: #ffffff;
+}
+.setup-brand-sub {
+  margin-top: 3px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.62);
+}
+.setup-close {
+  margin-left: auto;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.8);
+}
+.setup-close:hover {
+  background: rgba(255, 255, 255, 0.18);
+  color: #ffffff;
+}
+.setup-main {
+  position: relative;
+  z-index: 2;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 18px;
+  padding: 10px 0;
+}
+.setup-center {
+  position: relative;
+  z-index: 2;
+  flex: 1;
+  display: grid;
+  place-content: center;
+  gap: 8px;
+  text-align: center;
+}
+.setup-steps {
+  display: flex;
+  gap: 20px;
+}
+.setup-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: rgba(255, 255, 255, 0.45);
+}
+.setup-step > span {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 1px solid currentColor;
+  font-size: 11px;
+  font-weight: 700;
+}
+.setup-step.active {
+  color: #ffffff;
+}
+.setup-step.active > span {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: var(--on-brand);
+}
+.setup-step.done {
+  color: rgba(255, 255, 255, 0.78);
+}
+.setup-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.setup-title-lg {
+  margin: 0;
+  font-size: 30px;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  color: #ffffff;
+}
+.setup-sub {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.75;
+  color: rgba(255, 255, 255, 0.66);
+}
+.setup-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.setup-field-label {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.62);
+}
+.setup-path {
+  display: flex;
+  gap: 10px;
+  max-width: 720px;
+}
+.setup-path input {
+  flex: 1;
+  min-width: 0;
+  height: 44px;
+  padding: 0 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(0, 0, 0, 0.32);
+  color: #ffffff;
+  font-size: 14px;
+}
+.setup-path input:focus {
+  outline: none;
+  border-color: var(--brand);
+}
+/* Match the input exactly (the plain .btn is 36px, the field is 44px). */
+.setup-path .btn {
+  height: 44px;
+  padding: 0 20px;
+  border-radius: 12px;
+  font-size: 14px;
+}
+.setup-note {
+  max-width: 760px;
+  font-size: 13.5px;
+  line-height: 1.8;
+  color: rgba(255, 255, 255, 0.8);
+  word-break: break-all;
+}
+.setup-warn {
+  margin-top: 6px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: #ffd166;
+}
+.setup-warn-block {
+  max-width: 760px;
+}
+.setup-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  max-width: 720px;
+  font-size: 12.5px;
+  color: rgba(255, 255, 255, 0.5);
+  font-variant-numeric: tabular-nums;
+}
+.setup-current {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.setup-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 28px;
+  max-width: 780px;
+}
+.setup-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  padding-bottom: 8px;
+  font-size: 13.5px;
+  color: #ffffff;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.setup-list em {
+  font-style: normal;
+  text-align: right;
+  color: rgba(255, 255, 255, 0.6);
+  word-break: break-all;
+}
+.setup-check {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  max-width: 760px;
+  font-size: 13.5px;
+  line-height: 1.7;
+  color: #ffffff;
+  cursor: pointer;
+}
+.setup-check input {
+  margin-top: 3px;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--brand);
+}
+.setup-check-path {
+  display: block;
+  font-style: normal;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.5);
+  word-break: break-all;
+}
+/* Plain theme-coloured progress bar — the ring is reserved for upgrades. */
+.setup-bar {
+  max-width: 720px;
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+  overflow: hidden;
+}
+.setup-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--brand), #6fe3ff);
+  transition: width 0.2s ease;
+}
+.setup-bar-indeterminate {
+  width: 35%;
+  animation: setup-bar-run 1.1s ease-in-out infinite;
+}
+.setup-actions {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+.setup-actions .btn {
+  height: 40px;
+  padding: 0 22px;
+  border-radius: 11px;
+  font-size: 14px;
+}
+
+/* ---------------------------------------------------- material surface texture
+   Every frosted surface paints the current material's `--glass-sheen` layer
+   (云母颗粒 or 高光光带). Declared last so it wins over the `background`
+   shorthand on the individual component rules. */
+.glass,
+.panel,
+.settings,
+.list,
+.pool-col,
+.stat-card,
+.pity-card,
+.modal,
+.toast,
+.gacha-toast,
+.home-info,
+.playtime-pill,
+.welcome,
+.setup-card,
+.glass-pop {
+  background-image: var(--glass-sheen);
+  background-repeat: var(--glass-repeat, no-repeat);
+  background-size: var(--glass-size, auto);
+}
+
+/* Portal popup (see components/GlassPopup.tsx) — matches the current material. */
+.glass-pop {
+  position: fixed;
+  z-index: 90;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background-color: var(--glass-2);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  box-shadow: var(--glass-rim), 0 14px 34px rgba(0, 0, 0, 0.42);
+  white-space: nowrap;
+  animation: glassPopIn 0.18s cubic-bezier(0.22, 1.3, 0.36, 1) both;
+}
+/* Purely informational popup (download details): clicks pass through to the
+   progress ring underneath it. */
+.glass-pop.dl-pop-glass {
+  pointer-events: none;
+}
+@keyframes glassPopIn {
+  from {
+    opacity: 0;
+    transform: scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.glass-pop.closing {
+  animation: glassPopOut 0.16s var(--ease) both;
+}
+@keyframes glassPopOut {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.95) translateY(-3px);
+  }
+}
+
+/* ---------------------------------------------------- component surfaces
+   A component NOT wrapped in a material surface uses the current material as its
+   background; one that IS wrapped uses a light translucent black (just a slight
+   darken, no double material). Declared last so it wins (except `.primary`). */
+.tabs,
+.segmented,
+.input,
+.select,
+.select-trigger,
+.select-menu,
+.font-item,
+.color-trigger,
+.btn {
+  background-color: var(--glass);
+  background-image: var(--glass-sheen);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+}
+.settings .segmented,
+.settings .input,
+.settings .select,
+.settings .select-trigger,
+.settings .font-item,
+.settings .color-trigger,
+.settings .btn,
+.modal .btn,
+.modal .input,
+.modal .select,
+.modal .select-trigger,
+.modal .segmented,
+.panel .segmented,
+.list .segmented {
+  background: rgba(0, 0, 0, 0.16);
+  background-image: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+/* No material-on-material inside an existing glass surface. Controls keep a
+   flat translucent fill; only dialogs / floating layers may carry the material. */
+.panel .btn,
+.panel .input,
+.panel .select,
+.panel .select-trigger,
+.list .btn,
+.list .input,
+.list .select,
+.list .select-trigger,
+.home-info .btn,
+.method-card .btn,
+.ll-card .btn {
+  background-image: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+.settings .switch-track,
+.modal .switch-track,
+.panel .switch-track,
+.list .switch-track {
+  background-color: var(--field-bg);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+/* The ON state must win over the flat field fill above. */
+.settings .switch-track[data-on='true'],
+.modal .switch-track[data-on='true'],
+.panel .switch-track[data-on='true'],
+.list .switch-track[data-on='true'],
+.switch-track[data-on='true'] {
+  background-color: var(--brand);
+  background-image: linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 0.16),
+    rgba(255, 255, 255, 0) 55%
+  );
+}
+/* Linked-launch capsules sit on the themed games-bar surface: use a flat fill
+   instead of a second glass layer. */
+.linked-cap {
+  background-color: rgba(8, 12, 20, 0.34);
+  background-image: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: none;
+  will-change: transform;
+}
+
+/* ================================================== launch drawer (multi method)
+   The button + drawer together form a single-choice control: the button is the
+   default choice, the drawer lists the others. Respects the current material. */
+/* The drawer mirrors the Select dropdown (same material treatment). */
+.launch-drawer {
+  position: absolute;
+  z-index: 7;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  max-height: 260px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background-color: var(--glass-2);
+  background-image: var(--glass-sheen);
+  background-repeat: var(--glass-repeat, no-repeat);
+  background-size: var(--glass-size, auto);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+  color: var(--fg);
+  animation: drawerIn 0.2s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+.launch-drawer.closing {
+  animation: drawerOut 0.16s cubic-bezier(0.55, 0, 0.9, 0.4) both;
+}
+@keyframes drawerOut {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.92) translateY(6px);
+  }
+}
+.drawer-scroll {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+  min-height: 0;
+}
+@keyframes drawerIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.drawer-opt {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  min-height: 40px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--fg);
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition: background 0.14s var(--ease);
+}
+.drawer-opt:hover {
+  background: var(--glass-hover);
+}
+.drawer-opt[data-active='true'] {
+  background: var(--brand);
+  color: var(--on-brand);
+}
+
+/* ---------------------------------------------------- checkbox / radio */
+.checkbox,
+.radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--fg-2);
+}
+.checkbox.disabled,
+.radio.disabled {
+  opacity: 0.5;
+}
+.checkbox-box {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1.5px solid var(--line-strong);
+  border-radius: 7px;
+  background: var(--field-bg);
+  color: var(--on-brand);
+  cursor: pointer;
+  will-change: transform;
+}
+.checkbox-box[data-on='true'] {
+  background: var(--brand);
+  border-color: var(--brand);
+}
+.checkbox-label,
+.radio-label {
+  cursor: pointer;
+}
+.radio-dot {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1.5px solid var(--line-strong);
+  border-radius: 50%;
+  background: var(--field-bg);
+  cursor: pointer;
+  will-change: transform;
+}
+.radio-dot[data-on='true'] {
+  border-color: var(--brand);
+}
+.radio-knob {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--brand);
+  transform: scale(0);
+  transition: transform 0.16s cubic-bezier(0.34, 1.5, 0.4, 1);
+}
+.radio-dot[data-on='true'] .radio-knob {
+  transform: scale(1);
+}
+
+/* ---------------------------------------------------- wallpaper home module */
+.wallpaper-switch {
+  display: flex;
+  gap: 15px;
+}
+.wp-btn {
+  width: 52px;
+  height: 52px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border-radius: 16px;
+  color: var(--fg);
+  cursor: pointer;
+  transition:
+    transform 0.15s var(--ease),
+    background-color 0.15s var(--ease);
+}
+.wp-btn:hover {
+  background-color: var(--glass-hover);
+}
+.wp-btn:active {
+  transform: scale(0.94);
+}
+.wp-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* ------------------------------------------------- linked-launch home pill */
+.linked-launch-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 22px;
+  border-radius: 999px;
+  color: var(--fg);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.15s var(--ease);
+}
+.linked-launch-pill:active {
+  transform: scale(0.96);
+}
+.linked-launch-pill.running {
+  color: var(--error);
+}
+/* While its drawer is open the pill matches the launch button exactly: white /
+   black normally, theme colour when the "default" choice is selected. */
+.linked-launch-pill.picker-open {
+  background-color: #ffffff;
+  color: #16181d;
+  border-color: transparent;
+}
+.linked-launch-pill.picker-open.selected {
+  background-color: var(--brand);
+  color: var(--on-brand);
+}
+
+/* ---------------------------------------------- games-bar linked-launch row */
+.linked-row-wrap {
+  position: absolute;
+  left: 0;
+  top: 100%;
+  margin-top: 6px;
+  width: min(64vw, 720px);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 90px;
+  overflow: hidden;
+  transition:
+    max-height 0.3s var(--ease),
+    opacity 0.3s var(--ease);
+}
+.linked-row-wrap.hidden {
+  max-height: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+.linked-viewport {
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  -webkit-app-region: no-drag;
+}
+.linked-viewport::-webkit-scrollbar {
+  display: none;
+  height: 0;
+}
+.linked-viewport.fade-right {
+  -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 44px), transparent);
+  mask-image: linear-gradient(90deg, #000 calc(100% - 44px), transparent);
+}
+.linked-viewport.fade-left {
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 44px);
+  mask-image: linear-gradient(90deg, transparent, #000 44px);
+}
+.linked-viewport.fade-left.fade-right {
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 44px, #000 calc(100% - 44px), transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 44px, #000 calc(100% - 44px), transparent);
+}
+.linked-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: max-content;
+  padding: 3px 0;
+  touch-action: none;
+  /* A dragged capsule is translated with `transform`; without a clip it expands
+     the scroll container's scrollable overflow, which created a huge blank area
+     to the right and broke dragging back. Clip at the row (with a margin for the
+     jelly bulge/shadows) so the scroll width stays constant. */
+  overflow: clip;
+  overflow-clip-margin: 160px;
+}
+.linked-cap {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 14px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background-color: rgba(8, 12, 20, 0.34);
+  background-image: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: none;
+  color: var(--chrome-fg);
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-drag: none;
+  -webkit-app-region: no-drag;
+  will-change: transform;
+  transition: transform 0.35s cubic-bezier(0.34, 1.4, 0.4, 1);
+}
+.linked-cap.dragging {
+  transition: none;
+  z-index: 20;
+}
+.linked-cap:hover {
+  border-color: var(--line-strong);
+  filter: brightness(1.18);
+}
+.linked-cap.running {
+  color: var(--error);
+  border-color: var(--error);
+}
+.linked-cap-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--success);
+}
+.linked-cap.running .linked-cap-dot {
+  background: var(--error);
+}
+.linked-scrollbar {
+  position: relative;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+  -webkit-app-region: no-drag;
+  transition: opacity 0.18s var(--ease);
+}
+.linked-scrollbar.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+.linked-thumb {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--chrome-fg-3);
+  cursor: grab;
+}
+.linked-thumb:active {
+  cursor: grabbing;
+}
+
+/* --------------------------------------------- shared sortable (see Sortable.tsx) */
+.sortable {
+  display: flex;
+  gap: 8px;
+}
+.sortable-vertical {
+  flex-direction: column;
+}
+.sortable-horizontal {
+  flex-direction: row;
+  align-items: center;
+}
+.sortable-horizontal > .sortable-row {
+  flex: 0 0 auto;
+  display: flex;
+}
+.sortable-row {
+  position: relative;
+  will-change: transform;
+  /* The neighbour "yield" animates (same feel as the game icons). */
+  transition: transform 0.35s cubic-bezier(0.34, 1.4, 0.4, 1);
+}
+.sortable-row.dragging {
+  z-index: 3;
+  transition: none;
+}
+.ll-card {
+  padding: 0 18px;
+  border-bottom: 1px solid var(--line);
+}
+.ll-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 64px;
+}
+.ll-grip {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg-3);
+  cursor: grab;
+  touch-action: none;
+}
+.ll-grip:hover {
+  background: var(--glass-hover);
+  color: var(--fg);
+}
+.ll-grip.dragging,
+.ll-grip:active {
+  cursor: grabbing;
+}
+.ll-name {
+  flex: 1;
+}
+.ll-apps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+  padding: 6px 18px 14px;
+}
+/* A checkbox-group title styled like a normal row's first line (not the grey
+   uppercase group heading). */
+.check-group-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+  padding: 16px 18px 8px;
+}
+.collapse-inner .check-group-title {
+  padding-left: 22px;
+}
+.ll-app {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--fg-2);
+  cursor: pointer;
+}
+.method-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 18px;
+}
+.method-card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.method-spacer {
+  flex: 1;
+}
+.method-default {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13px;
+  color: var(--fg-2);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.wl-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 52px;
+  min-height: 52px;
+  padding: 0 18px;
+}
+.wl-thumb {
+  width: 46px;
+  height: 30px;
+  flex: 0 0 auto;
+  border-radius: 7px;
+  object-fit: cover;
+  background: var(--field-bg);
+}
+.wl-thumb-btn {
+  flex: 0 0 auto;
+  display: block;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+}
+.wl-row.current .wl-name {
+  color: var(--brand);
+  font-weight: 600;
+}
+.wl-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+  font-size: 13px;
+  text-align: left;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+}
+.wl-name:hover {
+  color: var(--brand);
+}
+.settings-empty {
+  padding: 10px 18px;
+  color: var(--fg-3);
+  font-size: 13px;
+}
+
+/* Selected launch button (the "default" choice of the launch drawer). */
+.start-btn.selected {
+  background: var(--brand);
+  color: var(--on-brand);
+}
+.start-btn.selected:hover {
+  background: var(--brand-hover);
+}
+
+/* The select box is at least as wide as its content so labels are not cramped. */
+.select-box {
+  min-width: 176px;
+}
+
+.home-module.raised {
+  z-index: 8;
+}
+
+/* A capsule never grows past this width; longer names scroll (see ScrollText). */
+.linked-cap {
+  max-width: 210px;
+}
+
+/* ---------------------------------------------------- scroll-on-overflow text */
+.scroll-text {
+  position: relative;
+  display: inline-block;
+  overflow: hidden;
+  max-width: 100%;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+.scroll-text.overflow {
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 9px, #000 calc(100% - 9px), transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 9px, #000 calc(100% - 9px), transparent);
+}
+.scroll-text-track {
+  display: inline-flex;
+  gap: 40px;
+  white-space: nowrap;
+  will-change: transform;
+}
+.scroll-text-copy {
+  display: inline-block;
+  white-space: nowrap;
+}
+.scroll-text.overflow .scroll-text-track {
+  animation-name: scrollTextX;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+  animation-delay: 0.7s;
+}
+@keyframes scrollTextX {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(var(--scroll-dist));
+  }
+}
+.drawer-opt .scroll-text {
+  max-width: 100%;
+}
+
+/* --------------------------------------------------------- inline name editor */
+.inline-edit {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  width: 280px;
+  max-width: 100%;
+  height: 20px;
+  padding: 0;
+}
+.inline-edit:hover .inline-edit-btn {
+  color: var(--fg);
+  background: var(--glass-hover);
+}
+.inline-edit.wide {
+  width: 420px;
+  max-width: 52vw;
+}
+.inline-edit-text {
+  cursor: text;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+  line-height: 1.4;
+}
+.inline-edit-text.empty {
+  display: block;
+  padding: 0;
+  gap: 0;
+  flex-direction: row;
+  align-items: normal;
+  justify-content: normal;
+  color: var(--fg-4);
+  text-align: left;
+}
+.inline-edit-field {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  align-items: center;
+}
+.inline-edit-field::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 2px;
+  height: 1px;
+  background: currentColor;
+  transform: scaleX(0);
+  transform-origin: left;
+  animation: inlineUnderline 0.24s var(--ease) forwards;
+}
+@keyframes inlineUnderline {
+  to {
+    transform: scaleX(1);
+  }
+}
+.inline-edit-input {
+  width: 100%;
+  height: 100%;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  line-height: 1.4;
+  padding: 0;
+}
+.inline-edit-input::placeholder {
+  color: var(--fg-4);
+}
+/* File / directory picker field: shows the path + a folder icon; clicking the
+   text or the icon opens the picker (no text editing). */
+.path-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  width: 280px;
+  max-width: 100%;
+  height: 20px;
+  min-height: 20px;
+  max-height: 20px;
+  align-self: center;
+  line-height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+}
+.path-field:hover .path-field-icon {
+  color: var(--fg);
+  background: var(--glass-hover);
+}
+.path-field-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+}
+.path-field-text.empty {
+  /* `.empty` is also the generic empty-state class; reset its flex/padding so the
+     inline path placeholder stays one 20px line instead of a tall click target. */
+  display: block;
+  padding: 0;
+  gap: 0;
+  flex-direction: row;
+  align-items: normal;
+  justify-content: normal;
+  color: var(--fg-4);
+  text-align: right;
+}
+.path-field-icon {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  padding: 2px;
+  border-radius: 6px;
+  color: var(--fg-3);
+  transition: color 0.14s var(--ease), background 0.14s var(--ease);
+}
+.path-field:hover .path-field-icon {
+  color: var(--fg);
+}
+.settings-action .path-field {
+  max-width: 42vw;
+}
+.path-field.wide,
+.settings-action .path-field.wide {
+  width: 420px;
+  max-width: 52vw;
+}
+.inline-edit-btn {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  padding: 2px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-3);
+  cursor: pointer;
+  transition: color 0.14s var(--ease), background 0.14s var(--ease);
+}
+.inline-edit-btn:hover {
+  color: var(--fg);
+  background: var(--glass-hover);
+}
+/* A name edited inline keeps the row layout: it grows in the free space. */
+.method-name,
+.ll-name {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+}
+
+/* New controls match the height of the existing buttons (36px). */
+.input,
+.select,
+.select-trigger,
+.row .btn {
+  height: 36px;
+}
+.row {
+  align-items: center;
+  gap: 8px;
+}
+
+/* Compact icon picker (add-app dialog / app settings). */
+.icon-picker-sm .launcher-icon {
+  width: 72px;
+  height: 72px;
+}
+/* No icon yet: the same dashed box + plus as the games-bar "add app" button. */
+.launcher-icon.empty {
+  border: 1.5px dashed var(--line-strong);
+  background: transparent;
+  color: var(--fg-3);
+}
+.linked-launch-pill svg {
+  flex: 0 0 auto;
+}
+/* The linked-launch pill has a fixed width (does not follow the label length). */
+.linked-launch-pill {
+  width: 160px;
+  justify-content: center;
+}
+/* Inset the scrolling label a little inside the button. */
+.start-btn .scroll-text,
+.linked-launch-pill .scroll-text {
+  margin: 0 6px;
+}
+
+/* Settings rows nested in a method card align with the card's own inset. */
+.method-card .settings-row {
+  padding-left: 0;
+  padding-right: 0;
+}
+/* The launch-file/args/dir rows get a little extra left inset. */
+.method-card .settings-row.field-row {
+  padding-left: 16px;
+}
+/* Slider rows: the value (with unit) sits to the left of the slider. */
+.range-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.range-value {
+  min-width: 46px;
+  text-align: right;
+  font-size: 12px;
+  color: var(--fg-2);
+  font-variant-numeric: tabular-nums;
+}
+/* The gacha URL editor fills the available row space. */
+.gacha-url {
+  flex: 1;
+  min-width: 280px;
+}
+
+/* Plan-A popup background: an inner layer paints the exact wallpaper region
+   under the popup (centre-cropped like the app background) with the material
+   tint + texture composited on top, then the liquid filter distorts that layer
+   (refraction + dispersion). No live backdrop sampling, so text behind the popup
+   never bleeds through. */
+.wallpaper-region {
+  background: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+/* Only the (non-positioned) modal needs a positioning context for the layer. */
+.modal.wallpaper-region {
+  position: relative;
+}
+.wp-region-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border-radius: inherit;
+  overflow: hidden;
+  pointer-events: none;
+  background-color: var(--glass-2);
+  background-image: var(--glass-sheen), linear-gradient(var(--glass), var(--glass)),
+    linear-gradient(rgba(0, 0, 0, var(--wallpaper-dim, 0)), rgba(0, 0, 0, var(--wallpaper-dim, 0))),
+    var(--wallpaper-image);
+  background-size: auto, auto, auto, var(--wallpaper-display-w, 100%) var(--wallpaper-display-h, 100%);
+  background-position: center, center, center, var(--wp-x, 0px) var(--wp-y, 0px);
+  background-repeat: no-repeat, no-repeat, no-repeat, no-repeat;
+  /* Apply the current material's blur / saturation (and the wallpaper blur) to
+     the region image itself. The liquid filter overrides this for liquid/shine. */
+  filter: blur(calc(var(--glass-blur, 0px) + var(--wallpaper-blur, 0px)))
+    saturate(var(--glass-saturate, 100%));
+}
+/* Dialogs apply only the wallpaper (no material): no tint / sheen, just the
+   (blurred, dimmed) region image. */
+.modal.wallpaper-region .wp-region-layer {
+  background-color: transparent;
+  background-image: linear-gradient(
+      rgba(0, 0, 0, var(--wallpaper-dim, 0)),
+      rgba(0, 0, 0, var(--wallpaper-dim, 0))
+    ),
+    var(--wallpaper-image);
+  background-size: auto, var(--wallpaper-display-w, 100%) var(--wallpaper-display-h, 100%);
+  background-position: center, var(--wp-x, 0px) var(--wp-y, 0px);
+  background-repeat: no-repeat, no-repeat;
+  filter: blur(var(--wallpaper-blur, 0px));
+}
+.wallpaper-region > *:not(.wp-region-layer) {
+  position: relative;
+  z-index: 1;
+}
+/* Clip the region layer's refracted edge inside the popup. */
+.glass-pop.wallpaper-region {
+  overflow: hidden;
+}
+/* Video wallpapers cannot be sampled this way: hide the layer, use the material
+   blur on the live backdrop instead. */
+:root[data-wallpaper-region='video'] .wp-region-layer {
+  display: none;
+}
+:root[data-wallpaper-region='video'] .wallpaper-region {
+  background-color: var(--glass-2);
+  background-image: var(--glass-sheen);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+}
+/* The pinned (default) method is slightly emphasised. */
+.method-card-pinned .method-index {
+  color: var(--fg-2);
+}
+
+
+
+/* ==================================================================
+   特别版主题「霆骇列律」
+
+   Every rule is scoped to one area's attribute
+   (`data-special-<area>="<themeId>"` on <html>), so each surface can pick
+   「默认 / 霆骇列律」 independently. Adding a theme = another definition in
+   `shared/specialTheme.ts` + a block like this; adding an area = one registry
+   entry + selectors. Components never branch on a theme id.
+   ================================================================== */
+
+/* ---- tokens (defaults; applySpecialTheme writes the same values) ---- */
+:root {
+  --sn-purple: #8b7cf6;
+  --sn-cyan: #7dd3fc;
+  --sn-gold: #f5d48a;
+  --sn-deep: #0b1020;
+  --sn-ice: #e6f6ff;
+  --sn-aurora: #7ef0c0;
+  --sn-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --sn-dur: 260ms;
+  --sn-glow: 0 0 18px rgba(139, 124, 246, 0.28);
+}
+
+/* -------------------------------------------------- starfrost material */
+/* 星霜: sparse frost-shard triangles + star glints (the tiled image comes from
+   theme.ts), a cool rim and a purple/cyan edge glow. Never a solid fill. */
+:root[data-material='starfrost'] {
+  --glass-backdrop: blur(calc(var(--glass-blur) * 1.15))
+    saturate(calc(var(--glass-saturate) * 1.2)) brightness(1.02);
+  --glass-rim:
+    inset 0 0 0 1px rgba(125, 211, 252, 0.18),
+    inset 0 1px 0 rgba(230, 246, 255, 0.32),
+    inset 0 -1px 0 rgba(139, 124, 246, 0.16);
+}
+:root[data-material='starfrost'] .glass,
+:root[data-material='starfrost'] .panel,
+:root[data-material='starfrost'] .settings,
+:root[data-material='starfrost'] .modal,
+:root[data-material='starfrost'] .glass-pop,
+:root[data-material='starfrost'] .toast,
+:root[data-material='starfrost'] .home-info {
+  box-shadow:
+    var(--glass-rim),
+    0 0 24px rgba(139, 124, 246, 0.12);
+}
+
+/* ---------------------------------------------------- astral material */
+/* 星轨 (米提亚): deep purple interior, gold hairline and the molecule texture
+   generated in theme.ts. */
+:root[data-material='astral'] {
+  /* The brightness / opacity sliders keep working: the tint comes from
+     `--glass`, which applyGlass derives from them. */
+  --glass-backdrop: blur(var(--glass-blur)) saturate(calc(var(--glass-saturate) * 1.08));
+  --glass-rim:
+    inset 0 0 0 1px rgba(232, 200, 122, 0.42),
+    inset 0 1px 0 rgba(232, 200, 122, 0.55),
+    inset 0 -1px 0 rgba(108, 75, 216, 0.35);
+}
+:root[data-material='astral'] .glass,
+:root[data-material='astral'] .panel,
+:root[data-material='astral'] .settings,
+:root[data-material='astral'] .modal,
+:root[data-material='astral'] .glass-pop,
+:root[data-material='astral'] .toast,
+:root[data-material='astral'] .home-info,
+:root[data-material='astral'] .select-menu,
+:root[data-material='astral'] .confirm-modal,
+:root[data-material='astral'] .dl-pop-glass,
+:root[data-material='astral'] .rail-pop,
+:root[data-material='astral'] .tabs {
+  /* The tint stays `var(--glass)` so brightness / opacity keep working. */
+  border-color: rgba(232, 200, 122, 0.42);
+  box-shadow:
+    var(--glass-rim),
+    0 0 22px rgba(108, 75, 216, 0.2);
+}
+/* These already paint their own material layer; just keep the gold hairline. */
+:root[data-material='astral'] .rail-glass,
+:root[data-material='astral'] .rail-pop {
+  border-color: rgba(232, 200, 122, 0.35);
+}
+
+/* ------------------------------------------------------- star-core atom */
+.atom-shield {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--sn-purple, #8b7cf6);
+  pointer-events: none;
+}
+.atom-shield svg {
+  display: block;
+  overflow: visible;
+}
+.atom-halo {
+  fill: rgba(11, 16, 32, 0.35);
+  stroke: rgba(125, 211, 252, 0.12);
+  stroke-width: 0.5;
+}
+.atom-progress-track {
+  fill: none;
+  stroke: color-mix(in srgb, var(--brand) 20%, transparent);
+  stroke-width: 1.2;
+  transform: rotate(-90deg);
+  transform-origin: 16px 16px;
+}
+.atom-progress {
+  fill: none;
+  stroke: var(--brand);
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  filter: drop-shadow(0 0 2.5px color-mix(in srgb, var(--brand) 70%, transparent));
+  transform: rotate(-90deg);
+  transform-origin: 16px 16px;
+  filter: drop-shadow(0 0 2px rgba(245, 212, 138, 0.7));
+}
+.atom-orbit {
+  fill: none;
+  stroke: rgba(139, 124, 246, 0.55);
+  stroke-width: 0.7;
+}
+.atom-orbit-wrapper {
+  transform-origin: 16px 16px;
+  animation: atom-wobble 7.5s ease-in-out infinite;
+  animation-delay: calc(var(--orbit, 0) * -1.9s);
+}
+@keyframes atom-wobble {
+  0%,
+  100% {
+    transform: rotate(-2.4deg);
+  }
+  50% {
+    transform: rotate(2.4deg);
+  }
+}
+.atom-shield.is-paused .atom-orbit-wrapper {
+  animation-play-state: paused;
+}
+.atom-orbit-1 {
+  stroke: rgba(125, 211, 252, 0.55);
+}
+.atom-orbit-2 {
+  stroke: rgba(245, 212, 138, 0.5);
+}
+.atom-electron {
+  fill: var(--sn-cyan, #7dd3fc);
+  filter: drop-shadow(0 0 2px rgba(125, 211, 252, 0.9));
+}
+.atom-core {
+  filter: drop-shadow(0 0 4px rgba(139, 92, 246, 0.78));
+  animation: atom-core-pulse 3.6s ease-in-out infinite;
+}
+@keyframes atom-core-pulse {
+  50% {
+    filter: drop-shadow(0 0 9px rgba(185, 166, 255, 0.98));
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .atom-orbit-wrapper,
+  .atom-core {
+    animation: none;
+  }
+}
+.atom-core-ring {
+  fill: none;
+  stroke: color-mix(in srgb, var(--brand) 55%, transparent);
+  stroke-width: 0.8;
+}
+.atom-shield-frame {
+  transform-origin: 16px 16px;
+}
+.atom-shield-seg {
+  stroke: rgba(230, 246, 255, 0.32);
+  stroke-width: 1.3;
+  stroke-linecap: round;
+  transition:
+    stroke 0.25s var(--ease),
+    filter 0.25s var(--ease),
+    opacity 0.25s var(--ease);
+}
+.atom-shield-seg.lit {
+  stroke: var(--sn-cyan, #7dd3fc);
+  filter: drop-shadow(0 0 2.5px rgba(125, 211, 252, 0.95));
+}
+.atom-shield.is-idle .atom-shield-frame {
+  opacity: 0.5;
+  animation: sn-shield-breathe 6s ease-in-out infinite;
+}
+.atom-shield.is-selected .atom-shield-frame {
+  opacity: 0.28;
+}
+.atom-shield.is-selected .atom-shield-seg {
+  stroke-width: 1;
+}
+.atom-shield.is-paused {
+  opacity: 0.7;
+}
+.atom-shield.is-applying .atom-shield-frame {
+  animation: kl-atom-focused 900ms ease-in-out infinite alternate;
+}
+.atom-shield.is-preparing .atom-shield-seg {
+  animation: kl-shield-pulse 1.2s ease-in-out infinite;
+  animation-delay: calc(var(--seg, 0) * 120ms);
+}
+.atom-shield.is-error {
+  animation: kl-atom-shake 0.4s ease;
+}
+.atom-shield.is-error .atom-shield-seg {
+  stroke: #f08a8e;
+}
+.atom-shield.is-done .atom-core {
+  animation: kl-atom-flash 600ms ease;
+}
+.atom-shield.is-done .atom-shield-seg {
+  stroke: var(--sn-gold, #f5d48a);
+}
+@keyframes sn-shield-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.45;
+  }
+  50% {
+    transform: scale(1.035);
+    opacity: 0.6;
+  }
+}
+@keyframes kl-atom-focused {
+  from {
+    transform: scale(1);
+    opacity: 0.8;
+  }
+  to {
+    transform: scale(0.92);
+    opacity: 1;
+  }
+}
+@keyframes kl-shield-pulse {
+  0%,
+  100% {
+    opacity: 0.2;
+  }
+  50% {
+    opacity: 1;
+    stroke: var(--sn-gold, #f5d48a);
+  }
+}
+@keyframes kl-atom-shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  25% {
+    transform: translateX(-1.5px);
+  }
+  75% {
+    transform: translateX(1.5px);
+  }
+}
+@keyframes kl-atom-flash {
+  0% {
+    r: 3.4;
+    filter: drop-shadow(0 0 4px rgba(245, 212, 138, 0.7));
+  }
+  40% {
+    filter: drop-shadow(0 0 12px rgba(245, 212, 138, 1));
+  }
+  100% {
+    filter: drop-shadow(0 0 4px rgba(245, 212, 138, 0.7));
+  }
+}
+
+/* Atom displayed directly on the launch button (inside its left cap). */
+/* 瓦列里式霜盾 around the launch button: draws in on hover, pulses on click. */
+.launch-shield {
+  position: absolute;
+  left: -20px;
+  right: -20px;
+  top: -20px;
+  bottom: -20px;
+  z-index: 3;
+  pointer-events: none;
+  opacity: 0;
+  transform: scale(0.88);
+  transition:
+    opacity 0.25s var(--ease),
+    transform 0.38s var(--sn-ease);
+  filter:
+    drop-shadow(0 0 2px rgba(0, 0, 0, 0.55))
+    drop-shadow(0 0 10px color-mix(in srgb, var(--brand) 45%, transparent));
+}
+.start-wrap:hover .launch-shield,
+.launch-shield.is-burst {
+  opacity: 1;
+  transform: scale(1);
+}
+.launch-shield svg {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+.shield-fill {
+  fill: color-mix(in srgb, var(--sn-cyan, #7dd3fc) 5%, transparent);
+}
+.shield-segments path {
+  fill: none;
+  stroke: var(--sn-ice, #e6f6ff);
+  stroke-width: 1.6;
+  stroke-opacity: 0.95;
+  stroke-dasharray: 100;
+  stroke-dashoffset: 100;
+  vector-effect: non-scaling-stroke;
+  transition: stroke-dashoffset 0.5s var(--sn-ease);
+}
+.start-wrap:hover .shield-segments path,
+.launch-shield.is-burst .shield-segments path {
+  stroke-dashoffset: 0;
+}
+.shield-wings {
+  filter: drop-shadow(0 0 5px #8b5cf6);
+}
+.shield-wing {
+  fill: color-mix(in srgb, #a78bfa 22%, transparent);
+  stroke: #c4b5fd;
+  stroke-width: 0.9;
+  stroke-opacity: 0.8;
+  opacity: 0;
+  transform-box: fill-box;
+  transform-origin: center;
+  transition:
+    opacity 0.3s var(--ease),
+    transform 0.42s var(--sn-ease);
+}
+.shield-wing-l {
+  transform: translateX(-5px) scale(0.8);
+}
+.shield-wing-r {
+  transform: translateX(5px) scale(0.8);
+}
+.start-wrap:hover .shield-wing,
+.launch-shield.is-burst .shield-wing {
+  opacity: 0.9;
+  transform: translateX(0) scale(1);
+  animation: shield-wing-breathe 2.6s ease-in-out infinite;
+}
+@keyframes shield-wing-breathe {
+  50% {
+    opacity: 0.55;
+    transform: translateX(0) scale(0.96);
+  }
+}
+.shield-runes line {
+  stroke: var(--sn-ice, #e6f6ff);
+  stroke-width: 1;
+  stroke-linecap: round;
+  opacity: 0;
+  transition: opacity 0.4s 0.08s var(--ease);
+}
+.start-wrap:hover .shield-runes line,
+.launch-shield.is-burst .shield-runes line {
+  opacity: 0.75;
+}
+.shield-orbit {
+  fill: none;
+  stroke: color-mix(in srgb, var(--sn-cyan, #7dd3fc) 70%, transparent);
+  stroke-width: 0.8;
+  stroke-dasharray: 2 6;
+  opacity: 0;
+  transform-origin: 60px 30px;
+  transform: rotate(var(--shield-angle, 0deg));
+  transition: opacity 0.35s var(--ease);
+}
+.start-wrap:hover .shield-orbit,
+.launch-shield.is-burst .shield-orbit {
+  opacity: 0.75;
+  animation: shield-spin 14s linear infinite;
+}
+.shield-orbit-b {
+  stroke: color-mix(in srgb, var(--sn-gold, #f5d48a) 60%, transparent);
+  animation-direction: reverse;
+}
+.start-wrap:hover .shield-orbit-b,
+.launch-shield.is-burst .shield-orbit-b {
+  animation-duration: 9s;
+}
+.shield-nodes circle {
+  fill: #c4b5fd;
+  opacity: 0;
+  transition: opacity 0.35s 0.12s var(--ease);
+}
+.shield-nodes circle:nth-child(even) {
+  fill: #7dd3fc;
+}
+.start-wrap:hover .shield-nodes circle,
+.launch-shield.is-burst .shield-nodes circle {
+  opacity: 1;
+  filter: drop-shadow(0 0 4px #a78bfa);
+}
+.shield-core {
+  display: none;
+}
+.launch-shield.is-burst {
+  animation: shield-burst 0.7s var(--sn-ease);
+}
+@keyframes shield-spin {
+  from {
+    transform: rotate(var(--shield-angle, 0deg));
+  }
+  to {
+    transform: rotate(calc(var(--shield-angle, 0deg) + 360deg));
+  }
+}
+@keyframes shield-core-pulse {
+  50% {
+    opacity: 0.45;
+  }
+}
+@keyframes shield-burst {
+  0% {
+    transform: scale(1);
+  }
+  28% {
+    transform: scale(1.06);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+.start-atom {
+  position: absolute;
+  left: -17px;
+  top: 50%;
+  z-index: 2;
+  width: 88px;
+  height: 88px;
+  display: grid;
+  place-items: center;
+  transform: translateY(-50%);
+  pointer-events: none;
+  filter: drop-shadow(0 0 7px color-mix(in srgb, var(--brand) 40%, transparent));
+}
+.start-wrap .start-btn {
+  z-index: 1;
+}
+.start-atom .atom-halo {
+  display: none;
+}
+/* Progress ring occupies the atom's centre: keep the orbits/electrons, remove
+   only the nucleus and leave the ring's inner space empty. */
+.start-atom.has-progress .atom-core {
+  display: none;
+}
+.start-atom .atom-shield-frame,
+.rail-atom .atom-shield-frame {
+  display: none;
+}
+.start-atom .atom-orbit {
+  stroke-width: 1.1;
+  stroke-opacity: 0.9;
+}
+.start-label {
+  position: relative;
+  z-index: 2;
+}
+
+/* Atom as the rail's selected marker (replaces the moving highlight). */
+.rail-atom {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  opacity: 0.95;
+}
+.rail-shield {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+  filter: drop-shadow(0 0 5px rgba(139, 92, 246, 0.6));
+}
+.rail-shield svg {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+.rail-shield-segments path {
+  fill: none;
+  stroke: var(--sn-ice, #e6f6ff);
+  stroke-width: 1.2;
+  stroke-opacity: 0.92;
+  stroke-linecap: round;
+  stroke-dasharray: 100;
+  stroke-dashoffset: 100;
+  vector-effect: non-scaling-stroke;
+  animation: rail-shield-draw 0.55s var(--sn-ease, ease-out) forwards;
+}
+.rail-shield-segments path:nth-child(2) {
+  animation-delay: 0.04s;
+}
+.rail-shield-segments path:nth-child(3) {
+  animation-delay: 0.08s;
+}
+.rail-shield-segments path:nth-child(4) {
+  animation-delay: 0.12s;
+}
+.rail-shield-segments path:nth-child(5) {
+  animation-delay: 0.16s;
+}
+.rail-shield-segments path:nth-child(6) {
+  animation-delay: 0.2s;
+}
+.rail-shield-wing {
+  fill: rgba(167, 139, 250, 0.42);
+  stroke: #ecdcff;
+  stroke-width: 1.5;
+  stroke-opacity: 1;
+  opacity: 0;
+  transform-box: fill-box;
+  transform-origin: center;
+  filter: drop-shadow(0 0 3px rgba(139, 92, 246, 0.9));
+  animation:
+    rail-shield-wing 0.6s 0.12s var(--sn-ease, ease-out) forwards,
+    rail-wing-breathe 2.8s 0.8s ease-in-out infinite;
+}
+.rail-shield-wing-r {
+  animation-delay: 0.18s, 0.9s;
+}
+.rail-shield-streak {
+  fill: none;
+  stroke: #c4b5fd;
+  stroke-width: 1.1;
+  stroke-linecap: round;
+  stroke-opacity: 0.9;
+  opacity: 0;
+  animation: rail-streak 0.55s 0.3s var(--sn-ease, ease-out) forwards;
+}
+.rail-shield-streak-r {
+  animation-delay: 0.38s;
+}
+.rail-shield-nodes circle {
+  fill: var(--sn-gold, #f5d48a);
+  opacity: 0;
+  animation: rail-shield-node 0.4s 0.28s var(--ease) forwards;
+}
+.rail-shield-orbit {
+  fill: none;
+  stroke: color-mix(in srgb, var(--sn-cyan, #7dd3fc) 72%, transparent);
+  stroke-width: 0.7;
+  stroke-dasharray: 2 5;
+  opacity: 0.55;
+  transform-origin: 50px 50px;
+  animation: rail-shield-spin 11s linear infinite;
+}
+@keyframes rail-shield-draw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+@keyframes rail-shield-wing {
+  0% {
+    opacity: 0;
+    transform: scale(0.7);
+  }
+  100% {
+    opacity: 0.95;
+    transform: scale(1);
+  }
+}
+@keyframes rail-wing-breathe {
+  50% {
+    opacity: 0.55;
+  }
+}
+@keyframes rail-streak {
+  0% {
+    opacity: 0;
+    stroke-dasharray: 0 80;
+  }
+  100% {
+    opacity: 1;
+    stroke-dasharray: 80 0;
+  }
+}
+@keyframes rail-shield-node {
+  to {
+    opacity: 1;
+  }
+}
+@keyframes rail-shield-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.rail-atom .atom-shield {
+  filter: drop-shadow(0 0 6px rgba(125, 211, 252, 0.45));
+}
+/* Around the icon only: the nucleus would cover the nav glyph, so the rail's
+   selected marker is the orbit + shield frame. */
+.rail-atom .atom-halo,
+.rail-atom .atom-core,
+.rail-atom .atom-progress {
+  display: none;
+}
+.rail-atom .atom-orbits {
+  opacity: 0.85;
+}
+
+/* ------------------------------------------------ settings theme drawer */
+/* Group titles inside the theme drawer line up with `.collapse-inner` rows. */
+.collapse-inner .settings-group-title {
+  padding-left: 22px;
+  padding-right: 22px;
+}
+.theme-group {
+  display: contents;
+}
+/* A locked row still looks like every other settings row. */
+.settings-action .select-trigger:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* ------------------------------------------------- click / text sweep FX */
+.theme-click-burst {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  overflow: hidden;
+  pointer-events: none;
+}
+.theme-click-shard {
+  position: absolute;
+  display: block;
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+  will-change: transform, opacity;
+}
+.theme-input-sweep {
+  position: fixed;
+  z-index: 145;
+  overflow: hidden;
+  pointer-events: none;
+}
+.theme-input-sweep-fill {
+  position: absolute;
+  inset: 0;
+  display: block;
+  background: #fff;
+  opacity: 0.16;
+  transform-origin: left center;
+}
+.theme-input-sweep-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  display: block;
+  background: #fff;
+  box-shadow: 0 0 7px rgba(255, 255, 255, 0.75);
+  transform-origin: left center;
+}
+.theme-text-sweep {
+  position: fixed;
+  z-index: 140;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.12);
+  transform-origin: left center;
+  pointer-events: none;
+}
+.theme-text-sweep-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.58);
+}
+
+/* ------------------------------------------- 霆骇列律 geometry (octagon edges)
+   The theme replaces rounded corners with octagons. `clip-path` does not affect
+   layout; only the clip is applied (no filter/stroke pass). */
+:root[data-special-theme~='starsnow'] {
+  --sn-oct-pill: polygon(
+    14px 0,
+    calc(100% - 14px) 0,
+    100% 14px,
+    100% calc(100% - 14px),
+    calc(100% - 14px) 100%,
+    14px 100%,
+    0 calc(100% - 14px),
+    0 14px
+  );
+  --sn-oct-sm: polygon(
+    7px 0,
+    calc(100% - 7px) 0,
+    100% 7px,
+    100% calc(100% - 7px),
+    calc(100% - 7px) 100%,
+    7px 100%,
+    0 calc(100% - 7px),
+    0 7px
+  );
+  --sn-oct-card: polygon(
+    14px 0,
+    calc(100% - 14px) 0,
+    100% 14px,
+    100% calc(100% - 14px),
+    calc(100% - 14px) 100%,
+    14px 100%,
+    0 calc(100% - 14px),
+    0 14px
+  );
+  --sn-oct-icon: polygon(
+    28% 0,
+    72% 0,
+    100% 28%,
+    100% 72%,
+    72% 100%,
+    28% 100%,
+    0 72%,
+    0 28%
+  );
+  --sn-oct-knob: polygon(
+    30% 0,
+    70% 0,
+    100% 30%,
+    100% 70%,
+    70% 100%,
+    30% 100%,
+    0 70%,
+    0 30%
+  );
+}
+:root[data-special-theme~='starsnow'] .btn,
+:root[data-special-theme~='starsnow'] .modal-close,
+:root[data-special-theme~='starsnow'] .win-btn,
+:root[data-special-theme~='starsnow'] .games-toggle,
+:root[data-special-theme~='starsnow'] .game-add,
+:root[data-special-theme~='starsnow'] .gear-btn,
+:root[data-special-theme~='starsnow'] .font-item,
+:root[data-special-theme~='starsnow'] .color-trigger,
+:root[data-special-theme~='starsnow'] .seg,
+:root[data-special-theme~='starsnow'] .tab,
+:root[data-special-theme~='starsnow'] .seg-thumb,
+:root[data-special-theme~='starsnow'] .tab-thumb,
+:root[data-special-theme~='starsnow'] .segmented,
+:root[data-special-theme~='starsnow'] .tabs,
+:root[data-special-theme~='starsnow'] .input,
+:root[data-special-theme~='starsnow'] .select-trigger,
+:root[data-special-theme~='starsnow'] .select-option,
+:root[data-special-theme~='starsnow'] .drawer-opt,
+:root[data-special-theme~='starsnow'] .linked-cap,
+:root[data-special-theme~='starsnow'] .playtime-pill,
+:root[data-special-theme~='starsnow'] .switch-track {
+  clip-path: var(--sn-oct-sm);
+  --sn-cut: 7px;
+}
+/* Kill the old pill radius as well: otherwise the background is rounded first
+   and the octagon clip only intersects it, which reads as a rounded groove. */
+:root[data-special-theme~='starsnow'] .segmented,
+:root[data-special-theme~='starsnow'] .tabs,
+:root[data-special-theme~='starsnow'] .seg,
+:root[data-special-theme~='starsnow'] .tab,
+:root[data-special-theme~='starsnow'] .seg-thumb,
+:root[data-special-theme~='starsnow'] .tab-thumb,
+:root[data-special-theme~='starsnow'] .switch-track,
+:root[data-special-theme~='starsnow'] .switch-knob {
+  border-radius: 0;
+}
+:root[data-special-theme~='starsnow'] .segmented,
+:root[data-special-theme~='starsnow'] .tabs {
+  clip-path: polygon(
+    10px 0,
+    calc(100% - 10px) 0,
+    100% 10px,
+    100% calc(100% - 10px),
+    calc(100% - 10px) 100%,
+    10px 100%,
+    0 calc(100% - 10px),
+    0 10px
+  );
+}
+/* The launch button intentionally keeps its rounded pill (the atom sits on it). */
+:root[data-special-theme~='starsnow'] .switch-knob {
+  clip-path: var(--sn-oct-knob);
+}
+:root[data-special-theme~='starsnow'] .game-chip,
+:root[data-special-theme~='starsnow'] .rail-item,
+:root[data-special-theme~='starsnow'] .rail-thumb {
+  clip-path: var(--sn-oct-icon);
+  --sn-cut: 28%;
+}
+:root[data-special-theme~='starsnow'] .home-info,
+:root[data-special-theme~='starsnow'] .settings,
+:root[data-special-theme~='starsnow'] .panel,
+:root[data-special-theme~='starsnow'] .modal,
+:root[data-special-theme~='starsnow'] .glass-pop,
+:root[data-special-theme~='starsnow'] .toast,
+:root[data-special-theme~='starsnow'] .gacha-toast,
+:root[data-special-theme~='starsnow'] .critical-card,
+:root[data-special-theme~='starsnow'] .welcome,
+:root[data-special-theme~='starsnow'] .method-card,
+:root[data-special-theme~='starsnow'] .ll-card,
+:root[data-special-theme~='starsnow'] .launch-drawer,
+:root[data-special-theme~='starsnow'] .select-menu,
+:root[data-special-theme~='starsnow'] .rail-pop,
+:root[data-special-theme~='starsnow'] .dl-pop,
+:root[data-special-theme~='starsnow'] .pool-col,
+:root[data-special-theme~='starsnow'] .stat-card,
+:root[data-special-theme~='starsnow'] .pity-card,
+:root[data-special-theme~='starsnow'] .list,
+:root[data-special-theme~='starsnow'] .gallery-thumb {
+  clip-path: var(--sn-oct-card);
+  --sn-cut: 14px;
+}
+:root[data-special-theme~='starsnow'] .inline-edit-field::after {
+  /* The themed input sweep provides both the fill and the bottom line. */
+  display: none;
+}
+
+/* ------------------------------------------------------------ titlebar */
+:root[data-special-theme~='starsnow'] .page-title {
+  text-shadow:
+    0 0 22px color-mix(in srgb, var(--brand) 30%, transparent),
+    0 0 2px color-mix(in srgb, var(--sn-ice) 55%, transparent);
+}
+:root[data-special-theme~='starsnow'] .page-header {
+  position: relative;
+}
+:root[data-special-theme~='starsnow'] .page-header::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  bottom: -7px;
+  width: 74px;
+  height: 1px;
+  pointer-events: none;
+  background: linear-gradient(90deg, var(--brand), transparent);
+}
+
+[data-special-titlebar='starsnow'] .topbar {
+  background: linear-gradient(180deg, rgba(11, 16, 32, 0.62), rgba(11, 16, 32, 0));
+}
+[data-special-titlebar='starsnow'] .win-btn {
+  color: var(--sn-ice);
+}
+[data-special-titlebar='starsnow'] .win-btn:hover {
+  color: var(--brand);
+  background: color-mix(in srgb, var(--brand) 22%, transparent);
+}
+[data-special-titlebar='starsnow'] .win-btn.close:hover {
+  background: #c04048;
+  color: #fff;
+}
+
+/* ----------------------------------------------------------- focus ring */
+[data-special-focus-ring='starsnow'] :focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--brand) 18%, transparent);
+}
+
+/* ------------------------------------------------------- text selection */
+[data-special-text-accent='starsnow'] ::selection {
+  background: color-mix(in srgb, var(--brand) 45%, transparent);
+  color: var(--fg);
+}
+[data-special-text-accent='starsnow'] .about-link {
+  color: var(--brand);
+}
+[data-special-text-accent='starsnow'] .about-link:hover {
+  color: var(--brand-hover);
+}
+
+/* ---------------------------------------------------------------- toast */
+[data-special-toast='starsnow'] .toast {
+  border-color: rgba(125, 211, 252, 0.28);
+  box-shadow:
+    0 0 0 1px rgba(139, 124, 246, 0.15),
+    0 14px 36px rgba(0, 0, 0, 0.45),
+    0 0 26px rgba(139, 124, 246, 0.18);
+  animation: sn-toast-in 0.34s var(--sn-ease) both;
+}
+[data-special-toast='starsnow'] .toast.closing {
+  animation: sn-toast-out 0.2s var(--ease) both;
+}
+@keyframes sn-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes sn-toast-out {
+  to {
+    opacity: 0;
+    transform: translateY(6px) scale(0.96);
+  }
+}
+
+/* ----------------------------------------------------- page transitions */
+/* Only the page content animates. The rail, top bar and wallpaper used to
+   inherit the container's fade, so every page switch made the sidebar and the
+   background scrim blink out and back in. They now stay perfectly still. */
+[data-special-transition='starsnow'] .app-anim-run {
+  animation: none;
+}
+[data-special-transition='starsnow'] .app-anim-run .stage {
+  animation: sn-page-in 0.4s var(--sn-ease);
+}
+[data-special-transition='starsnow'] .app-anim-run .bg-layer,
+[data-special-transition='starsnow'] .app-anim-run .bg-scrim,
+[data-special-transition='starsnow'] .app-anim-run .rail,
+[data-special-transition='starsnow'] .app-anim-run .topbar {
+  animation: none;
+}
+[data-special-transition='starsnow'] .app-anim-run::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at 20% 18%, rgba(230, 246, 255, 0.3) 0 1px, transparent 2px),
+    radial-gradient(circle at 72% 62%, rgba(245, 212, 138, 0.35) 0 1px, transparent 2px),
+    radial-gradient(circle at 44% 82%, rgba(125, 211, 252, 0.3) 0 1px, transparent 2px);
+  background-size: 180px 180px, 240px 240px, 210px 210px;
+  animation: sn-star-wipe 0.5s ease-out both;
+}
+/* 霆骇列律 page switch: a quick thunder flash + frost shard sweep. */
+[data-special-transition='starsnow'] .app-anim-run::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  pointer-events: none;
+  background:
+    linear-gradient(112deg, transparent 42%, rgba(230, 246, 255, 0.26) 45%, transparent 48%),
+    linear-gradient(100deg, transparent 61%, color-mix(in srgb, var(--brand) 30%, transparent) 64%, transparent 67%),
+    linear-gradient(90deg, transparent 76%, rgba(230, 246, 255, 0.12) 78%, transparent 80%);
+  animation: sn-thunder-wipe 0.42s ease-out both;
+}
+/* Sliding only: an opacity animation on an ancestor of the glass surfaces makes
+   Chromium paint `backdrop-filter` late, so the page looked "unstyled" until
+   the fade finished. Transform keeps the frost / blur material live from frame
+   one. */
+@keyframes sn-page-in {
+  from {
+    transform: translateX(calc(var(--anim-x, 26px) * 1.2));
+  }
+  to {
+    transform: none;
+  }
+}
+@keyframes sn-star-wipe {
+  from {
+    opacity: 0;
+    transform: translateX(30px);
+  }
+  35% {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+    transform: none;
+  }
+}
+@keyframes sn-thunder-wipe {
+  from {
+    opacity: 0;
+    transform: translateX(-40px) skewX(-6deg);
+  }
+  22% {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+    transform: translateX(60px) skewX(4deg);
+  }
+}
+
+/* -------------------------------------------------------------- sidebar */
+[data-special-sidebar='starsnow'] .rail {
+  background: linear-gradient(180deg, rgba(11, 16, 32, 0.6), rgba(11, 16, 32, 0.12));
+  box-shadow: inset -1px 0 rgba(125, 211, 252, 0.16);
+}
+[data-special-sidebar='starsnow'] .rail-glass {
+  background-image: linear-gradient(180deg, rgba(139, 124, 246, 0.16), rgba(125, 211, 252, 0.05));
+  border-right-color: rgba(125, 211, 252, 0.2);
+}
+[data-special-nav-selected='starsnow'] .rail-item.active::after {
+  content: '';
+  position: absolute;
+  inset: 3px;
+  border-radius: 50%;
+  pointer-events: none;
+  background: radial-gradient(
+    circle,
+    color-mix(in srgb, var(--brand) 22%, transparent),
+    transparent 68%
+  );
+}
+
+/* ----------------------------------------------------- update indicator */
+[data-special-update-indicator='starsnow'] .rail-update-dot {
+  background: var(--fg);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--fg) 60%, transparent);
+}
+.rail-update-critical {
+  position: absolute;
+  right: 1px;
+  top: -1px;
+  width: 13px;
+  height: 13px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--sn-gold, #f5d48a);
+  color: #1a1400;
+  font-size: 9px;
+  font-weight: 800;
+}
+.rail-update-icon {
+  position: relative;
+}
+
+/* ----------------------------------------------------------- game cards */
+[data-special-cards='starsnow'] .home-info {
+  border-color: rgba(125, 211, 252, 0.3);
+  box-shadow:
+    inset 0 0 0 1px rgba(139, 124, 246, 0.18),
+    0 18px 44px rgba(0, 0, 0, 0.35);
+}
+[data-special-cards='starsnow'] .game-chip {
+  border-color: rgba(125, 211, 252, 0.22);
+}
+[data-special-cards='starsnow'] .game-chip.active {
+  border-color: var(--brand);
+  box-shadow:
+    0 0 0 2px var(--brand-dim),
+    0 0 18px color-mix(in srgb, var(--brand) 35%, transparent);
+}
+[data-special-cards='starsnow'] .stat-card {
+  border-color: rgba(125, 211, 252, 0.2);
+}
+
+/* ---------------------------------------------------------- launch button */
+[data-special-launch-button='starsnow'] .start-btn:not(.stop):not(.update) {
+  /* White launch surface with a permanent, slow prismatic sheen. */
+  background-color: #f8fbff;
+  background-image: none;
+  color: #141a2b;
+  padding-left: 70px;
+  padding-right: 26px;
+  overflow: hidden;
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, #8b5cf6 28%, transparent),
+    0 10px 28px color-mix(in srgb, #8b5cf6 24%, transparent);
+}
+[data-special-launch-button='starsnow'] .start-btn:not(.stop):not(.update)::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.94;
+  background:
+    radial-gradient(38% 55% at 18% 30%, rgba(139, 92, 246, 0.82), transparent 64%),
+    radial-gradient(44% 60% at 84% 18%, rgba(125, 211, 252, 0.74), transparent 66%),
+    radial-gradient(48% 64% at 62% 88%, rgba(240, 171, 252, 0.68), transparent 68%),
+    radial-gradient(34% 46% at 34% 72%, rgba(245, 212, 138, 0.36), transparent 66%);
+  background-size: 220% 220%;
+  background-position: 0% 40%, 100% 0%, 50% 100%, 30% 80%;
+  background-repeat: no-repeat;
+  filter: blur(8px) saturate(1.3);
+  animation: start-aurora 9s ease-in-out infinite alternate;
+}
+[data-special-launch-button='starsnow'] .start-btn:not(.stop):not(.update):hover {
+  background-color: #ffffff;
+}
+[data-special-launch-button='starsnow'] .start-label {
+  z-index: 3;
+}
+@keyframes start-aurora {
+  0% {
+    background-position: 0% 40%, 100% 0%, 50% 100%, 30% 80%;
+    filter: blur(8px) saturate(1.3) hue-rotate(0deg);
+  }
+  45% {
+    background-position: 70% 10%, 20% 70%, 90% 30%, 60% 20%;
+    filter: blur(10px) saturate(1.45) hue-rotate(20deg);
+  }
+  100% {
+    background-position: 100% 80%, 0% 30%, 20% 60%, 80% 10%;
+    filter: blur(8px) saturate(1.35) hue-rotate(-14deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-special-launch-button='starsnow'] .start-btn::before {
+    animation: none;
+  }
+}
+
+/* --------------------------------------------------------------- games bar */
+[data-special-games-bar='starsnow'] .games-collapser {
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(11, 16, 32, 0.32), rgba(11, 16, 32, 0.04));
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--brand) 18%, transparent),
+    inset 0 0 18px color-mix(in srgb, var(--brand) 12%, transparent);
+  transition:
+    grid-template-columns 0.32s var(--ease),
+    opacity 0.24s var(--ease);
+}
+[data-special-games-bar='starsnow'] .games-collapser:not(.collapsed) {
+  animation: sn-shield-gather 0.32s var(--sn-ease);
+}
+@keyframes sn-shield-gather {
+  from {
+    opacity: 0.4;
+    transform: scaleX(0.98);
+    box-shadow:
+      0 0 0 1px transparent,
+      inset 0 0 0 transparent;
+  }
+}
+
+/* --------------------------------------------------------------- avatars */
+[data-special-avatars='starsnow'] .linked-cap {
+  border-color: rgba(125, 211, 252, 0.2);
+  box-shadow: inset 0 0 0 1px rgba(139, 124, 246, 0.12);
+}
+[data-special-avatars='starsnow'] .linked-cap.running {
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--brand) 55%, transparent),
+    0 0 14px color-mix(in srgb, var(--brand) 35%, transparent);
+}
+[data-special-avatars='starsnow'] .linked-cap-dot {
+  background: var(--brand);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--brand) 85%, transparent);
+}
+
+/* ------------------------------------------------------------ empty states */
+[data-special-empty-state='starsnow'] .welcome,
+[data-special-empty-state='starsnow'] .empty,
+[data-special-empty-state='starsnow'] .settings-empty {
+  border-color: rgba(125, 211, 252, 0.22);
+  background-image:
+    radial-gradient(circle at 22% 24%, rgba(230, 246, 255, 0.16) 0 1px, transparent 2px),
+    radial-gradient(circle at 76% 70%, rgba(245, 212, 138, 0.18) 0 1px, transparent 2px);
+  background-size: 180px 180px, 220px 220px;
+}
+[data-special-empty-state='starsnow'] .empty-icon {
+  color: var(--brand);
+  text-shadow: 0 0 12px color-mix(in srgb, var(--brand) 50%, transparent);
+}
+
+/* -------------------------------------------------------------- update page */
+[data-special-update-page='starsnow'] .update-page .panel {
+  border-color: rgba(125, 211, 252, 0.22);
+  box-shadow: inset 0 0 0 1px rgba(139, 124, 246, 0.12);
+}
+[data-special-update-page='starsnow'] .update-page .progress-fill {
+  background: linear-gradient(
+    90deg,
+    var(--brand),
+    color-mix(in srgb, var(--brand) 55%, white)
+  );
+  box-shadow: 0 0 14px color-mix(in srgb, var(--brand) 45%, transparent);
+}
+[data-special-update-page='starsnow'] .update-page .dl-row-percent {
+  color: var(--brand);
+}
+.update-critical-hint {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(245, 212, 138, 0.35);
+  border-radius: 10px;
+  background: rgba(245, 212, 138, 0.1);
+  color: var(--sn-gold, #f5d48a);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.update-modal.is-critical {
+  border-color: rgba(245, 212, 138, 0.45);
+  box-shadow:
+    inset 0 0 0 1px rgba(139, 124, 246, 0.2),
+    0 0 28px rgba(139, 124, 246, 0.25);
+}
+
+/* --------------------------------------------------------- download overlay */
+[data-special-download-overlay='starsnow'] .dl-pop-glass,
+[data-special-download-overlay='starsnow'] .rail-pop {
+  border-color: color-mix(in srgb, var(--brand) 38%, transparent);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--brand) 18%, transparent),
+    0 14px 34px rgba(0, 0, 0, 0.45),
+    0 0 22px color-mix(in srgb, var(--brand) 22%, transparent);
+  animation: sn-orbit-in 0.2s var(--sn-ease) both;
+}
+@keyframes sn-orbit-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.96) rotate(-1deg);
+  }
+}
+
+/* ----------------------------------------------------------- download ring */
+/* The launch button's cap ring is the stock one; only the sidebar ring is
+   themed (shield + atom arc + black/white percentage). */
+[data-special-download-ring='starsnow'] .rail-ring-percent {
+  color: var(--fg);
+}
+
+/* ===================================================== 星轨手记 (mitia) */
+/* 星轨 is a cubist theme: every rounded rectangle control becomes a true
+   rectangle (the progress circle, switch knob and avatars stay round). */
+:is(
+    [data-special-theme~='mitia']
+  )
+  :is(
+    .start-btn,
+    .btn,
+    .game-chip,
+    .linked-cap,
+    .rail-thumb,
+    .home-info,
+    .panel,
+    .settings,
+    .modal,
+    .toast,
+    .seg,
+    .segmented,
+    .seg-thumb,
+    .tabs,
+    .tab,
+    .tab-thumb,
+    .input,
+    .select-trigger,
+    .select-menu,
+    .select-option,
+    .glass-pop,
+    .dl-pop-glass,
+    .rail-pop,
+    .launch-drawer,
+    .confirm-modal,
+    .color-trigger,
+    .games-collapser,
+    .games-toggle,
+    .switch-track,
+    .switch-knob,
+    .radio-dot,
+    .radio-knob,
+    .checkbox-box,
+    .linked-cap,
+    .linked-launch-pill,
+    .linked-thumb,
+    .wp-region-layer,
+    .wallpaper-switch,
+    .wp-btn,
+    .dl-pop,
+    .gallery-thumb,
+    .thumb-skeleton,
+    .viewer,
+    .viewer-bar,
+    .viewer-img,
+    .stat-card,
+    .playtime-pill,
+    .card,
+    .home-card,
+    .gacha-toast,
+    .game-add,
+    .rail-item,
+    .win-btn,
+    .modal-close,
+    .inline-edit-btn,
+    .ll-grip,
+    .path-field,
+    .path-field-icon,
+    .wl-thumb,
+    .hm-cell,
+    .launcher-icon,
+    .launcher-brand,
+    .crop-img,
+    .crop-box,
+    .drawer-opt,
+    .font-item,
+    .icon-picker-sm
+  ) {
+  border-radius: 0 !important;
+}
+[data-special-theme~='mitia'] .slider::-webkit-slider-thumb {
+  border-radius: 0 !important;
+}
+
+/* Mitia's four marks: the tilted cross star (selection / launch), the axes +
+   sine curve (progress / data), the molecule (connections) and the wireframe
+   cube held by two hands (the sidebar's selected item). */
+
+/* ------------------------------------------------ marks (shared shapes) */
+.star-cross {
+  display: block;
+  overflow: visible;
+  transform: rotate(-15deg);
+}
+.star-cross-bloom {
+  animation: mt-ink-breathe 9s ease-in-out infinite;
+}
+.star-cross-shape {
+  filter: drop-shadow(0 0 9px rgba(108, 75, 216, 0.55))
+    drop-shadow(0 0 3px rgba(232, 200, 122, 0.35));
+}
+/* Restrained gold light running along the star's outline (smooth band, no
+   dashes; motion comes from the SVG gradient). */
+.mitia-flow {
+  fill: none;
+  stroke: #e8c87a;
+  stroke-width: 1.1;
+  stroke-linejoin: round;
+  filter: drop-shadow(0 0 4px rgba(232, 200, 122, 0.55));
+}
+.star-cross-sheen {
+  mix-blend-mode: screen;
+}
+.star-cross-edge {
+  stroke-width: 0.9;
+  stroke-opacity: 0.65;
+}
+@keyframes mt-ink-breathe {
+  0%,
+  100% {
+    opacity: 0.72;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* A real 3D cube that never stops turning. */
+.cube3d {
+  display: block;
+  width: var(--cube-edge, 30px);
+  height: var(--cube-edge, 30px);
+  perspective: 340px;
+  pointer-events: none;
+  filter: drop-shadow(0 0 6px rgba(143, 227, 255, 0.28));
+}
+.cube3d-spin {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 100%;
+  transform-style: preserve-3d;
+  animation: cube3d-turn 12s linear infinite;
+}
+.cube3d-face {
+  position: absolute;
+  inset: 0;
+  border: 1px solid rgba(232, 200, 122, 0.62);
+  background: linear-gradient(135deg, rgba(167, 139, 250, 0.18), rgba(24, 16, 52, 0.42));
+  box-shadow: inset 0 0 10px rgba(143, 227, 255, 0.12);
+}
+.cube3d-front {
+  transform: translateZ(calc(var(--cube-edge) / 2));
+}
+.cube3d-back {
+  transform: rotateY(180deg) translateZ(calc(var(--cube-edge) / 2));
+}
+.cube3d-right {
+  transform: rotateY(90deg) translateZ(calc(var(--cube-edge) / 2));
+}
+.cube3d-left {
+  transform: rotateY(-90deg) translateZ(calc(var(--cube-edge) / 2));
+}
+.cube3d-top {
+  transform: rotateX(90deg) translateZ(calc(var(--cube-edge) / 2));
+}
+.cube3d-bottom {
+  transform: rotateX(-90deg) translateZ(calc(var(--cube-edge) / 2));
+}
+/* White triangle glyph on the front face (the name card's cube). */
+@keyframes cube3d-turn {
+  0% {
+    transform: rotateX(-16deg) rotateY(0deg) rotateZ(0deg);
+  }
+  35% {
+    transform: rotateX(22deg) rotateY(130deg) rotateZ(12deg);
+  }
+  70% {
+    transform: rotateX(-20deg) rotateY(250deg) rotateZ(-10deg);
+  }
+  100% {
+    transform: rotateX(-16deg) rotateY(360deg) rotateZ(0deg);
+  }
+}
+.rail-cube {
+  z-index: 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .cube3d-spin {
+    animation: none;
+    transform: rotateX(-18deg) rotateY(-32deg);
+  }
+}
+
+/* ---------------------------------------------------------------- rail */
+[data-special-sidebar='mitia'] .rail {
+  background:
+    linear-gradient(180deg, rgba(14, 20, 48, 0.94), rgba(14, 20, 48, 0.52) 58%, rgba(14, 20, 48, 0.9)),
+    repeating-linear-gradient(
+      180deg,
+      rgba(167, 139, 250, 0.08) 0 1px,
+      transparent 1px 40px
+    ),
+    repeating-linear-gradient(90deg, rgba(167, 139, 250, 0.05) 0 1px, transparent 1px 40px);
+  box-shadow: inset -1px 0 rgba(232, 200, 122, 0.24);
+}
+[data-special-sidebar='mitia'] .rail-glass {
+  background-color: var(--glass);
+  background-image: var(--glass-sheen, none),
+    linear-gradient(180deg, rgba(108, 75, 216, 0.22), rgba(143, 227, 255, 0.05));
+  background-size: 900px 900px, auto;
+  border-right-color: rgba(232, 200, 122, 0.28);
+}
+/* Decorative gold y-axis on the rail's right edge: an upward arrow, a
+   hairline and hand-placed ticks / glints (not a strict ruler). It sits on the
+   very edge so it meets the page-title x-axis at the corner. */
+[data-special-sidebar='mitia'] .rail::after {
+  content: '';
+  position: absolute;
+  top: 14px;
+  bottom: 14px;
+  right: 0;
+  width: 10px;
+  z-index: 4;
+  pointer-events: none;
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8'%3E%3Cpath d='M4 0.6 7.4 7.4 0.6 7.4Z' fill='%23e8c87a' fill-opacity='0.9'/%3E%3C/svg%3E"),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='220'%3E%3Cg stroke='%23e8c87a' stroke-linecap='round'%3E%3Cline x1='6' y1='0' x2='6' y2='220' stroke-opacity='0.32' stroke-width='1.6'/%3E%3Cline x1='0' y1='28' x2='6' y2='28' stroke-opacity='0.7' stroke-width='1.4'/%3E%3Cline x1='2' y1='62' x2='6' y2='62' stroke-opacity='0.45' stroke-width='1.4'/%3E%3Cline x1='0' y1='96' x2='6' y2='96' stroke-opacity='0.85' stroke-width='1.8'/%3E%3Cline x1='3' y1='132' x2='6' y2='132' stroke-opacity='0.4' stroke-width='1.4'/%3E%3Cline x1='1' y1='168' x2='6' y2='168' stroke-opacity='0.65' stroke-width='1.4'/%3E%3Cline x1='4' y1='198' x2='6' y2='198' stroke-opacity='0.35' stroke-width='1.4'/%3E%3C/g%3E%3Ccircle cx='6' cy='45' r='1.4' fill='%23e8c87a' fill-opacity='0.8'/%3E%3Ccircle cx='6' cy='150' r='1.2' fill='%238fe3ff' fill-opacity='0.7'/%3E%3Ccircle cx='6' cy='182' r='1.3' fill='%23e8c87a' fill-opacity='0.6'/%3E%3C/svg%3E");
+  background-position: right 0 top 0, right 0 top 10px;
+  background-size: 8px 8px, 10px 220px;
+  background-repeat: no-repeat, repeat-y;
+}
+[data-special-nav-selected='mitia'] .rail-item.active::after {
+  content: '';
+  position: absolute;
+  inset: 4px;
+  border-radius: 6px;
+  pointer-events: none;
+  background: radial-gradient(circle, rgba(108, 75, 216, 0.28), transparent 72%);
+}
+/* The cube sits *behind* the glyph: the icon is inscribed in the wireframe. */
+[data-special-nav-selected='mitia'] .rail-item > svg {
+  position: relative;
+  z-index: 2;
+}
+
+/* -------------------------------------------------------- launch button */
+[data-special-launch-button='mitia'] .start-btn:not(.update):not(.stop) {
+  background: linear-gradient(135deg, #232a5c 0%, #3a2f78 56%, #4a3a92 100%);
+  color: var(--mt-paper, #f2eeff);
+  box-shadow:
+    0 12px 30px rgba(6, 8, 20, 0.5),
+    0 0 0 1px rgba(232, 200, 122, 0.3),
+    0 0 22px rgba(108, 75, 216, 0.32);
+}
+/* Apple-Music-like flowing light: soft gold / lilac / ice blobs drifting and
+   morphing behind the label — not a straight sweep. */
+[data-special-launch-button='mitia'] .start-btn:not(.update):not(.stop)::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.92;
+  background:
+    radial-gradient(38% 58% at 18% 28%, rgba(232, 200, 122, 0.55), transparent 62%),
+    radial-gradient(44% 62% at 78% 18%, rgba(255, 243, 207, 0.42), transparent 64%),
+    radial-gradient(46% 64% at 62% 86%, rgba(167, 139, 250, 0.5), transparent 66%),
+    radial-gradient(34% 48% at 28% 74%, rgba(143, 227, 255, 0.28), transparent 68%);
+  background-size: 220% 220%;
+  background-repeat: no-repeat;
+  filter: blur(10px) saturate(1.25);
+  animation: mt-btn-aurora 11s ease-in-out infinite alternate;
+}
+@keyframes mt-btn-aurora {
+  0% {
+    background-position: 0% 40%, 100% 0%, 50% 100%, 30% 80%;
+    filter: blur(10px) saturate(1.25) hue-rotate(0deg);
+  }
+  45% {
+    background-position: 70% 10%, 20% 70%, 90% 30%, 60% 20%;
+    filter: blur(12px) saturate(1.4) hue-rotate(12deg);
+  }
+  100% {
+    background-position: 100% 80%, 0% 30%, 20% 60%, 80% 10%;
+    filter: blur(10px) saturate(1.3) hue-rotate(-10deg);
+  }
+}
+[data-special-launch-button='mitia'] .start-btn:not(.update):not(.stop) .start-label {
+  color: inherit;
+}
+[data-special-launch-button='mitia'] .start-btn:not(.update):not(.stop):hover {
+  background: linear-gradient(135deg, #2a3270 0%, #443689 56%, #5544a6 100%);
+  box-shadow:
+    0 12px 30px rgba(6, 8, 20, 0.5),
+    0 0 0 1px rgba(232, 200, 122, 0.45),
+    0 0 28px rgba(108, 75, 216, 0.45);
+}
+/* The ink star sits ON TOP of the pill: its arms cross the button's left edge. */
+[data-special-launch-button='mitia'] .start-atom {
+  left: -28px;
+  z-index: 3;
+}
+[data-special-launch-button='mitia'] .start-atom .star-cross {
+  transform: rotate(-15deg) scale(0.9);
+  /* The star breathes all the time, not only on hover. */
+  animation: mt-star-open 3.8s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+/* Energy spiral: hidden by default, appears and is sucked inwards on hover /
+   long press. */
+.star-spiral {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 240px;
+  height: 240px;
+  margin: -120px 0 0 -120px;
+  opacity: 0;
+  transform: scale(1.18);
+  transform-origin: 50% 50%;
+  pointer-events: none;
+  transition:
+    opacity 0.32s ease,
+    transform 0.45s ease;
+}
+/* The rotor keeps spinning while the bands are hidden, so leaving and
+   re-entering the button never restarts the rotation. */
+.star-spiral-rotor {
+  transform-box: view-box;
+  transform-origin: 50% 50%;
+  animation: mt-spiral-spin 120s linear infinite;
+}
+.star-spiral path {
+  stroke: none;
+}
+.star-spiral {
+  filter: blur(0.35px) drop-shadow(0 0 6px rgba(232, 200, 122, 0.28));
+}
+[data-special-launch-button='mitia'] .start-wrap:hover .star-spiral,
+[data-special-launch-button='mitia'] .start-wrap:has(.start-btn:active) .star-spiral {
+  opacity: 1;
+  animation: mt-spiral-suck 3.8s cubic-bezier(0.45, 0, 0.55, 1) infinite alternate;
+}
+@keyframes mt-spiral-spin {
+  to {
+    rotate: 360deg;
+  }
+}
+/* Seamless in/out breath (alternate) instead of a jump back to the start. */
+@keyframes mt-spiral-suck {
+  from {
+    transform: scale(1.1);
+  }
+  to {
+    transform: scale(0.9);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .star-spiral {
+    animation: none !important;
+  }
+}
+/* One slow breath per cycle: swell to 1.16× and settle back — no extra dip. */
+@keyframes mt-star-open {
+  0% {
+    transform: rotate(-15deg) scale(0.9);
+  }
+  50% {
+    transform: rotate(-15deg) scale(1.16);
+  }
+  100% {
+    transform: rotate(-15deg) scale(0.9);
+  }
+}
+
+/* ---------------------------------------- click / trail particles */
+.mitia-burst-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  pointer-events: none;
+  overflow: hidden;
+}
+.mitia-hold-star {
+  position: absolute;
+  width: 76px;
+  height: 76px;
+  margin: -38px 0 0 -38px;
+  filter: drop-shadow(0 0 10px rgba(108, 75, 216, 0.55))
+    drop-shadow(0 0 4px rgba(232, 200, 122, 0.4));
+  /* Open from a point, then breathe slowly while it is held. */
+  animation:
+    mitia-hold-open 0.34s cubic-bezier(0.34, 1.56, 0.64, 1) both,
+    mitia-hold-pulse 3.2s cubic-bezier(0.45, 0, 0.55, 1) 0.34s infinite;
+}
+.mitia-hold-star svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.mitia-hold-star.out {
+  animation: mitia-hold-out 0.24s ease-in forwards;
+}
+@keyframes mitia-hold-open {
+  0% {
+    opacity: 0;
+    transform: translate(0, 0) rotate(-15deg) scale(0.04);
+  }
+  70% {
+    opacity: 1;
+    transform: translate(0, 0) rotate(-15deg) scale(1.08);
+  }
+  100% {
+    opacity: 1;
+    transform: translate(0, 0) rotate(-15deg) scale(1);
+  }
+}
+/* Slow "swallow / spit" breathing: one swell per cycle, no extra dip. */
+@keyframes mitia-hold-pulse {
+  0% {
+    transform: translate(0, 0) rotate(-15deg) scale(1);
+  }
+  50% {
+    transform: translate(0, -2px) rotate(-15deg) scale(1.12);
+  }
+  100% {
+    transform: translate(0, 0) rotate(-15deg) scale(1);
+  }
+}
+@keyframes mitia-hold-out {
+  0% {
+    opacity: 1;
+    transform: translate(0, 0) rotate(-15deg) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(0, 0) rotate(-15deg) scale(0.02);
+  }
+}
+.mitia-burst-molecule {
+  position: absolute;
+  width: 64px;
+  height: 32px;
+  margin: -16px 0 0 -32px;
+  animation: mitia-molecule-fly 1s cubic-bezier(0.16, 0.9, 0.3, 1) both;
+}
+/* Gold trail: a single SVG polyline (no canvas alpha stacking). */
+.mitia-gold-trail-svg {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 89;
+  pointer-events: none;
+  overflow: visible;
+  transition: opacity 0.24s ease-out;
+}
+.mitia-gold-canvas {
+  position: fixed;
+  inset: 0;
+  z-index: 89;
+  pointer-events: none;
+}
+/* Gold trail dot left behind while the hold star follows the pointer. */
+.mitia-gold-trail {
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  margin: -3.5px 0 0 -3.5px;
+  border-radius: 50%;
+  background: radial-gradient(circle, #fff3cf, rgba(232, 200, 122, 0.55) 55%, transparent 72%);
+  box-shadow: 0 0 8px rgba(232, 200, 122, 0.55);
+  animation: mitia-gold-trail 0.62s ease-out both;
+}
+@keyframes mitia-gold-trail {
+  0% {
+    opacity: 0.9;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.3);
+  }
+}
+.mitia-burst-molecule svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+@keyframes mitia-molecule-fly {
+  0% {
+    opacity: 0;
+    transform: scale(0.55) rotate(0deg);
+  }
+  18% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(var(--dx, 0px), var(--dy, 0px)) scale(1.05) rotate(var(--rot, 0deg));
+  }
+}
+
+/* ------------------------------------------------ 星轨坍缩 launch effect */
+/* The warp itself is the black-hole shader (LaunchTransition mode 5); this is
+   only the star that sits on top of it. */
+.mitia-nova {
+  position: fixed;
+  inset: 0;
+  z-index: 92;
+  overflow: hidden;
+  pointer-events: none;
+}
+/* Launch variant of the energy bands: scaled up, spun fast and sucked into
+   the star, then gone. */
+.mitia-nova-spiral {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  z-index: 1;
+  width: 0;
+  height: 0;
+  opacity: 0;
+  animation: nova-spiral-burst 1.35s cubic-bezier(0.4, 0, 0.6, 1) forwards;
+}
+/* Molecule formulas dragged into the star, like the material texture. */
+.mitia-nova-molecule {
+  position: absolute;
+  z-index: 2;
+  pointer-events: none;
+  transform-origin: 50% 50%;
+  filter: drop-shadow(0 0 6px rgba(232, 200, 122, 0.35));
+  animation: nova-molecule-in 1.15s cubic-bezier(0.4, 0, 0.7, 1) both;
+}
+@keyframes nova-molecule-in {
+  0% {
+    opacity: 0;
+    transform: translate(0, 0) rotate(0deg) scale(1);
+  }
+  18% {
+    opacity: 0.95;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(var(--dx), var(--dy)) rotate(var(--rot)) scale(0.12);
+    filter: blur(2px);
+  }
+}
+.mitia-nova-spiral .star-spiral {
+  opacity: 1 !important;
+  animation: mt-spiral-spin 5s linear infinite !important;
+}
+@keyframes nova-spiral-burst {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(9) rotate(0deg);
+  }
+  20% {
+    opacity: 1;
+  }
+  70% {
+    opacity: 0.9;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(1.4) rotate(200deg);
+  }
+}
+.mitia-nova-star {
+  position: absolute;
+  z-index: 4;
+  left: var(--nova-x, 50%);
+  top: var(--nova-y, 50%);
+  width: 88px;
+  height: 88px;
+  margin: -44px 0 0 -44px;
+  will-change: transform;
+  backface-visibility: hidden;
+  /* Only a moderate scale: the huge final cover is a cheap colour flood. */
+  animation: mitia-nova-star 1.05s cubic-bezier(0.42, 0, 0.8, 1) both;
+}
+.mitia-nova-star svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+@keyframes mitia-nova-star {
+  0% {
+    opacity: 1;
+    transform: rotate(-15deg) scale(1);
+  }
+  55% {
+    opacity: 1;
+    transform: rotate(-15deg) scale(5);
+  }
+  100% {
+    opacity: 0;
+    transform: rotate(-15deg) scale(9);
+  }
+}
+/* Solid ink flood that finishes the window cover without rasterising a
+   multi-thousand-pixel SVG (that was the late-phase stutter). */
+.mitia-nova-flood {
+  position: absolute;
+  z-index: 3;
+  border-radius: 50%;
+  background: radial-gradient(circle, #241a52 0%, #150e34 72%);
+  transform: translate(-50%, -50%) scale(0);
+  animation: nova-flood 0.65s cubic-bezier(0.4, 0, 0.6, 1) 0.72s forwards;
+}
+@keyframes nova-flood {
+  from {
+    transform: translate(-50%, -50%) scale(0);
+  }
+  to {
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+/* While the cap ring is shown the star keeps full opacity and re-centres on
+   the circle (54 px ring → centre 27 px from the wrap's left edge). */
+[data-special-launch-button='mitia'] .start-atom.has-progress {
+  left: -17px;
+}
+[data-special-launch-button='mitia'] .start-atom.has-progress .star-cross {
+  opacity: 1;
+}
+
+/* ------------------------------------------------------------- surfaces */
+[data-special-cards='mitia'] .home-info,
+[data-special-dialogs='mitia'] .modal,
+[data-special-forms='mitia'] .settings,
+[data-special-forms='mitia'] .panel,
+[data-special-dropdowns='mitia'] .select-menu,
+[data-special-dialogs='mitia'] .confirm-modal {
+  border-color: rgba(232, 200, 122, 0.26);
+  border-radius: 3px;
+  /* Molecule texture at its native 900 px scale; the tint stays `var(--glass)`
+     so the brightness / opacity sliders still apply. */
+  background-color: var(--glass);
+  background-image: var(--glass-sheen, none);
+  background-size: 900px 900px;
+  box-shadow:
+    inset 0 1px 0 rgba(232, 200, 122, 0.3),
+    inset 0 0 0 1px rgba(108, 75, 216, 0.16),
+    0 18px 40px rgba(6, 8, 20, 0.45);
+}
+/* The drawer floats over the page: a flat tint, no second material layer (that
+   would restart the texture and look discontinuous). */
+[data-special-drawer='mitia'] .launch-drawer,
+[data-special-drawer='mitia'] .drawer-scroll,
+[data-special-drawer='mitia'] .drawer-opt {
+  background-image: none !important;
+}
+[data-special-drawer='mitia'] .launch-drawer {
+  background-color: var(--glass) !important;
+  border-color: rgba(232, 200, 122, 0.32);
+  box-shadow: 0 18px 44px rgba(6, 8, 20, 0.55);
+}
+/* No material inside material: anything nested inside a material panel (the
+   module-management drawer, expanded settings groups, inner cards) drops the
+   texture and the backdrop blur, so the parent's pattern stays continuous. */
+:root[data-material='astral'] .settings :is(.glass, .panel, .collapse-inner, .settings-section, .module-panel, .row, .field, .range-row, .media-row, .settings, .launch-editor, .launch-editor--drawer),
+:root[data-material='astral'] .panel :is(.glass, .panel, .collapse-inner, .settings-section, .module-panel, .row, .field, .range-row, .media-row, .settings, .launch-editor),
+:root[data-material='astral'] .modal :is(.glass, .panel, .collapse-inner, .settings-section, .module-panel),
+:root[data-material='astral'] .glass-pop :is(.glass, .panel) {
+  background-image: none !important;
+  background-color: transparent !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  box-shadow: none !important;
+}
+[data-special-toast='mitia'] .toast {
+  border-color: rgba(232, 200, 122, 0.3);
+  background-color: var(--glass);
+  background-image: var(--glass-sheen, none);
+  background-size: 900px 900px;
+}
+
+/* -------------------------------------------------------------- accents */
+[data-special-text-accent='mitia'] ::selection {
+  background: rgba(108, 75, 216, 0.5);
+  color: #f2eeff;
+}
+[data-special-focus-ring='mitia'] :focus-visible {
+  outline-color: rgba(232, 200, 122, 0.8);
+}
+[data-special-tabs='mitia'] .tab.active,
+[data-special-segmented='mitia'] .seg.active {
+  box-shadow: inset 0 0 0 1px rgba(232, 200, 122, 0.34);
+}
+[data-special-switch='mitia'] .switch.on,
+[data-special-slider='mitia'] .slider-fill {
+  box-shadow: 0 0 12px rgba(232, 200, 122, 0.35);
+}
+[data-special-empty-state='mitia'] .empty-icon {
+  color: var(--mt-gold, #e8c87a);
+}
+[data-special-skeleton='mitia'] .skeleton {
+  background-image: linear-gradient(
+    90deg,
+    rgba(167, 139, 250, 0.08),
+    rgba(232, 200, 122, 0.14),
+    rgba(167, 139, 250, 0.08)
+  );
+}
+
+/* The grey page-title divider becomes a gold x-axis: hairline, ticks every
+   26 px and a right-pointing arrow. */
+[data-special-theme~='mitia'] .page-header {
+  position: relative;
+  border-bottom-color: transparent;
+}
+/* Analytic curve: y(x) = a*t*e^(-t) - L*(1 - e^(-t)), t = x/tau (a=900,
+   L=500, tau=60). Starts at 0, peaks ~80 px above the axis, then falls
+   monotonically towards a horizontal asymptote near the page bottom. */
+/* Analytic curve: y(x) = a*t*e^(-t) - L*(1 - e^(-t)), t = x/tau
+   (a=1126, L=563, tau=128): starts at 0, peaks ~120 px above the axis,
+   crosses the axis ~2.5x farther out, then falls towards the asymptote. */
+/* The curve lives on its own fixed layer: the stage clips its content, which
+   used to cut the peak off above the header. */
+.page-curve {
+  position: fixed;
+  left: 64px;
+  right: 0;
+  z-index: 3;
+  height: 710px;
+  pointer-events: none;
+  display: none;
+  background: url("data:image/svg+xml,%3Csvg xmlns%3D'http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg' width%3D'600' height%3D'710' viewBox%3D'0 0 600 710' preserveAspectRatio%3D'none'%3E%3Cdefs%3E%3ClinearGradient id%3D'f' x1%3D'0' y1%3D'0' x2%3D'1' y2%3D'0'%3E%3Cstop offset%3D'0' stop-color%3D'%238f7cf0' stop-opacity%3D'0.30'%2F%3E%3Cstop offset%3D'0.45' stop-color%3D'%236c4bd8' stop-opacity%3D'0.09'%2F%3E%3Cstop offset%3D'0.85' stop-color%3D'%236c4bd8' stop-opacity%3D'0.04'%2F%3E%3Cstop offset%3D'1' stop-color%3D'%236c4bd8' stop-opacity%3D'0'%2F%3E%3C%2FlinearGradient%3E%3ClinearGradient id%3D's' x1%3D'0' y1%3D'0' x2%3D'1' y2%3D'0'%3E%3Cstop offset%3D'0' stop-color%3D'%238fe3ff'%2F%3E%3Cstop offset%3D'0.45' stop-color%3D'%23a78bfa'%2F%3E%3Cstop offset%3D'0.8' stop-color%3D'%23e8c87a'%2F%3E%3Cstop offset%3D'0.93' stop-color%3D'%23e8c87a' stop-opacity%3D'0.55'%2F%3E%3Cstop offset%3D'1' stop-color%3D'%23e8c87a' stop-opacity%3D'0'%2F%3E%3C%2FlinearGradient%3E%3C%2Fdefs%3E%3Cpath d%3D'M0 130 L1 125.65 L2 121.41 L3 117.26 L4 113.22 L5 109.27 L6 105.42 L7 101.66 L8 98 L9 94.43 L10 90.95 L11 87.57 L12 84.27 L13 81.06 L14 77.93 L15 74.9 L16 71.94 L17 69.07 L18 66.29 L19 63.58 L20 60.95 L21 58.41 L22 55.94 L23 53.54 L24 51.23 L25 48.99 L26 46.82 L27 44.72 L28 42.7 L29 40.75 L30 38.86 L31 37.05 L32 35.3 L33 33.62 L34 32.01 L35 30.46 L36 28.98 L37 27.56 L38 26.2 L39 24.9 L40 23.66 L41 22.49 L42 21.37 L43 20.31 L44 19.3 L45 18.36 L46 17.47 L47 16.63 L48 15.85 L49 15.12 L50 14.44 L51 13.82 L52 13.24 L53 12.72 L54 12.24 L55 11.82 L56 11.44 L57 11.11 L58 10.82 L59 10.58 L60 10.39 L61 10.24 L62 10.13 L63 10.07 L64 10.05 L65 10.07 L66 10.13 L67 10.23 L68 10.37 L69 10.55 L70 10.77 L71 11.03 L72 11.33 L73 11.66 L74 12.03 L75 12.43 L76 12.87 L77 13.34 L78 13.85 L79 14.39 L80 14.96 L81 15.56 L82 16.2 L83 16.87 L84 17.56 L85 18.29 L86 19.05 L87 19.84 L88 20.65 L89 21.49 L90 22.37 L91 23.26 L92 24.19 L93 25.14 L94 26.12 L95 27.12 L96 28.14 L97 29.2 L98 30.27 L99 31.37 L100 32.49 L101 33.63 L102 34.8 L103 35.99 L104 37.2 L105 38.43 L106 39.68 L107 40.95 L108 42.24 L109 43.55 L110 44.88 L111 46.23 L112 47.59 L113 48.98 L114 50.38 L115 51.8 L116 53.23 L117 54.69 L118 56.15 L119 57.64 L120 59.14 L121 60.65 L122 62.18 L123 63.73 L124 65.28 L125 66.86 L126 68.44 L127 70.04 L128 71.65 L129 73.28 L130 74.91 L131 76.56 L132 78.22 L133 79.89 L134 81.58 L135 83.27 L136 84.98 L137 86.69 L138 88.42 L139 90.15 L140 91.9 L141 93.65 L142 95.41 L143 97.19 L144 98.97 L145 100.76 L146 102.55 L147 104.36 L148 106.17 L149 107.99 L150 109.82 L151 111.65 L152 113.49 L153 115.34 L154 117.2 L155 119.06 L156 120.92 L157 122.79 L158 124.67 L159 126.55 L160 128.44 L161 130.33 L162 132.23 L163 134.13 L164 136.04 L165 137.95 L166 139.87 L167 141.78 L168 143.71 L169 145.63 L170 147.56 L171 149.49 L172 151.43 L173 153.36 L174 155.3 L175 157.25 L176 159.19 L177 161.14 L178 163.09 L179 165.04 L180 166.99 L181 168.95 L182 170.9 L183 172.86 L184 174.82 L185 176.78 L186 178.74 L187 180.7 L188 182.66 L189 184.62 L190 186.59 L191 188.55 L192 190.51 L193 192.47 L194 194.44 L195 196.4 L196 198.36 L197 200.32 L198 202.28 L199 204.24 L200 206.2 L201 208.16 L202 210.12 L203 212.08 L204 214.03 L205 215.99 L206 217.94 L207 219.89 L208 221.84 L209 223.79 L210 225.73 L211 227.68 L212 229.62 L213 231.56 L214 233.5 L215 235.43 L216 237.37 L217 239.3 L218 241.23 L219 243.15 L220 245.08 L221 247 L222 248.92 L223 250.83 L224 252.74 L225 254.65 L226 256.56 L227 258.46 L228 260.36 L229 262.26 L230 264.15 L231 266.04 L232 267.93 L233 269.81 L234 271.69 L235 273.57 L236 275.44 L237 277.31 L238 279.17 L239 281.03 L240 282.89 L241 284.74 L242 286.59 L243 288.44 L244 290.28 L245 292.11 L246 293.95 L247 295.78 L248 297.6 L249 299.42 L250 301.23 L251 303.04 L252 304.85 L253 306.65 L254 308.45 L255 310.24 L256 312.03 L257 313.81 L258 315.59 L259 317.37 L260 319.14 L261 320.9 L262 322.66 L263 324.42 L264 326.17 L265 327.91 L266 329.65 L267 331.39 L268 333.12 L269 334.84 L270 336.56 L271 338.28 L272 339.99 L273 341.69 L274 343.39 L275 345.08 L276 346.77 L277 348.46 L278 350.14 L279 351.81 L280 353.48 L281 355.14 L282 356.8 L283 358.45 L284 360.1 L285 361.74 L286 363.38 L287 365.01 L288 366.63 L289 368.25 L290 369.87 L291 371.47 L292 373.08 L293 374.68 L294 376.27 L295 377.86 L296 379.44 L297 381.01 L298 382.58 L299 384.15 L300 385.71 L301 387.26 L302 388.81 L303 390.35 L304 391.89 L305 393.42 L306 394.95 L307 396.47 L308 397.98 L309 399.49 L310 400.99 L311 402.49 L312 403.98 L313 405.47 L314 406.95 L315 408.43 L316 409.9 L317 411.36 L318 412.82 L319 414.27 L320 415.72 L321 417.16 L322 418.59 L323 420.02 L324 421.45 L325 422.87 L326 424.28 L327 425.69 L328 427.09 L329 428.49 L330 429.88 L331 431.26 L332 432.64 L333 434.01 L334 435.38 L335 436.75 L336 438.1 L337 439.45 L338 440.8 L339 442.14 L340 443.47 L341 444.8 L342 446.13 L343 447.44 L344 448.76 L345 450.06 L346 451.36 L347 452.66 L348 453.95 L349 455.24 L350 456.51 L351 457.79 L352 459.06 L353 460.32 L354 461.58 L355 462.83 L356 464.07 L357 465.31 L358 466.55 L359 467.78 L360 469 L361 470.22 L362 471.44 L363 472.64 L364 473.85 L365 475.04 L366 476.24 L367 477.42 L368 478.6 L369 479.78 L370 480.95 L371 482.12 L372 483.28 L373 484.43 L374 485.58 L375 486.73 L376 487.86 L377 489 L378 490.13 L379 491.25 L380 492.37 L381 493.48 L382 494.59 L383 495.69 L384 496.79 L385 497.88 L386 498.97 L387 500.05 L388 501.13 L389 502.2 L390 503.27 L391 504.33 L392 505.39 L393 506.44 L394 507.48 L395 508.53 L396 509.56 L397 510.59 L398 511.62 L399 512.64 L400 513.66 L401 514.67 L402 515.68 L403 516.68 L404 517.68 L405 518.67 L406 519.66 L407 520.64 L408 521.62 L409 522.59 L410 523.56 L411 524.53 L412 525.49 L413 526.44 L414 527.39 L415 528.34 L416 529.28 L417 530.21 L418 531.14 L419 532.07 L420 532.99 L421 533.91 L422 534.82 L423 535.73 L424 536.63 L425 537.53 L426 538.43 L427 539.32 L428 540.2 L429 541.08 L430 541.96 L431 542.83 L432 543.7 L433 544.56 L434 545.42 L435 546.27 L436 547.12 L437 547.97 L438 548.81 L439 549.65 L440 550.48 L441 551.31 L442 552.13 L443 552.95 L444 553.77 L445 554.58 L446 555.39 L447 556.19 L448 556.99 L449 557.79 L450 558.58 L451 559.36 L452 560.15 L453 560.92 L454 561.7 L455 562.47 L456 563.23 L457 564 L458 564.76 L459 565.51 L460 566.26 L461 567.01 L462 567.75 L463 568.49 L464 569.22 L465 569.95 L466 570.68 L467 571.4 L468 572.12 L469 572.84 L470 573.55 L471 574.26 L472 574.96 L473 575.66 L474 576.36 L475 577.05 L476 577.74 L477 578.42 L478 579.1 L479 579.78 L480 580.46 L481 581.13 L482 581.79 L483 582.46 L484 583.12 L485 583.77 L486 584.43 L487 585.07 L488 585.72 L489 586.36 L490 587 L491 587.64 L492 588.27 L493 588.9 L494 589.52 L495 590.14 L496 590.76 L497 591.37 L498 591.98 L499 592.59 L500 593.2 L501 593.8 L502 594.4 L503 594.99 L504 595.58 L505 596.17 L506 596.75 L507 597.34 L508 597.91 L509 598.49 L510 599.06 L511 599.63 L512 600.19 L513 600.76 L514 601.32 L515 601.87 L516 602.43 L517 602.98 L518 603.52 L519 604.07 L520 604.61 L521 605.14 L522 605.68 L523 606.21 L524 606.74 L525 607.27 L526 607.79 L527 608.31 L528 608.82 L529 609.34 L530 609.85 L531 610.36 L532 610.86 L533 611.37 L534 611.87 L535 612.36 L536 612.86 L537 613.35 L538 613.84 L539 614.32 L540 614.8 L541 615.28 L542 615.76 L543 616.24 L544 616.71 L545 617.18 L546 617.64 L547 618.11 L548 618.57 L549 619.03 L550 619.48 L551 619.94 L552 620.39 L553 620.84 L554 621.28 L555 621.72 L556 622.16 L557 622.6 L558 623.04 L559 623.47 L560 623.9 L561 624.33 L562 624.75 L563 625.18 L564 625.6 L565 626.02 L566 626.43 L567 626.84 L568 627.25 L569 627.66 L570 628.07 L571 628.47 L572 628.87 L573 629.27 L574 629.67 L575 630.06 L576 630.46 L577 630.85 L578 631.23 L579 631.62 L580 632 L581 632.38 L582 632.76 L583 633.14 L584 633.51 L585 633.88 L586 634.25 L587 634.62 L588 634.99 L589 635.35 L590 635.71 L591 636.07 L592 636.43 L593 636.78 L594 637.13 L595 637.48 L596 637.83 L597 638.18 L598 638.52 L599 638.86 L600 639.21 L600 130 L0 130 Z' fill%3D'url(%23f)'%2F%3E%3Cpath d%3D'M0 130 L1 125.65 L2 121.41 L3 117.26 L4 113.22 L5 109.27 L6 105.42 L7 101.66 L8 98 L9 94.43 L10 90.95 L11 87.57 L12 84.27 L13 81.06 L14 77.93 L15 74.9 L16 71.94 L17 69.07 L18 66.29 L19 63.58 L20 60.95 L21 58.41 L22 55.94 L23 53.54 L24 51.23 L25 48.99 L26 46.82 L27 44.72 L28 42.7 L29 40.75 L30 38.86 L31 37.05 L32 35.3 L33 33.62 L34 32.01 L35 30.46 L36 28.98 L37 27.56 L38 26.2 L39 24.9 L40 23.66 L41 22.49 L42 21.37 L43 20.31 L44 19.3 L45 18.36 L46 17.47 L47 16.63 L48 15.85 L49 15.12 L50 14.44 L51 13.82 L52 13.24 L53 12.72 L54 12.24 L55 11.82 L56 11.44 L57 11.11 L58 10.82 L59 10.58 L60 10.39 L61 10.24 L62 10.13 L63 10.07 L64 10.05 L65 10.07 L66 10.13 L67 10.23 L68 10.37 L69 10.55 L70 10.77 L71 11.03 L72 11.33 L73 11.66 L74 12.03 L75 12.43 L76 12.87 L77 13.34 L78 13.85 L79 14.39 L80 14.96 L81 15.56 L82 16.2 L83 16.87 L84 17.56 L85 18.29 L86 19.05 L87 19.84 L88 20.65 L89 21.49 L90 22.37 L91 23.26 L92 24.19 L93 25.14 L94 26.12 L95 27.12 L96 28.14 L97 29.2 L98 30.27 L99 31.37 L100 32.49 L101 33.63 L102 34.8 L103 35.99 L104 37.2 L105 38.43 L106 39.68 L107 40.95 L108 42.24 L109 43.55 L110 44.88 L111 46.23 L112 47.59 L113 48.98 L114 50.38 L115 51.8 L116 53.23 L117 54.69 L118 56.15 L119 57.64 L120 59.14 L121 60.65 L122 62.18 L123 63.73 L124 65.28 L125 66.86 L126 68.44 L127 70.04 L128 71.65 L129 73.28 L130 74.91 L131 76.56 L132 78.22 L133 79.89 L134 81.58 L135 83.27 L136 84.98 L137 86.69 L138 88.42 L139 90.15 L140 91.9 L141 93.65 L142 95.41 L143 97.19 L144 98.97 L145 100.76 L146 102.55 L147 104.36 L148 106.17 L149 107.99 L150 109.82 L151 111.65 L152 113.49 L153 115.34 L154 117.2 L155 119.06 L156 120.92 L157 122.79 L158 124.67 L159 126.55 L160 128.44 L161 130.33 L162 132.23 L163 134.13 L164 136.04 L165 137.95 L166 139.87 L167 141.78 L168 143.71 L169 145.63 L170 147.56 L171 149.49 L172 151.43 L173 153.36 L174 155.3 L175 157.25 L176 159.19 L177 161.14 L178 163.09 L179 165.04 L180 166.99 L181 168.95 L182 170.9 L183 172.86 L184 174.82 L185 176.78 L186 178.74 L187 180.7 L188 182.66 L189 184.62 L190 186.59 L191 188.55 L192 190.51 L193 192.47 L194 194.44 L195 196.4 L196 198.36 L197 200.32 L198 202.28 L199 204.24 L200 206.2 L201 208.16 L202 210.12 L203 212.08 L204 214.03 L205 215.99 L206 217.94 L207 219.89 L208 221.84 L209 223.79 L210 225.73 L211 227.68 L212 229.62 L213 231.56 L214 233.5 L215 235.43 L216 237.37 L217 239.3 L218 241.23 L219 243.15 L220 245.08 L221 247 L222 248.92 L223 250.83 L224 252.74 L225 254.65 L226 256.56 L227 258.46 L228 260.36 L229 262.26 L230 264.15 L231 266.04 L232 267.93 L233 269.81 L234 271.69 L235 273.57 L236 275.44 L237 277.31 L238 279.17 L239 281.03 L240 282.89 L241 284.74 L242 286.59 L243 288.44 L244 290.28 L245 292.11 L246 293.95 L247 295.78 L248 297.6 L249 299.42 L250 301.23 L251 303.04 L252 304.85 L253 306.65 L254 308.45 L255 310.24 L256 312.03 L257 313.81 L258 315.59 L259 317.37 L260 319.14 L261 320.9 L262 322.66 L263 324.42 L264 326.17 L265 327.91 L266 329.65 L267 331.39 L268 333.12 L269 334.84 L270 336.56 L271 338.28 L272 339.99 L273 341.69 L274 343.39 L275 345.08 L276 346.77 L277 348.46 L278 350.14 L279 351.81 L280 353.48 L281 355.14 L282 356.8 L283 358.45 L284 360.1 L285 361.74 L286 363.38 L287 365.01 L288 366.63 L289 368.25 L290 369.87 L291 371.47 L292 373.08 L293 374.68 L294 376.27 L295 377.86 L296 379.44 L297 381.01 L298 382.58 L299 384.15 L300 385.71 L301 387.26 L302 388.81 L303 390.35 L304 391.89 L305 393.42 L306 394.95 L307 396.47 L308 397.98 L309 399.49 L310 400.99 L311 402.49 L312 403.98 L313 405.47 L314 406.95 L315 408.43 L316 409.9 L317 411.36 L318 412.82 L319 414.27 L320 415.72 L321 417.16 L322 418.59 L323 420.02 L324 421.45 L325 422.87 L326 424.28 L327 425.69 L328 427.09 L329 428.49 L330 429.88 L331 431.26 L332 432.64 L333 434.01 L334 435.38 L335 436.75 L336 438.1 L337 439.45 L338 440.8 L339 442.14 L340 443.47 L341 444.8 L342 446.13 L343 447.44 L344 448.76 L345 450.06 L346 451.36 L347 452.66 L348 453.95 L349 455.24 L350 456.51 L351 457.79 L352 459.06 L353 460.32 L354 461.58 L355 462.83 L356 464.07 L357 465.31 L358 466.55 L359 467.78 L360 469 L361 470.22 L362 471.44 L363 472.64 L364 473.85 L365 475.04 L366 476.24 L367 477.42 L368 478.6 L369 479.78 L370 480.95 L371 482.12 L372 483.28 L373 484.43 L374 485.58 L375 486.73 L376 487.86 L377 489 L378 490.13 L379 491.25 L380 492.37 L381 493.48 L382 494.59 L383 495.69 L384 496.79 L385 497.88 L386 498.97 L387 500.05 L388 501.13 L389 502.2 L390 503.27 L391 504.33 L392 505.39 L393 506.44 L394 507.48 L395 508.53 L396 509.56 L397 510.59 L398 511.62 L399 512.64 L400 513.66 L401 514.67 L402 515.68 L403 516.68 L404 517.68 L405 518.67 L406 519.66 L407 520.64 L408 521.62 L409 522.59 L410 523.56 L411 524.53 L412 525.49 L413 526.44 L414 527.39 L415 528.34 L416 529.28 L417 530.21 L418 531.14 L419 532.07 L420 532.99 L421 533.91 L422 534.82 L423 535.73 L424 536.63 L425 537.53 L426 538.43 L427 539.32 L428 540.2 L429 541.08 L430 541.96 L431 542.83 L432 543.7 L433 544.56 L434 545.42 L435 546.27 L436 547.12 L437 547.97 L438 548.81 L439 549.65 L440 550.48 L441 551.31 L442 552.13 L443 552.95 L444 553.77 L445 554.58 L446 555.39 L447 556.19 L448 556.99 L449 557.79 L450 558.58 L451 559.36 L452 560.15 L453 560.92 L454 561.7 L455 562.47 L456 563.23 L457 564 L458 564.76 L459 565.51 L460 566.26 L461 567.01 L462 567.75 L463 568.49 L464 569.22 L465 569.95 L466 570.68 L467 571.4 L468 572.12 L469 572.84 L470 573.55 L471 574.26 L472 574.96 L473 575.66 L474 576.36 L475 577.05 L476 577.74 L477 578.42 L478 579.1 L479 579.78 L480 580.46 L481 581.13 L482 581.79 L483 582.46 L484 583.12 L485 583.77 L486 584.43 L487 585.07 L488 585.72 L489 586.36 L490 587 L491 587.64 L492 588.27 L493 588.9 L494 589.52 L495 590.14 L496 590.76 L497 591.37 L498 591.98 L499 592.59 L500 593.2 L501 593.8 L502 594.4 L503 594.99 L504 595.58 L505 596.17 L506 596.75 L507 597.34 L508 597.91 L509 598.49 L510 599.06 L511 599.63 L512 600.19 L513 600.76 L514 601.32 L515 601.87 L516 602.43 L517 602.98 L518 603.52 L519 604.07 L520 604.61 L521 605.14 L522 605.68 L523 606.21 L524 606.74 L525 607.27 L526 607.79 L527 608.31 L528 608.82 L529 609.34 L530 609.85 L531 610.36 L532 610.86 L533 611.37 L534 611.87 L535 612.36 L536 612.86 L537 613.35 L538 613.84 L539 614.32 L540 614.8 L541 615.28 L542 615.76 L543 616.24 L544 616.71 L545 617.18 L546 617.64 L547 618.11 L548 618.57 L549 619.03 L550 619.48 L551 619.94 L552 620.39 L553 620.84 L554 621.28 L555 621.72 L556 622.16 L557 622.6 L558 623.04 L559 623.47 L560 623.9 L561 624.33 L562 624.75 L563 625.18 L564 625.6 L565 626.02 L566 626.43 L567 626.84 L568 627.25 L569 627.66 L570 628.07 L571 628.47 L572 628.87 L573 629.27 L574 629.67 L575 630.06 L576 630.46 L577 630.85 L578 631.23 L579 631.62 L580 632 L581 632.38 L582 632.76 L583 633.14 L584 633.51 L585 633.88 L586 634.25 L587 634.62 L588 634.99 L589 635.35 L590 635.71 L591 636.07 L592 636.43 L593 636.78 L594 637.13 L595 637.48 L596 637.83 L597 638.18 L598 638.52 L599 638.86 L600 639.21' fill%3D'none' stroke%3D'url(%23s)' stroke-width%3D'2' stroke-linecap%3D'round'%2F%3E%3C%2Fsvg%3E")
+    left bottom / 100% 710px no-repeat;
+  animation: mt-curve-draw 1.25s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+[data-special-theme~='mitia'] .page-curve {
+  display: block;
+}
+/* Decorative gold x-axis: hairline + uneven ticks / glints (not a ruler),
+   extended left to the rail so it meets the vertical axis at the corner. */
+[data-special-theme~='mitia'] .page-header::after {
+  content: '';
+  position: absolute;
+  left: -30px;
+  right: 0;
+  bottom: 0;
+  height: 9px;
+  pointer-events: none;
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='9' height='9'%3E%3Cpath d='M0.6 0.6 8.4 4.5 0.6 8.4Z' fill='%23e8c87a' fill-opacity='0.9'/%3E%3C/svg%3E"),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='260' height='9'%3E%3Cg stroke='%23e8c87a' stroke-linecap='round'%3E%3Cline x1='0' y1='4.5' x2='260' y2='4.5' stroke-opacity='0.32' stroke-width='1.6'/%3E%3Cline x1='34' y1='4.5' x2='34' y2='8' stroke-opacity='0.65' stroke-width='1.4'/%3E%3Cline x1='72' y1='4.5' x2='72' y2='6.5' stroke-opacity='0.45' stroke-width='1.4'/%3E%3Cline x1='108' y1='4.5' x2='108' y2='9' stroke-opacity='0.8' stroke-width='1.8'/%3E%3Cline x1='150' y1='4.5' x2='150' y2='6' stroke-opacity='0.5' stroke-width='1.4'/%3E%3Cline x1='196' y1='4.5' x2='196' y2='8' stroke-opacity='0.6' stroke-width='1.4'/%3E%3Cline x1='232' y1='4.5' x2='232' y2='6.5' stroke-opacity='0.4' stroke-width='1.4'/%3E%3C/g%3E%3Ccircle cx='90' cy='7' r='1.1' fill='%23e8c87a' fill-opacity='0.7'/%3E%3Ccircle cx='172' cy='7' r='1' fill='%238fe3ff' fill-opacity='0.6'/%3E%3C/svg%3E");
+  background-position: right 0 top 0, left top 0;
+  background-size: 9px 9px, 260px 9px;
+  background-repeat: no-repeat, repeat-x;
+}
+/* Page switch = the axis draws left→right and the sine is plotted with it. */
+[data-special-transition='mitia'] .app-anim-run .page-header::after {
+  animation: mt-axis-draw 0.95s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+@keyframes mt-axis-draw {
+  from {
+    clip-path: inset(0 100% 0 0);
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+@keyframes mt-curve-draw {
+  from {
+    clip-path: inset(0 100% 0 0);
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+/* ------------------------------------------------------------ transition */
+[data-special-transition='mitia'] .app-anim-run {
+  animation: none;
+}
+[data-special-transition='mitia'] .app-anim-run .stage {
+  animation: mt-page-in 0.36s var(--mt-ease, cubic-bezier(0.22, 1, 0.36, 1));
+}
+[data-special-transition='mitia'] .app-anim-run .bg-layer,
+[data-special-transition='mitia'] .app-anim-run .bg-scrim,
+[data-special-transition='mitia'] .app-anim-run .rail,
+[data-special-transition='mitia'] .app-anim-run .topbar {
+  animation: none;
+}
+@keyframes mt-page-in {
+  from {
+    transform: translateX(calc(var(--anim-x, 26px) * 0.7));
+  }
+  to {
+    transform: none;
+  }
+}
+
+/* ------------------------------------------------ critical update blocker */
+.critical-blocker {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: grid;
+  place-items: center;
+  background: rgba(6, 8, 12, 0.55);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+}
+.critical-card {
+  width: min(440px, 90vw);
+  padding: 24px 26px;
+  border: 1px solid rgba(245, 212, 138, 0.4);
+  border-radius: 18px;
+  color: var(--fg);
+  text-align: center;
+  box-shadow:
+    0 24px 60px rgba(0, 0, 0, 0.5),
+    0 0 30px rgba(139, 124, 246, 0.2);
+}
+.critical-icon {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  margin: 0 auto 12px;
+  border-radius: 50%;
+  background: var(--sn-gold, #f5d48a);
+  color: #1a1400;
+  font-size: 22px;
+  font-weight: 800;
+}
+.critical-card h2 {
+  margin: 0 0 8px;
+  font-size: 18px;
+}
+.critical-card p {
+  margin: 0 0 10px;
+  color: var(--fg-2);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.critical-card .critical-note {
+  color: var(--sn-gold, #f5d48a);
+}
+.critical-actions {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+/* ---------------------------------------------------------------- dialogs */
+[data-special-dialogs='starsnow'] .modal {
+  border-color: rgba(125, 211, 252, 0.35);
+  animation: sn-shield-open 0.32s var(--sn-ease) both;
+}
+[data-special-dialogs='starsnow'] .modal.closing {
+  animation: sn-shield-close 0.2s var(--ease) both;
+}
+[data-special-dialogs='starsnow'] .modal-mask {
+  background: radial-gradient(circle at 50% 45%, rgba(11, 16, 32, 0.2), rgba(6, 8, 12, 0.55));
+}
+@keyframes sn-shield-open {
+  from {
+    opacity: 0;
+    transform: scale(0.9);
+    filter: blur(6px);
+  }
+  60% {
+    opacity: 1;
+  }
+  to {
+    opacity: 1;
+    transform: none;
+    filter: none;
+  }
+}
+@keyframes sn-shield-close {
+  to {
+    opacity: 0;
+    transform: scale(0.94);
+    filter: blur(4px);
+  }
+}
+
+/* ------------------------------------------------------------------ forms */
+[data-special-forms='starsnow'] .field,
+[data-special-forms='starsnow'] .settings-row {
+  border-color: rgba(125, 211, 252, 0.12);
+}
+[data-special-forms='starsnow'] .method-card {
+  border-color: rgba(125, 211, 252, 0.2);
+}
+
+/* -------------------------------------------------------------- dropdowns */
+[data-special-dropdowns='starsnow'] .select-menu {
+  border-color: rgba(125, 211, 252, 0.35);
+  box-shadow:
+    0 0 0 1px rgba(139, 124, 246, 0.15),
+    0 16px 40px rgba(0, 0, 0, 0.45),
+    0 0 20px rgba(139, 124, 246, 0.2);
+  animation: sn-orbit-in 0.18s var(--sn-ease) both;
+}
+[data-special-dropdowns='starsnow'] .select-menu.closing {
+  animation: sn-frost-fold 0.15s var(--ease) both;
+}
+[data-special-dropdowns='starsnow'] .select-option.active {
+  background: var(--brand-dim);
+  color: var(--fg);
+  box-shadow: inset 0 0 0 1px var(--brand-line);
+}
+@keyframes sn-frost-fold {
+  to {
+    opacity: 0;
+    transform: translateY(-4px) scaleY(0.9);
+  }
+}
+
+/* ----------------------------------------------------------------- drawer */
+[data-special-drawer='starsnow'] .launch-drawer {
+  border-color: rgba(125, 211, 252, 0.35);
+  animation: sn-drawer-in 0.24s var(--sn-ease) both;
+}
+[data-special-drawer='starsnow'] .launch-drawer.closing {
+  animation: sn-frost-fold 0.16s var(--ease) both;
+}
+[data-special-drawer='starsnow'] .drawer-opt[data-active='true'] {
+  background-color: var(--brand);
+  background-image: linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 0.18),
+    rgba(255, 255, 255, 0) 55%
+  );
+  color: var(--on-brand);
+}
+@keyframes sn-drawer-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) rotate(-0.6deg);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* -------------------------------------------------------------- segmented */
+[data-special-segmented='starsnow'] .segmented {
+  border-color: color-mix(in srgb, var(--brand) 26%, transparent);
+}
+[data-special-segmented='starsnow'] .seg-thumb {
+  background-color: var(--brand);
+  background-image: linear-gradient(
+    110deg,
+    rgba(255, 255, 255, 0.22),
+    rgba(255, 255, 255, 0) 46%,
+    rgba(255, 255, 255, 0.08) 68%,
+    transparent
+  );
+  box-shadow: 0 0 14px color-mix(in srgb, var(--brand) 38%, transparent);
+}
+[data-special-segmented='starsnow'] .seg.active {
+  color: var(--on-brand);
+  text-shadow: 0 0 8px color-mix(in srgb, var(--on-brand) 45%, transparent);
+}
+
+/* ----------------------------------------------------------------- slider */
+/* Only the thumb changes: the numeric value and the track keep their stock look. */
+[data-special-slider='starsnow'] .slider::-webkit-slider-thumb {
+  border: none;
+  border-radius: 0;
+  background: var(--brand);
+  clip-path: polygon(
+    29.3% 0,
+    70.7% 0,
+    100% 29.3%,
+    100% 70.7%,
+    70.7% 100%,
+    29.3% 100%,
+    0 70.7%,
+    0 29.3%
+  );
+  box-shadow: 0 0 10px color-mix(in srgb, var(--brand) 55%, transparent);
+}
+
+/* ----------------------------------------------------------------- switch */
+[data-special-switch='starsnow'] .switch-track[data-on='true'] {
+  background-color: var(--brand);
+  background-image: linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 0.18),
+    rgba(255, 255, 255, 0) 55%
+  );
+  box-shadow: 0 0 12px color-mix(in srgb, var(--brand) 38%, transparent);
+}
+[data-special-switch='starsnow'] .switch-knob {
+  clip-path: polygon(50% 0%, 93% 25%, 93% 75%, 50% 100%, 7% 75%, 7% 25%);
+  border-radius: 3px;
+  background: var(--on-brand);
+}
+
+/* ------------------------------------------------------------------- tabs */
+[data-special-tabs='starsnow'] .tab-thumb {
+  background-color: var(--brand);
+  background-image: linear-gradient(
+    110deg,
+    rgba(255, 255, 255, 0.22),
+    rgba(255, 255, 255, 0) 46%,
+    rgba(255, 255, 255, 0.08) 68%,
+    transparent
+  );
+  box-shadow: 0 0 14px color-mix(in srgb, var(--brand) 38%, transparent);
+}
+[data-special-tabs='starsnow'] .tab.active {
+  color: var(--on-brand);
+  text-shadow: 0 0 8px color-mix(in srgb, var(--on-brand) 45%, transparent);
+}
+
+/* ----------------------------------------------------------------- inputs */
+/* Inputs keep the stock border; the theme only adds the sweep effect. */
+:root[data-special-theme~='starsnow'] .input,
+:root[data-special-theme~='starsnow'] .select,
+:root[data-special-theme~='starsnow'] .select-trigger,
+:root[data-special-theme~='starsnow'] .inline-edit-input {
+  border-color: var(--line);
+}
+:root[data-special-theme~='starsnow'] .input:focus,
+:root[data-special-theme~='starsnow'] .select:focus,
+:root[data-special-theme~='starsnow'] .inline-edit-input:focus,
+:root[data-special-theme~='starsnow'] .select-trigger.open {
+  border-color: var(--line-strong);
+  box-shadow: none;
+  outline: none;
+}
+
+/* ---------------------------------------------------------------- gallery */
+[data-special-gallery='starsnow'] .gallery-thumb {
+  border-color: color-mix(in srgb, var(--brand) 22%, transparent);
+}
+[data-special-gallery='starsnow'] .gallery-thumb:hover {
+  border-color: var(--brand);
+  box-shadow:
+    0 0 0 1px var(--brand-dim),
+    0 14px 30px rgba(0, 0, 0, 0.4),
+    0 0 22px color-mix(in srgb, var(--brand) 24%, transparent);
+}
+[data-special-gallery='starsnow'] .gallery-page .panel {
+  border-color: color-mix(in srgb, var(--brand) 20%, transparent);
+}
+
+/* --------------------------------------------------------------- skeleton */
+[data-special-skeleton='starsnow'] .thumb-skeleton {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--brand) 22%, transparent) 45%,
+    color-mix(in srgb, var(--brand) 10%, transparent) 60%,
+    transparent 100%
+  );
+  background-color: color-mix(in srgb, var(--brand) 6%, transparent);
+  background-size: 200% 100%;
+  animation: sn-skeleton 1.4s ease-in-out infinite;
+}
+@keyframes sn-skeleton {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+/* Themed page switch should not animate while the user asked for less motion. */
+@media (prefers-reduced-motion: reduce) {
+  [data-special-transition='starsnow'] .app-anim-run,
+  [data-special-transition='starsnow'] .app-anim-run .bg-layer,
+  [data-special-transition='starsnow'] .app-anim-run .bg-scrim,
+  [data-special-transition='starsnow'] .app-anim-run .rail,
+  [data-special-transition='starsnow'] .app-anim-run .topbar {
+    animation: none;
+  }
+  .atom-orbit,
+  .atom-shield-frame {
+    animation: none;
+  }
+}

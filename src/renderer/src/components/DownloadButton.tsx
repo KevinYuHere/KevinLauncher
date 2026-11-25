@@ -1,0 +1,190 @@
+import { useEffect, useRef, useState, type ReactElement, type ReactNode, type RefObject } from 'react'
+import Ring from './Ring'
+import AtomShield from './AtomShield'
+import LaunchShield from './LaunchShield'
+import StarCross from './StarCross'
+import StarSpiral from './StarSpiral'
+import GlassPopup from './GlassPopup'
+import Icon from './Icon'
+import { useLongPress } from '../drag/useLongPress'
+import { useAreaTheme } from '../theme/ThemeScope'
+
+/** Button colour tone: plain (white) / update (theme) / stop (red). */
+export type DownloadTone = 'plain' | 'update' | 'stop'
+/** Ring colour: pre-download = theme-coloured, update = white. */
+export type RingTone = 'pre' | 'update'
+
+interface DownloadButtonProps {
+  /** Button label (启动 / 开始更新 / 停止 / 45% / 已暂停). */
+  label: ReactNode
+  onButtonClick: () => void
+  tone?: DownloadTone
+  /**
+   * Progress 0…1 while a job (pre-download or update) is running; `null` when
+   * idle. With `idleIcon` and `null` the cap circle shows the idle icon.
+   */
+  progress?: number | null
+  /** Job paused → the ring shows a play (resume) icon instead of a pause one. */
+  paused?: boolean
+  ringTone?: RingTone
+  /** Idle cap-circle icon (e.g. a pre-download is available but not started). */
+  idleIcon?: ReactNode
+  /** Download details shown above the ring on hover while a job is active. */
+  popup?: ReactNode
+  /** Bounds the popup stays within (e.g. the home stage). */
+  boundsRef?: RefObject<HTMLElement>
+  /** Long-press handler (opens the special launch-method picker). */
+  onLongPress?: (rect: DOMRect) => void
+  /** Click on the cap circle (update / pre-download control); falls back to onButtonClick. */
+  onCircleClick?: () => void
+  /** Highlighted as the selected choice of the launch drawer (theme colour). */
+  selected?: boolean
+}
+
+/**
+ * The launch button + its cap progress circle, shared by game updates and
+ * pre-downloads so both look and behave identically: the ring shows real
+ * progress with a pause/play icon inside, the button keeps a fixed width, and
+ * hovering the ring reveals the same speed / percentage popup.
+ */
+export default function DownloadButton({
+  label,
+  onButtonClick,
+  tone = 'plain',
+  progress = null,
+  paused = false,
+  ringTone = 'pre',
+  idleIcon,
+  popup,
+  boundsRef,
+  onLongPress,
+  onCircleClick,
+  selected
+}: DownloadButtonProps): ReactElement {
+  const circleRef = useRef<HTMLButtonElement>(null)
+  const [hover, setHover] = useState(false)
+  const [shieldBurst, setShieldBurst] = useState(false)
+  const shieldTimer = useRef(0)
+  const active = progress != null
+  const hasCircle = active || !!idleIcon
+  const suppressUntil = useRef(0)
+  const longPress = useLongPress((rect) => {
+    // A long press opens the picker: swallow the release and the click after it.
+    suppressUntil.current = performance.now() + 1000
+    onLongPress?.(rect)
+  })
+  // Launch on pointerup as well as click: Windows can swallow the first click
+  // after the launcher window gains focus, which used to make the first press
+  // do nothing. Deduped, so a normal click never launches twice.
+  const lastLaunchAt = useRef(0)
+  const fireLaunch = (): void => {
+    const now = performance.now()
+    if (now - lastLaunchAt.current < 700) return
+    lastLaunchAt.current = now
+    pulseShield()
+    onButtonClick()
+  }
+  // The left mark follows the launch-button assignment; the cap progress circle
+  // stays the stock ring (only its colour differs per tone). 霆骇列律 uses the
+  // atom core + shield, 星轨手记 the tilted star.
+  const launchTheme = useAreaTheme('launchButton')
+  const launchThemed = launchTheme !== 'default'
+  const pulseShield = (): void => {
+    if (launchTheme !== 'starsnow') return
+    setShieldBurst(true)
+    window.clearTimeout(shieldTimer.current)
+    shieldTimer.current = window.setTimeout(() => setShieldBurst(false), 900)
+  }
+  useEffect(() => () => window.clearTimeout(shieldTimer.current), [])
+
+  return (
+    <span className="start-wrap">
+      {launchTheme === 'starsnow' && <LaunchShield burst={shieldBurst} />}
+      <button
+        className={`start-btn${tone !== 'plain' ? ` ${tone}` : ''}${hasCircle ? ' has-circle' : ''}${selected ? ' selected' : ''}`}
+        onPointerDown={onLongPress ? longPress.onPointerDown : undefined}
+        onPointerUp={(event) => {
+          // Fallback launch: if the browser dropped the click (first press after
+          // the window gained focus), the pointerup still arrives.
+          if (event.button !== 0) return
+          if (performance.now() < suppressUntil.current) return
+          if (longPress.consumeClick()) return
+          fireLaunch()
+        }}
+        onClick={() => {
+          if (performance.now() < suppressUntil.current) return
+          if (longPress.consumeClick()) return
+          fireLaunch()
+        }}
+      >
+        <span className="start-label">{label}</span>
+      </button>
+      {launchThemed && (
+        <span className={`start-atom${hasCircle ? ' has-progress' : ''}`} aria-hidden="true">
+          {launchTheme === 'mitia' ? (
+            <>
+              <StarSpiral />
+              <StarCross size={88} />
+            </>
+          ) : (
+            <AtomShield state="idle" progress={0} size={88} />
+          )}
+        </span>
+      )}
+
+      {hasCircle && (
+        <div
+          className="pre-wrap"
+          onMouseEnter={() => setHover(true)}
+          onMouseLeave={() => setHover(false)}
+        >
+          <button
+            ref={circleRef}
+            className={`pre-circle${ringTone === 'update' ? ' update-circle' : ''}`}
+            onClick={() => {
+              pulseShield()
+              ;(onCircleClick ?? onButtonClick)()
+            }}
+            title={active ? '点击暂停 / 继续' : '下载'}
+          >
+            {active ? (
+              <>
+                <span className="ring-layer">
+                  <Ring value={progress ?? 0} />
+                </span>
+                <span className="pre-state">
+                  <Icon name={paused ? 'play' : 'pause'} size={16} />
+                </span>
+              </>
+            ) : (
+              <>
+                <svg className="pre-ring" width={36} height={36} viewBox="0 0 36 36">
+                  <circle
+                    cx={18}
+                    cy={18}
+                    r={16.5}
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth={3}
+                  />
+                </svg>
+                <span className="pre-icon">{idleIcon}</span>
+              </>
+            )}
+          </button>
+
+          {popup && (
+            <GlassPopup
+              anchorRef={circleRef}
+              boundsRef={boundsRef}
+              visible={hover && active}
+              className="dl-pop-glass"
+            >
+              {popup}
+            </GlassPopup>
+          )}
+        </div>
+      )}
+    </span>
+  )
+}
