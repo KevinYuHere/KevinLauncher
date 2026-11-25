@@ -11,10 +11,11 @@ beforeAll(async () => {
   entry = (await transformWithEsbuild(source, 'index.ts', { format: 'cjs' })).code
 })
 
-async function start(mode: 'app' | 'install' | 'uninstall', ownsLock = true, packaged = false, elevated = true) {
+async function start(mode: 'app' | 'install' | 'uninstall', ownsLock = true, packaged = false, elevated = true, trialBuild = false) {
   const listeners = new Map<string, (event?: { preventDefault: () => void }) => void>()
   const events: string[] = []
   const windowMessages = new Map<number, () => void>()
+  const isElevated = vi.fn(async () => elevated)
   const ensureAdministrator = vi.fn(async () => elevated)
   const app = {
     isPackaged: packaged,
@@ -68,7 +69,8 @@ async function start(mode: 'app' | 'install' | 'uninstall', ownsLock = true, pac
     '@shared/windowsLayout.json': windowsLayout,
     './services/settingsBackup': { recoverSettingsImport: () => events.push('recover') },
     './services/housekeeping': { cleanUpdateStaging() {}, cleanArknightsStaging: async () => {} },
-    './services/elevation': { isElevated: async () => elevated, ensureAdministrator },
+    './services/elevation': { isElevated, ensureAdministrator },
+    './services/buildIdentity': { trialBuild },
     './services/logger': { log() {} }
   }
   runInNewContext(entry, {
@@ -77,7 +79,8 @@ async function start(mode: 'app' | 'install' | 'uninstall', ownsLock = true, pac
     __dirname: 'fixture-main', module: { exports: {} }, exports: {}, setImmediate
   })
   await ready
-  return { listeners, events, windowMessages, app, flush, release, policy, loadIcon, ensureAdministrator, isolateSetupSession, whenReady }
+  return { listeners, events, windowMessages, app, flush, release, policy, loadIcon, isElevated,
+    ensureAdministrator, isolateSetupSession, whenReady }
 }
 
 describe('launcher data lifecycle', () => {
@@ -88,6 +91,15 @@ describe('launcher data lifecycle', () => {
     expect(result.app.requestSingleInstanceLock).not.toHaveBeenCalled()
     expect(result.events).toEqual([])
     expect(result.listeners.has('before-quit')).toBe(false)
+  })
+
+  it.each(['app', 'install', 'uninstall'] as const)('does not admit or relaunch a limited trial runtime in %s mode', async mode => {
+    const result = await start(mode, true, true, false, true)
+    expect(result.isElevated).toHaveBeenCalledOnce()
+    expect(result.ensureAdministrator).not.toHaveBeenCalled()
+    expect(result.app.quit).toHaveBeenCalledOnce()
+    expect(result.app.requestSingleInstanceLock).not.toHaveBeenCalled()
+    expect(result.events).toEqual([])
   })
 
   it('the primary instance recovers data before loading policy and waits for disk on repeated quits', async () => {
@@ -115,8 +127,8 @@ describe('launcher data lifecycle', () => {
     expect(second.listeners.has('before-quit')).toBe(false)
   })
 
-  it('routes the installed browser setup close message through the regular quit lifecycle', async () => {
-    const main = await start('app', true, true)
+  it.each([{ trialBuild: false }, { trialBuild: true }])('routes the installed browser setup close through the regular quit lifecycle ($trialBuild)', async ({ trialBuild }) => {
+    const main = await start('app', true, true, true, trialBuild)
     const request = main.windowMessages.get(windowsLayout.setupCloseMessage)
     expect(request).toBeTypeOf('function')
     request!()

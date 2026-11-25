@@ -9,7 +9,7 @@ Set-Location (Split-Path -Parent $PSScriptRoot)
 
 if ($Reseed -and -not $DataDir) { throw '-Reseed requires -DataDir' }
 if ($DataDir) {
-  if (Get-Process KevinLauncherTrial,KevinLauncherTrial-Installer-* -ErrorAction SilentlyContinue) {
+  if (Get-Process KevinLauncherTrial,KevinLauncherTrialRuntime,KevinLauncherTrial-Installer-* -ErrorAction SilentlyContinue) {
     throw 'Close the trial and its installer before copying data'
   }
   $seedArgs = @('scripts/seed-trial.mjs', $DataDir)

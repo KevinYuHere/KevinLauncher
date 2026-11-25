@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { launcherEntryPath, trialBuild } from './buildIdentity'
+import { launcherEntryPath } from './buildIdentity'
 import { log } from './logger'
 import type { ProcessIdentity } from './processTree'
 
@@ -9,7 +9,7 @@ const exec = promisify(execFile)
 /** Request a normal exit from the installed processes using only the setup's own entry. */
 export async function requestLauncherClose(processes: readonly ProcessIdentity[]): Promise<number> {
   const entry = launcherEntryPath()
-  if (trialBuild || entry === process.execPath) return 0
+  if (entry === process.execPath) return 0
   let sent = 0
   for (const process of processes) {
     try {

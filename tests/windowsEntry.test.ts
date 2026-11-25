@@ -2,16 +2,20 @@ import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { once } from 'node:events'
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { basename, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { createRequire } from 'node:module'
 import { setTimeout as delay } from 'node:timers/promises'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import { buildWindowsEntry, windowsEntrySourceFiles } from '../scripts/build-windows-entry.mjs'
+import windowsLayout from '../src/shared/windowsLayout.json'
 
 const require = createRequire(import.meta.url)
 const { assertExecutionLevel } = require('../scripts/windows-executable.js')
 
-describe.skipIf(process.platform !== 'win32')('Windows launcher entry', () => {
+describe.skipIf(process.platform !== 'win32').each([
+  { entryName: windowsLayout.entry, runtimeName: windowsLayout.runtime, trial: false },
+  { entryName: windowsLayout.trialEntry, runtimeName: windowsLayout.trialRuntime, trial: true }
+])('Windows launcher entry $entryName', ({ entryName, runtimeName, trial }) => {
   let root: string
   let entry: string
   let runtime: string
@@ -25,10 +29,10 @@ describe.skipIf(process.platform !== 'win32')('Windows launcher entry', () => {
     cwd = join(root, '当前 目录')
     mkdirSync(layout)
     mkdirSync(cwd)
-    entry = join(layout, 'KevinLauncher.exe')
-    runtime = join(layout, 'KevinLauncherRuntime.exe')
-    const elevated = join(root, 'KevinLauncher.exe')
-    buildWindowsEntry(elevated)
+    entry = join(layout, entryName)
+    runtime = join(layout, runtimeName)
+    const elevated = join(root, entryName)
+    buildWindowsEntry(elevated, trial)
     const pe = readFileSync(elevated)
     const header = pe.readUInt32LE(0x3c)
     expect(pe.readUInt16LE(header + 4)).toBe(0x8664)
@@ -41,7 +45,8 @@ describe.skipIf(process.platform !== 'win32')('Windows launcher entry', () => {
     writeFileSync(invoker, readFileSync(manifest, 'utf8').replace('requireAdministrator', 'asInvoker'))
     const compiler = join(process.env.SystemRoot!, 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe')
     const compile = (file: string, code: string) => execFileSync(compiler,
-      ['/nologo', '/optimize+', '/target:winexe', '/platform:x64', '/out:' + file, '/win32manifest:' + invoker, code],
+      ['/nologo', '/optimize+', '/target:winexe', '/platform:x64', ...(trial ? ['/define:TRIAL'] : []),
+        '/out:' + file, '/win32manifest:' + invoker, code],
       { windowsHide: true })
     // Only this test copy is runnable without prompting the logged-in user for UAC.
     compile(entry, source)
@@ -49,15 +54,15 @@ describe.skipIf(process.platform !== 'win32')('Windows launcher entry', () => {
     compile(runtime, join(import.meta.dirname, 'fixtures', 'windows-entry-runtime.cs'))
     const legacyDir = join(root, '旧 版本')
     mkdirSync(legacyDir)
-    legacy = join(legacyDir, 'KevinLauncher.exe')
-    installedBrowser = join(legacyDir, 'KevinLauncherRuntime.exe')
+    legacy = join(legacyDir, entryName)
+    installedBrowser = join(legacyDir, runtimeName)
     compile(legacy, join(import.meta.dirname, 'fixtures', 'windows-entry-close.cs'))
     compile(installedBrowser, join(import.meta.dirname, 'fixtures', 'windows-entry-close.cs'))
   })
 
   afterAll(() => { if (root) rmSync(root, { recursive: true, force: true, maxRetries: 3 }) })
 
-  test('inherits the current directory, arguments, portable identity, streams and full child exit code', () => {
+  test('passes arguments, portable identity, streams and the child exit code with the intended work directory', () => {
     const portable = join(root, '包 文件.exe')
     const args = ['--install', '', '中文 with spaces', 'literal"quote', 'backslash\\"quote', 'trailing slash\\']
     const child = spawnSync(entry, args, {
@@ -72,7 +77,7 @@ describe.skipIf(process.platform !== 'win32')('Windows launcher entry', () => {
     const output = child.stdout.trimEnd().split(/\r?\n/).map(line => Buffer.from(line, 'base64').toString('utf8'))
     expect(output.slice(0, args.length)).toEqual(args)
     // The runner's 8.3 TEMP alias can differ from the directory reported by .NET.
-    expect(realpathSync.native(output[args.length])).toBe(realpathSync.native(cwd))
+    expect(realpathSync.native(output[args.length])).toBe(realpathSync.native(trial ? dirname(runtime) : cwd))
     expect(output.slice(args.length + 1, args.length + 4)).toEqual([portable, '', 'fixture stdin'])
     const windows = realpathSync.native(process.env.SystemRoot!)
     expect(output.slice(args.length + 4).map(path => realpathSync.native(path))).toEqual([windows, windows])
@@ -82,12 +87,12 @@ describe.skipIf(process.platform !== 'win32')('Windows launcher entry', () => {
   test('reports the original Windows error when the fixed sibling is missing', () => {
     const incomplete = join(root, '缺少 运行库')
     mkdirSync(incomplete)
-    const testedEntry = join(incomplete, 'KevinLauncher.exe')
+    const testedEntry = join(incomplete, entryName)
     writeFileSync(testedEntry, readFileSync(entry))
     const child = spawnSync(testedEntry, [], { cwd, encoding: 'utf8', windowsHide: true, timeout: 10000 })
     expect(child.error).toBeUndefined()
     expect(child.status).toBe(2)
-    expect(child.stderr).toContain('KevinLauncherRuntime.exe (2)')
+    expect(child.stderr).toContain(`${runtimeName} (2)`)
   })
 
   test.each(['legacy window', 'installed browser'] as const)('only posts a close to hidden Chrome windows of the verified %s', async kind => {
@@ -112,6 +117,10 @@ describe.skipIf(process.platform !== 'win32')('Windows launcher entry', () => {
       { cwd, windowsHide: true, encoding: 'utf8', timeout: 3000 })
     try {
       const created = Number((await receive(/ready:(\d+)\r?\n/))[1])
+      const otherEntry = trial ? windowsLayout.entry : windowsLayout.trialEntry
+      const wrongIdentity = request(created, join(cwd, otherEntry))
+      expect(wrongIdentity.status).toBe(1)
+      expect(wrongIdentity.stderr).toContain('Expected an absolute KevinLauncher executable path')
       for (const [time, expected] of [[created + 1, image], [created, join(cwd, basename(image))]] as const) {
         const rejected = request(time, expected)
         expect(rejected.error).toBeUndefined()

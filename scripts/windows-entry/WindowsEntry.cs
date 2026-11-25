@@ -7,7 +7,13 @@ using System.Text;
 
 static class WindowsEntry
 {
+#if TRIAL
+    const string LauncherName = "KevinLauncherTrial.exe";
+    const string RuntimeName = "KevinLauncherTrialRuntime.exe";
+#else
+    const string LauncherName = "KevinLauncher.exe";
     const string RuntimeName = "KevinLauncherRuntime.exe";
+#endif
     const string CloseWindowArgument = "--kevin-close-launcher-window";
     const uint UseShowWindow = 0x00000001;
     const uint UseStdHandles = 0x00000100;
@@ -85,7 +91,6 @@ static class WindowsEntry
         const uint SetupCloseMessage = 0x804B;
         const int InvalidWindowHandle = 1400;
         const long UnixEpochFileTime = 116444736000000000L;
-        const string LauncherName = "KevinLauncher.exe";
 
         [StructLayout(LayoutKind.Sequential)]
         struct FileTime { public uint Low, High; }
@@ -292,12 +297,18 @@ static class WindowsEntry
         if (length == 0 || length >= windows.Capacity) throw new Win32Exception();
         Environment.SetEnvironmentVariable("SystemRoot", windows.ToString());
         Environment.SetEnvironmentVariable("windir", windows.ToString());
+#if TRIAL
+        // An elevated installed trial must not search the caller's writable directory.
+        string workingDirectory = runtime.Substring(0, runtime.LastIndexOf('\\') + 1);
+#else
+        string workingDirectory = null;
+#endif
         ProcessInformation process;
         using (var startup = new ChildStartup())
         {
             uint flags = startup.InheritHandles ? ExtendedStartupInfoPresent : 0;
             if (!CreateProcessW(runtime, commandLine, IntPtr.Zero, IntPtr.Zero, startup.InheritHandles, flags,
-                IntPtr.Zero, null, ref startup.Info, out process)) throw new Win32Exception();
+                IntPtr.Zero, workingDirectory, ref startup.Info, out process)) throw new Win32Exception();
         }
 
         CloseHandle(process.Thread);

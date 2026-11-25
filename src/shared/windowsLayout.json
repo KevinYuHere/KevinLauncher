@@ -1,5 +1,7 @@
 {
   "entry": "KevinLauncher.exe",
   "runtime": "KevinLauncherRuntime.exe",
+  "trialEntry": "KevinLauncherTrial.exe",
+  "trialRuntime": "KevinLauncherTrialRuntime.exe",
   "setupCloseMessage": 32843
 }

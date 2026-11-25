@@ -106,7 +106,7 @@ function createWindow(icon?: string, hidden = false, mode: RunMode = 'app'): Bro
 
   bindWindowRole(mainWindow.webContents, mode, is.dev ? process.env.ELECTRON_RENDERER_URL : undefined)
   if (!setup) observeWindowActivity(mainWindow, hidden)
-  if (!setup && process.platform === 'win32' && app.isPackaged && !trialBuild) {
+  if (!setup && process.platform === 'win32' && app.isPackaged) {
     mainWindow.hookWindowMessage(windowsLayout.setupCloseMessage, () => {
       setImmediate(() => {
         log('setup: received launcher close request')
@@ -161,7 +161,8 @@ app.whenReady().then(async () => {
 
   // A lightweight update may run on a legacy shell with an asInvoker manifest.
   // Hand off before taking the instance lock, binding IPC or opening any window.
-  if (app.isPackaged && !trialBuild && !(await ensureAdministrator(runMode))) {
+  // The trial's public entry requests elevation; its private runtime never relaunches itself.
+  if (app.isPackaged && !(await (trialBuild ? isElevated() : ensureAdministrator(runMode)))) {
     app.quit()
     return
   }

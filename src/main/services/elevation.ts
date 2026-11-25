@@ -16,7 +16,7 @@ export function isElevated(): Promise<boolean> {
 
 function tokenIsElevated(): Promise<boolean> {
   if (process.platform !== 'win32') return Promise.resolve(true)
-  cached ??= runPowerShell(PS_CHECK, { timeout: 10_000 }).then(output => {
+  cached ??= runPowerShell(PS_CHECK, { timeout: 10_000, systemOnly: true }).then(output => {
     const result = output.trim().toLowerCase()
     if (result === 'true') return true
     if (result === 'false') return false

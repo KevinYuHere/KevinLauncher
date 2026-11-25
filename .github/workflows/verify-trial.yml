@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   theme-policy:
-    name: Bundled theme policy on two packaged starts
+    name: Trial installer, elevated launcher and bundled theme policy
     if: |
       (github.event_name == 'pull_request' &&
        github.event.pull_request.head.repo.full_name == github.repository &&
@@ -47,17 +47,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm run package:test -- --theme-policy $fixture --keep-unpacked
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Verify the actual packaged app starts twice and retains manual choices
+      - name: Exercise the actual installer, public launcher and trial shortcut
         run: |
           $batch = @(Get-ChildItem -LiteralPath . -Directory -Filter 'release-trial-*')
           if ($batch.Count -ne 1) { throw 'Expected exactly one trial build' }
-          $record = Get-Content -LiteralPath (Join-Path $batch[0].FullName 'trial-verification.json') -Raw | ConvertFrom-Json
-          $installer = Join-Path $batch[0].FullName $record.installer
-          if ((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant() -ne $record.sha256) {
-            throw 'The local trial installer hash changed'
-          }
-          $app = Join-Path $batch[0].FullName 'win-unpacked\KevinLauncherTrial.exe'
-          node scripts/verify-theme-policy-trial.mjs $app $env:RUNNER_TEMP
+          node scripts/verify-theme-policy-trial.mjs $batch[0].FullName
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   installer:

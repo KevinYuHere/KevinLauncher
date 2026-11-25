@@ -19,7 +19,9 @@ npm run package:test
 
 `npm run test:core` 运行与操作系统无关的核心回归。Windows CI 额外执行原生归档、快捷方式/安装相关的 Windows 测试，正式发布再运行同一批成品的安装与覆盖演练。`npm run lint` 校验变更空白、构建脚本语法和 JSON，现有文件按改动渐进整理。
 
-试用包与 SHA-256 校验记录位于本次命令打印的 `release-trial-*` 目录。加 `--keep-unpacked` 可保留独立的解包程序供诊断。试用安装器使用普通用户权限，程序、数据和快捷方式都在 `%LOCALAPPDATA%\KevinLauncherTrial` 内，可与安装好的正式版并存。试用版的真实应用启动、游戏更新、开机自启和远端启动器更新已隔离。试用卸载可运行固定试用安装目录下的 `KevinLauncherTrial.exe --uninstall`。
+试用包与 SHA-256 校验记录位于本次命令打印的 `release-trial-*` 目录。加 `--keep-unpacked` 可保留独立的解包程序供诊断。在 Windows 资源管理器中双击试用安装包或已安装的 `KevinLauncherTrial.exe`，Windows 会请求管理员权限。取消 UAC 后本次启动结束。
+
+试用程序安装在 Windows 的 `Program Files\KevinLauncherTrial\<账户 SID>`。数据和试用快捷方式继续使用 `%LOCALAPPDATA%\KevinLauncherTrial`。旧试用程序留在原目录，建议从安装完成页或更新后的试用快捷方式启动新版。试用版的真实应用启动、游戏更新、开机自启和远端启动器更新均已隔离。试用卸载可运行对应安装目录下的 `KevinLauncherTrial.exe --uninstall`，卸载旧版时选择保留数据可供新版继续使用。
 
 需要复制一份现有设置时，先退出试用版，然后把源目录明确传给 `scripts/trial.ps1 -DataDir <目录>`。加 `-Reseed` 会替换已有试用数据。复制完成后才会切换试用数据目录。也可在 `npm run package:test -- --theme-policy <文件>` 中指定当前版本的试用策略；正式包的主题策略来自版本对应的已跟踪文件。
 
@@ -39,7 +41,7 @@ GitHub 仓库可启用 [Immutable releases](https://docs.github.com/en/repositor
 
 调整启动壳、安装协议或持久化格式时，同步更新 `scripts/release-compatibility.json` 相应协议号。热更新会核对 Electron、宿主文件、协议和数据格式，遇到变化时使用完整安装程序。热更新启动连续两次失败会使用上一健康代码，保留同格式的用户数据和更新前备份。
 
-正式安装器和安装后的 `KevinLauncher.exe` 均声明管理员权限。安装目录中的 `KevinLauncher.exe` 是小型入口，等待同目录 `KevinLauncherRuntime.exe` 执行并传递退出码。Electron 浏览器继承管理员令牌，GPU 和渲染子进程继续使用 Chromium 沙箱。打包仅保留一份 Electron 可执行文件，验收同时检查公开入口与内部运行库的 Windows 清单。
+正式版与试用版的安装器和启动入口均声明管理员权限。`KevinLauncher.exe` 和 `KevinLauncherTrial.exe` 是各自的小型入口，会等待同目录的 `KevinLauncherRuntime.exe` 或 `KevinLauncherTrialRuntime.exe` 并传递退出码。Electron 浏览器继承管理员令牌，GPU 和渲染子进程继续使用 Chromium 沙箱。构建时检查安装器、启动入口与内部运行库的 Windows 清单。
 
 ## 可选网络验证
 

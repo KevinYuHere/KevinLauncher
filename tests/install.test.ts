@@ -320,6 +320,7 @@ async function installFixture(): Promise<{ root: string; source: string; target:
   })
   await writeTree(source, {
     'KevinLauncher.exe': 'new executable',
+    'KevinLauncherRuntime.exe': 'new runtime',
     'provider.dll': 'new runtime',
     'resources/app-version.txt': '2.0.5',
     'resources/app/loader.js': 'loader',

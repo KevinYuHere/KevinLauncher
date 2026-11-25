@@ -19,7 +19,7 @@ import { requestLauncherClose } from './setupProcess'
 import {
   assertTrialInstallDirectory, launcherDisplayName, launcherExecutableName as EXE,
   launcherEntryPath, launcherProcessNames, launcherProductName, launcherRuntimeExecutableName as RUNTIME,
-  trialBuild, trialDirectory, trialShortcuts
+  legacyTrialInstallDirectory, trialBuild, trialInstallDirectory, trialShortcuts
 } from './buildIdentity'
 
 /**
@@ -89,7 +89,7 @@ interface InstallLifecycle {
 // ------------------------------------------------------------------- helpers
 
 export function defaultInstallDir(): string {
-  if (trialBuild) return join(trialDirectory('installed'), launcherProductName)
+  if (trialBuild) return trialInstallDirectory()
   const base = process.env.LOCALAPPDATA ?? app.getPath('home')
   return join(base, 'Programs', 'KevinLauncher')
 }
@@ -191,6 +191,7 @@ export function processesUsingInstall(
 ): number[] {
   const entry = canonicalExecutable(join(targetDir, EXE))
   const runtime = canonicalExecutable(join(targetDir, RUNTIME))
+  const legacy = trialBuild ? canonicalExecutable(join(legacyTrialInstallDirectory(), EXE)) : undefined
   const own = new Set(ProcessTree.descendants(snapshot, owner.pid))
   if (entry !== runtime && canonicalExecutable(owner.execPath) === runtime) {
     const parent = snapshot.find(item => item.pid === owner.ppid)
@@ -199,7 +200,7 @@ export function processesUsingInstall(
   return snapshot.filter(item => {
     if (own.has(item.pid) || !item.executable) return false
     const path = canonicalExecutable(item.executable)
-    return path === entry || path === runtime
+    return path === entry || path === runtime || path === legacy
   }).map(item => item.pid)
 }
 
@@ -271,6 +272,7 @@ function assertInstallTarget(dir: string): void {
 export function normalizeInstallDir(dir: string): string {
   const trimmed = dir.replace(/[\\/]+$/, '')
   if (!trimmed) return defaultInstallDir()
+  if (trialBuild) return trimmed
   // Drive root like "D:" / "D:\"
   if (/^[a-zA-Z]:$/.test(trimmed)) return join(trimmed + '\\', launcherProductName)
   if (isFileSystemRoot(dir)) return join(dir, launcherProductName)
@@ -637,7 +639,7 @@ export async function applyPayload(
     const files = (await listFiles(source)).filter(file => file.toLowerCase() !== INFO_FILE)
     const pointer = 'resources/app-version.txt'
     const required = [
-      EXE, pointer, 'resources/app/out/main/index.js', 'resources/app/loader.js',
+      EXE, RUNTIME, pointer, 'resources/app/out/main/index.js', 'resources/app/loader.js',
       `resources/app-${version}/out/main/index.js`
     ]
     if (required.some(file => !files.includes(file)) ||

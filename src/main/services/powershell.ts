@@ -10,6 +10,8 @@ export interface PowerShellOptions {
   /** Kill a hung command after this many ms. */
   timeout?: number
   signal?: AbortSignal
+  /** Use Windows' executable, working directory and modules for privileged helpers. */
+  systemOnly?: boolean
 }
 
 /**
@@ -34,6 +36,17 @@ function utf8PowerShell(script: string): string {
   return `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; ${script}`
 }
 
+function powerShellInvocation(script: string, systemOnly = false) {
+  const system = systemOnly ? systemPowerShell() : undefined
+  // Windows PowerShell itself may prepend a machine module directory on startup.
+  const command = system ? "$env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules'); " + script : script
+  return {
+    executable: system ? win32.join(system.directory, 'powershell.exe') : 'powershell.exe',
+    args: powerShellArgs(command),
+    options: { windowsHide: true, ...(system ? { cwd: system.directory, env: system.env } : {}) }
+  }
+}
+
 /**
  * Run a PowerShell script and return its stdout.
  *
@@ -42,11 +55,12 @@ function utf8PowerShell(script: string): string {
  * mangles non-ASCII (Chinese) font names, file paths, etc.
  */
 export async function runPowerShell(script: string, options: PowerShellOptions = {}): Promise<string> {
+  const invocation = powerShellInvocation(script, options.systemOnly)
   const { stdout } = await execFileAsync(
-    'powershell.exe',
-    powerShellArgs(script),
+    invocation.executable,
+    invocation.args,
     {
-      windowsHide: true,
+      ...invocation.options,
       maxBuffer: options.maxBuffer ?? 8 * 1024 * 1024,
       signal: options.signal,
       ...(options.timeout ? { timeout: options.timeout } : {})
@@ -55,10 +69,11 @@ export async function runPowerShell(script: string, options: PowerShellOptions =
   return stdout
 }
 
-/** Reserved for data-directory bootstrap, before Electron becomes ready. */
-export function runPowerShellSync(script: string): string {
-  return execFileSync('powershell.exe', powerShellArgs(script), {
-    windowsHide: true,
+/** Synchronous Windows directory discovery and pre-ready data bootstrap. */
+export function runPowerShellSync(script: string, options: Pick<PowerShellOptions, 'systemOnly'> = {}): string {
+  const invocation = powerShellInvocation(script, options.systemOnly)
+  return execFileSync(invocation.executable, invocation.args, {
+    ...invocation.options,
     encoding: 'utf8',
     timeout: 5000
   })
@@ -69,8 +84,7 @@ export function startPowerShell(script: string): ChildProcessWithoutNullStreams 
   return spawn('powershell.exe', powerShellArgs(script), { windowsHide: true })
 }
 
-/** Run the fixed elevated helper entry with private input/output and an open diagnostics sink. */
-export function startPowerShellWithReport(script: string, reportFd: number) {
+function systemPowerShell() {
   const systemRoot = process.env.SystemRoot
   if (!systemRoot || !/^[a-z]:[\\/]/i.test(systemRoot)) throw new Error('无法定位 Windows 系统 PowerShell')
   const system = win32.join(systemRoot, 'System32')
@@ -78,6 +92,12 @@ export function startPowerShellWithReport(script: string, reportFd: number) {
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(path|psmodulepath)$/i.test(key)))
   env.Path = `${directory};${system}`
   env.PSModulePath = win32.join(directory, 'Modules')
+  return { system, directory, env }
+}
+
+/** Run the fixed elevated helper entry with private input/output and an open diagnostics sink. */
+export function startPowerShellWithReport(script: string, reportFd: number) {
+  const { system, directory, env } = systemPowerShell()
   // libuv's Windows job kills its direct children on exit but lets their
   // children leave the job. PowerShell still needs its normal console flags.
   const entry = Buffer.from(utf8PowerShell(script), 'utf16le').toString('base64')

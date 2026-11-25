@@ -2,8 +2,12 @@ import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { join, relative, resolve, sep } from 'node:path'
 import { parseArgs } from 'node:util'
+import windowsExecutable from './windows-executable.js'
+
+const { trialEntry, trialRuntime } = createRequire(import.meta.url)('../src/shared/windowsLayout.json')
 
 if (process.platform !== 'win32') throw new Error('本地试用安装包须在 Windows 上构建')
 const root = resolve(import.meta.dirname, '..')
@@ -16,7 +20,6 @@ const runtime = (await readFile(join(electronDist, 'version'), 'utf8').catch(() 
 if (runtime !== devDependencies.electron) throw new Error('请先运行 scripts/install.ps1 安装锁定的 Electron 运行库')
 const output = await mkdtemp(join(root, 'release-trial-'))
 const temp = join(output, 'tmp')
-const exe = 'KevinLauncherTrial.exe'
 const installer = `KevinLauncherTrial-Installer-${version}.exe`
 const env = {
   ...process.env,
@@ -35,6 +38,8 @@ function node(script, ...args) {
 // electron-builder deep-merges .js config with the registered production layout.
 const config = join(output, 'builder.cjs')
 const bundled = relative(root, join(output, 'app')).split(sep).join('/')
+// In the locked electron-builder, true leaves UNPACK_DIR_NAME undefined, so
+// NSIS uses a separate plugin directory for every installer process.
 const configuration = [
   'const fs = require("node:fs")',
   'const yaml = require("js-yaml")',
@@ -45,7 +50,7 @@ const configuration = [
   '  electronDist: ' + JSON.stringify(electronDist) + ',',
   `  directories: { output: ${JSON.stringify(output)} },`,
   `  extraResources: base.extraResources.map(rule => rule.from === "out" ? { ...rule, from: ${JSON.stringify(bundled)} } : rule),`,
-  '  portable: { ...base.portable, requestExecutionLevel: "user" }',
+  '  portable: { ...base.portable, unpackDirName: true }',
   '}'
 ].join('\n')
 
@@ -62,11 +67,19 @@ try {
   await writeFile(config, configuration)
   node(builder, '--config', config, '--win', '--x64', '--dir', '--publish', 'never')
   node(builder, '--config', config, '--win', '--x64', '--prepackaged', unpacked, '--publish', 'never')
-  node('scripts/windows-executable.js', '--trial', join(unpacked, exe), file)
+  const installerMode = 'requireAdministrator'
+  const entryMode = 'requireAdministrator'
+  const runtimeMode = 'asInvoker'
+  for (const [executable, mode] of [[file, installerMode], [join(unpacked, trialEntry), entryMode],
+    [join(unpacked, trialRuntime), runtimeMode]]) {
+    windowsExecutable.assertExecutionLevel(executable, mode)
+    console.log(`Verified ${mode} in ${executable}`)
+  }
   const sha256 = createHash('sha256')
   for await (const chunk of createReadStream(file)) sha256.update(chunk)
   await writeFile(join(output, 'trial-verification.json'), JSON.stringify({
-    identity: 'trial', version, installer, size: (await stat(file)).size, sha256: sha256.digest('hex')
+    identity: 'trial', version, installer, installerMode, entryMode, runtimeMode,
+    size: (await stat(file)).size, sha256: sha256.digest('hex')
   }, null, 2) + '\n')
 } catch (error) {
   await rm(file, { force: true })

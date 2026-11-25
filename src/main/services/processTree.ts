@@ -43,7 +43,7 @@ export type StopProcessOutcome = 'stopped' | 'exited' | 'mismatch' | 'failed'
 export class ProcessTree {
   /** Snapshot of all processes. Uses CIM so parent pids are available. */
   static async snapshot(signal?: AbortSignal): Promise<ProcInfo[]> {
-    const stdout = await runPowerShell(PS_CMD, { maxBuffer: 8 * 1024 * 1024, timeout: 12_000, signal })
+    const stdout = await runPowerShell(PS_CMD, { maxBuffer: 8 * 1024 * 1024, timeout: 12_000, signal, systemOnly: true })
     if (!stdout.trim()) return []
     const parsed = JSON.parse(stdout) as unknown
     const list = Array.isArray(parsed) ? parsed : [parsed]

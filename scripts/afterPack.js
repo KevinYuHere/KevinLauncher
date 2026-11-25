@@ -52,22 +52,20 @@ module.exports = async function afterPack(context) {
   const nativeSources = []
   if (context.electronPlatformName === 'win32') {
     const name = `${context.packager.appInfo.productFilename}.exe`
+    const entryName = trial ? windowsLayout.trialEntry : windowsLayout.entry
+    const runtimeName = trial ? windowsLayout.trialRuntime : windowsLayout.runtime
+    if (name !== entryName) throw new Error('Windows 入口文件名与构建身份不一致')
     const entry = path.join(context.appOutDir, name)
+    const runtime = path.join(context.appOutDir, runtimeName)
     const icon = path.join(projectDir, 'resources', 'icon.ico')
-    if (trial) {
-      prepareWindowsExecutable(entry, icon, 'asInvoker')
-    } else {
-      if (name !== windowsLayout.entry) throw new Error('正式 Windows 入口文件名不一致')
-      const { buildWindowsEntry, windowsEntrySourceFiles } = await import('./build-windows-entry.mjs')
-      const runtime = path.join(context.appOutDir, windowsLayout.runtime)
-      fs.renameSync(entry, runtime)
-      prepareWindowsExecutable(runtime, icon, 'asInvoker')
-      await buildWindowsEntry(entry)
-      assertExecutionLevel(entry, 'requireAdministrator')
-      assertExecutionLevel(runtime, 'asInvoker')
-      nativeSources.push(...windowsEntrySourceFiles,
-        path.join(projectDir, 'src/shared/windowsLayout.json'), path.join(__dirname, 'windows-executable.js'))
-    }
+    const { buildWindowsEntry, windowsEntrySourceFiles } = await import('./build-windows-entry.mjs')
+    fs.renameSync(entry, runtime)
+    prepareWindowsExecutable(runtime, icon, 'asInvoker')
+    buildWindowsEntry(entry, trial)
+    assertExecutionLevel(entry, 'requireAdministrator')
+    assertExecutionLevel(runtime, 'asInvoker')
+    nativeSources.push(...windowsEntrySourceFiles,
+      path.join(projectDir, 'src/shared/windowsLayout.json'), path.join(__dirname, 'windows-executable.js'))
   }
   const fingerprint = createHash('sha256')
   const hostFiles = [

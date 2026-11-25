@@ -63,8 +63,8 @@ module.exports = { assertElevated: assertExecutionLevel, assertExecutionLevel, p
 
 if (require.main === module) {
   const files = process.argv.slice(2)
-  const level = ['--trial', '--as-invoker'].includes(files[0]) ? (files.shift(), 'asInvoker') : requiredLevel
-  if (files.length === 0) throw new Error('Usage: node scripts/windows-executable.js <exe> [other.exe ...]')
+  const level = files[0] === '--as-invoker' ? (files.shift(), 'asInvoker') : requiredLevel
+  if (files.length === 0) throw new Error('Usage: node scripts/windows-executable.js [--as-invoker] <exe> [other.exe ...]')
   for (const file of files) {
     assertExecutionLevel(file, level)
     console.log(`Verified ${level} in ${file}`)
