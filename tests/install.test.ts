@@ -138,7 +138,10 @@ describe('managed uninstall', () => {
       installDirId: { volume: identity.volume, file: '0' },
       files: managedUninstallPaths(['KevinLauncher.exe'])
     })
-    const failure = await startUninstallHelper(script, report).then(
+    // Fresh Windows CI can need more than the production 10 s deadline just to
+    // start PowerShell. This integration case alone gets 30 s to reach the real
+    // identity guard; the diagnostic polling below and cleanup stay bounded.
+    const failure = await startUninstallHelper(script, report, undefined, 30_000).then(
       () => undefined,
       (error: unknown) => error instanceof Error ? error : new Error(String(error))
     )
@@ -161,7 +164,7 @@ describe('managed uninstall', () => {
     })
     expect(diagnostic).toMatch(/identity changed/)
     await expect(fs.access(backup)).rejects.toMatchObject({ code: 'ENOENT' })
-  }, 20_000)
+  }, 45_000)
 
   it.skipIf(process.platform !== 'win32')('rejects a replaced quarantine before moving files', async () => {
     const root = await fs.realpath(await temp())

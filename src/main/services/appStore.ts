@@ -1,6 +1,6 @@
 import { app } from 'electron'
-import { promises as fs } from 'fs'
-import { dirname, join } from 'path'
+import { promises as fs, type Dirent } from 'fs'
+import { basename, dirname, join } from 'path'
 import type {
   AppEntry, AppSettingsPatch, FeatureIntro, LauncherSettings, LinkedLaunch, ThemePolicy
 } from '@shared/types'
@@ -55,12 +55,60 @@ async function writeConfig(file: string, config: LauncherConfig): Promise<void> 
   }
 }
 
-async function restoreConfig(file: string): Promise<LauncherConfig | undefined> {
-  const sources = [
-    `${file}.corrupt`,
-    join(dirname(file), BACKUP_DIR_NAME, 'config.json'),
-    join(dirname(file), PREVIOUS_BACKUP_DIR_NAME, 'config.json')
+const QUARANTINE_SUFFIX = '.corrupt'
+
+/** Timestamp encoded in a generated quarantine name; 0 for the legacy exact name. */
+function quarantineTime(name: string, prefix: string): number | null {
+  if (name === prefix) return 0
+  const marker = `${prefix}-`
+  if (!name.startsWith(marker)) return null
+  const parts = name.slice(marker.length).split('-')
+  if (parts.length !== 2 || !parts.every((part) => /^\d+$/.test(part))) return null
+  const time = Number(parts[0])
+  return Number.isSafeInteger(time) ? time : null
+}
+
+/** Regular-file quarantines for this exact config, newest first. */
+async function quarantineCandidates(file: string): Promise<string[]> {
+  const directory = dirname(file)
+  const prefix = `${basename(file)}${QUARANTINE_SUFFIX}`
+  let entries: Dirent[]
+  try {
+    entries = await fs.readdir(directory, { withFileTypes: true })
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+    throw new DataError('READ_FAILED', '启动器配置目录读取失败，已暂停写入', error)
+  }
+  return entries
+    .filter((entry) => entry.isFile())
+    .map((entry) => ({ path: join(directory, entry.name), time: quarantineTime(entry.name, prefix) }))
+    .filter((candidate): candidate is { path: string; time: number } => candidate.time !== null)
+    .sort((left, right) => right.time - left.time || right.path.localeCompare(left.path))
+    .map(({ path }) => path)
+}
+
+async function restoreConfig(file: string, freshQuarantine?: string): Promise<LauncherConfig | undefined> {
+  const directory = dirname(file)
+  const backups = [
+    join(directory, BACKUP_DIR_NAME, 'config.json'),
+    join(directory, PREVIOUS_BACKUP_DIR_NAME, 'config.json')
   ]
+  const historical = await quarantineCandidates(file)
+  // Only read the freshly quarantined path when enumeration confirmed it is a
+  // regular file. A symlink must not be followed back in as config.
+  const fresh = freshQuarantine && historical.includes(freshQuarantine)
+    ? freshQuarantine
+    : undefined
+  const older = fresh ? historical.filter((candidate) => candidate !== fresh) : historical
+  // A confirmed fresh quarantine outranks backups; otherwise backups outrank
+  // older quarantines during this recovery. If no backup works,
+  // result.quarantinePath still makes readConfig refuse the empty fallback.
+  // For a missing current file, quarantines keep their newest-first priority.
+  const sources = fresh
+    ? [fresh, ...backups, ...older]
+    : freshQuarantine
+      ? [...backups, ...older]
+      : [...older, ...backups]
   for (const source of sources) {
     let config: LauncherConfig
     try {
@@ -83,14 +131,12 @@ async function readConfig(file: string): Promise<LauncherConfig> {
   if (result.status === 'ok') {
     config = normalizeLauncherConfig(result.data)
   } else {
-    const restored = await restoreConfig(file)
+    const restored = await restoreConfig(file, result.quarantinePath)
     if (restored) {
       config = restored
     } else {
-      const hasQuarantine = await fs.lstat(`${file}.corrupt`).then(() => true, (error: NodeJS.ErrnoException) => {
-        if (error.code !== 'ENOENT') throw error
-        return false
-      })
+      const hasQuarantine = result.quarantinePath !== undefined ||
+        (await quarantineCandidates(file)).length > 0
       if (hasQuarantine) throw new ConfigValidationError('INVALID_CONFIG', '启动器配置损坏，已保留原文件')
       config = normalizeLauncherConfig(result.data)
     }

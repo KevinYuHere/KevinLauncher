@@ -363,7 +363,9 @@ $body = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($line))
 `.trim()
 
 /** The report is a write-only inherited handle. Only the anonymous pipe can authorize removal. */
-export async function startUninstallHelper(script: string, report: string, ready?: () => void): Promise<void> {
+export async function startUninstallHelper(
+  script: string, report: string, ready?: () => void, handoffTimeoutMs = 10_000
+): Promise<void> {
   const diagnostics = await fs.open(report, 'wx')
   try {
     const child = startPowerShellWithReport(HELPER_ENTRY, diagnostics.fd)
@@ -391,7 +393,7 @@ export async function startUninstallHelper(script: string, report: string, ready
           resolveHandoff()
         }
       }
-      const timeout = setTimeout(() => finish(new Error('卸载辅助程序未就绪，诊断文件：' + report)), 10_000)
+      const timeout = setTimeout(() => finish(new Error('卸载辅助程序未就绪，诊断文件：' + report)), handoffTimeoutMs)
       child.once('error', finish)
       child.once('close', () => finish(new Error('卸载辅助程序提前退出，诊断文件：' + report)))
       stdin.once('error', finish)

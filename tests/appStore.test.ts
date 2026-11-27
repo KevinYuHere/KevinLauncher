@@ -90,6 +90,40 @@ describe('app configuration transactions', () => {
     await expect(fs.access(AppStore.file())).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
+  it('prefers a newer verified backup over a stale usable quarantine after repeated corruption', async () => {
+    const stale = { version: 14, apps: [{ id: 'stale', name: '旧配置' }] }
+    const backup = { version: 14, apps: [{ id: 'backup', name: '新备份' }] }
+    await write(`${AppStore.file()}.corrupt`, stale)
+    await write(join(test.data, 'update-backup', 'config.json'), backup)
+    await fs.writeFile(AppStore.file(), '{"apps":[')
+
+    expect((await AppStore.load()).apps[0]).toMatchObject(backup.apps[0])
+    expect(JSON.parse(await fs.readFile(AppStore.file(), 'utf8')).apps[0]).toMatchObject(backup.apps[0])
+    expect(await fs.readFile(`${AppStore.file()}.corrupt`, 'utf8')).toBe(JSON.stringify(stale))
+    const quarantines = (await fs.readdir(test.data))
+      .filter((name) => name.startsWith('config.json.corrupt-'))
+    expect(quarantines).toHaveLength(1)
+    expect(await fs.readFile(join(test.data, quarantines[0]), 'utf8')).toBe('{"apps":[')
+  })
+
+  it('restores a suitable timestamped quarantine for a missing config and refuses invalid history', async () => {
+    const saved = { version: 14, apps: [{ id: 'recovered', name: '恢复的配置' }] }
+    const quarantine = `${AppStore.file()}.corrupt-${Date.now()}-${process.pid}`
+    await write(quarantine, saved)
+    expect((await AppStore.load()).apps[0]).toMatchObject(saved.apps[0])
+    expect(JSON.parse(await fs.readFile(AppStore.file(), 'utf8')).apps[0]).toMatchObject(saved.apps[0])
+    expect(await fs.readFile(quarantine, 'utf8')).toBe(JSON.stringify(saved))
+
+    // Only unusable historical evidence must never be replaced by an empty config.
+    test.data = join(root, 'invalid-data')
+    const invalid = `${AppStore.file()}.corrupt-${Date.now()}-${process.pid}`
+    await fs.mkdir(test.data, { recursive: true })
+    await fs.writeFile(invalid, '{"apps":')
+    await expect(AppStore.load()).rejects.toMatchObject({ code: 'INVALID_CONFIG' })
+    await expect(fs.access(AppStore.file())).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await fs.readFile(invalid, 'utf8')).toBe('{"apps":')
+  })
+
   it('reports an unreadable config without changing it', async () => {
     await fs.mkdir(AppStore.file(), { recursive: true })
     await expect(AppStore.setGamesRowHidden(true)).rejects.toMatchObject({ code: 'READ_FAILED' })
