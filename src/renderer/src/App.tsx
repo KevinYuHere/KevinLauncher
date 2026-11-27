@@ -27,6 +27,7 @@ import type {
   RunningApp,
   UpdateInfo,
   UpdateStatus,
+  UpdateChannel,
   UsageReport,
   WallpaperSettings
 } from '@shared/types'
@@ -200,6 +201,10 @@ export default function App(): ReactElement {
   const [dismissedUpdate, setDismissedUpdate] = useState<string | null>(null)
   const [checkingUpdate, setCheckingUpdate] = useState(false)
   const [updateCheckText, setUpdateCheckText] = useState('')
+  /** Newer check requests supersede older results (e.g. a quick channel switch). */
+  const updateCheckRevision = useRef(0)
+  /** Do not let an event from an older channel re-open the update card mid-check. */
+  const suppressUpdateEvents = useRef(false)
   const [dataDir, setDataDir] = useState('')
   /** Windows desktop wallpaper — background when the launcher has no apps. */
   const [desktopWall, setDesktopWall] = useState<string | null>(null)
@@ -358,12 +363,14 @@ export default function App(): ReactElement {
   useEffect(() => {
     let alive = true
     let received = false
+    const revision = updateCheckRevision.current
     const off = window.api.onAppUpdateAvailable((info) => {
       received = true
-      setAppUpdate(info)
+      if (!suppressUpdateEvents.current) setAppUpdate(info)
     })
     void window.api.appUpdateStatus().then((status) => {
-      if (alive && !received && status.info) setAppUpdate(status.info)
+      if (alive && revision === updateCheckRevision.current && !received &&
+          !suppressUpdateEvents.current && status.info) setAppUpdate(status.info)
     }).catch(console.error)
     return () => { alive = false; off() }
   }, [])
@@ -458,12 +465,30 @@ export default function App(): ReactElement {
 
 
 
-  /** Manual "check for updates": report the outcome as a toast. */
-  const handleCheckUpdate = useCallback(async (): Promise<void> => {
+  /**
+   * Manual check, or the forced refresh after an update-channel change. A newer
+   * request supersedes an older one so a slow answer for the previous channel
+   * cannot re-open a stale availability card.
+   */
+  const handleCheckUpdate = useCallback(async (expectedChannel?: UpdateChannel): Promise<void> => {
+    const revision = ++updateCheckRevision.current
+    suppressUpdateEvents.current = true
     setCheckingUpdate(true)
     setUpdateCheckText('正在检查…')
     try {
-      const status = await window.api.appUpdateCheck()
+      let status = await window.api.appUpdateCheck()
+      // The updater shares an in-flight check. If that one belongs to the
+      // previous channel, wait for it and ask again instead of showing its offer.
+      for (let retry = 0; retry < 2 && expectedChannel && status.channel &&
+        status.channel !== expectedChannel && revision === updateCheckRevision.current; retry++) {
+        status = await window.api.appUpdateCheck()
+      }
+      if (revision !== updateCheckRevision.current) return
+      if (expectedChannel && status.channel && status.channel !== expectedChannel) {
+        setAppUpdate(null)
+        setUpdateCheckText('更新通道已切换，请稍后重新检查')
+        return
+      }
       if (status.hasUpdate && status.info) {
         // Same dialog as the automatic startup check.
         setDismissedUpdate(null)
@@ -474,11 +499,21 @@ export default function App(): ReactElement {
         setUpdateCheckText(`检查更新失败：${status.error}`)
         showToast(`检查更新失败：${status.error}`)
       } else {
+        setAppUpdate(null)
         setUpdateCheckText('已是最新版本')
         showToast('已是最新版本')
       }
+    } catch (error) {
+      if (revision === updateCheckRevision.current) {
+        const message = dataErrorDetails(error)?.message ?? (error instanceof Error ? error.message : String(error))
+        setUpdateCheckText(`检查更新失败：${message}`)
+        showToast(`检查更新失败：${message}`)
+      }
     } finally {
-      setCheckingUpdate(false)
+      if (revision === updateCheckRevision.current) {
+        suppressUpdateEvents.current = false
+        setCheckingUpdate(false)
+      }
     }
   }, [showToast])
 
@@ -1074,6 +1109,14 @@ export default function App(): ReactElement {
         onSetBehavior={(patch) => {
           void window.api.setLauncherBehavior(patch).then((settings) => {
             setLauncherSettings(settings)
+            if (patch.updateChannel) {
+              // The channel change is committed: drop the old channel's card and
+              // hint, then force a fresh check. A running download is untouched.
+              setAppUpdate(null)
+              setDismissedUpdate(null)
+              setUpdateCheckText('')
+              void handleCheckUpdate(settings.updateChannel)
+            }
           }).catch((error) => showToast(
             `启动器设置保存失败：${dataErrorDetails(error)?.message ?? (error as Error).message}`
           ))
@@ -1085,7 +1128,7 @@ export default function App(): ReactElement {
         usage={usage}
         cleaningUsage={cleaningUsage}
         onCleanUsage={(kinds) => void handleCleanUsage(kinds)}
-        onCheckUpdate={() => void handleCheckUpdate()}
+        onCheckUpdate={() => void handleCheckUpdate(launcherSettings.updateChannel)}
         checkingUpdate={checkingUpdate}
         updateCheckText={updateCheckText}
         onExportLogs={() =>

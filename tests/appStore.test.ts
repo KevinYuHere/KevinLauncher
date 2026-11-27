@@ -59,7 +59,8 @@ describe('app configuration transactions', () => {
     [{ version: 999, apps: [] }, 'UNSUPPORTED_CONFIG'],
     [{ apps: [{ ...app, wallpapers: [null] }] }, 'INVALID_CONFIG'],
     [{ apps: [{ ...app, wallpaperIndex: -1 }] }, 'INVALID_CONFIG'],
-    [{ apps: [{ ...app, linkedLaunchIds: ['unavailable'] }] }, 'INVALID_CONFIG']
+    [{ apps: [{ ...app, linkedLaunchIds: ['unavailable'] }] }, 'INVALID_CONFIG'],
+    [{ apps: [app], launcher: { updateChannel: 'nightly' } }, 'INVALID_CONFIG']
   ])('preserves invalid data (%j) and rejects the write', async (data, code) => {
     await write(AppStore.file(), data)
     await expect(AppStore.setGamesRowHidden(true)).rejects.toMatchObject({ code })
@@ -136,6 +137,26 @@ describe('app configuration transactions', () => {
     }, async () => { throw new Error('shortcut in use') })).rejects.toThrow('shortcut in use')
     expect((await AppStore.launcherSettings()).iconFile).toBe('new.png')
     await expect(fs.access(oldIcon)).resolves.toBeUndefined()
+  })
+
+  it('defaults the launcher update channel to stable and preserves a saved beta', async () => {
+    await write(AppStore.file(), { version: 14, apps: [app], launcher: { downloadLimitMbps: 1 } })
+    expect((await AppStore.launcherSettings()).updateChannel).toBe('stable')
+    await AppStore.setLauncher({ downloadLimitMbps: 2 })
+    expect((await AppStore.load()).launcher).toMatchObject({
+      updateChannel: 'stable',
+      downloadLimitMbps: 2
+    })
+
+    await AppStore.setLauncher({ updateChannel: 'beta' })
+    expect((await AppStore.launcherSettings()).updateChannel).toBe('beta')
+    await AppStore.setLauncher({ downloadLimitMbps: 4 })
+    await AppStore.reload()
+    expect((await AppStore.launcherSettings()).updateChannel).toBe('beta')
+    expect(JSON.parse(await fs.readFile(AppStore.file(), 'utf8')).launcher).toMatchObject({
+      updateChannel: 'beta',
+      downloadLimitMbps: 4
+    })
   })
 
   it('preserves the selected wallpaper across partial and duplicate reorder IDs', async () => {

@@ -2,7 +2,7 @@
 
 ## 安装正式版
 
-在 GitHub Release 下载 `KevinLauncher-Installer-<版本>.exe` 并打开。安装界面可选择程序和数据位置。程序目录和数据目录必须分开。应用会在启动时检查正式更新，设置页也可以手动检查。[正式版本](https://github.com/KevinYuHere/KevinLauncher/releases/latest)
+在 GitHub Release 下载 `KevinLauncher-Installer-<版本>.exe` 并打开。安装界面可选择程序和数据位置。程序目录和数据目录必须分开。应用默认使用「正式版」更新，只接收新发布的正式版。在「设置 → 更新与帮助」切换到「测试版」后，也能收到测试版和正式版更新，切换时不会降级。应用会在启动时检查更新，设置页也可以手动检查。[正式版本](https://github.com/KevinYuHere/KevinLauncher/releases/latest)
 
 默认安装位置为 `%LOCALAPPDATA%\Programs\KevinLauncher`，用户数据默认保存在 `%APPDATA%\kevin-launcher`。迁移数据可从「设置 → 启动器设置」操作。卸载可从 Windows 已安装的应用列表进入，并选择是否保留用户数据。
 
@@ -23,7 +23,7 @@ npm run package:test
 
 以源码版本 `2.0.5` 为例，默认构建 `2.0.6-beta.1`，指定后续编号可用 `npm run package:test -- --version 2.0.6-beta.2`。Beta 版本写入本次构建的源码副本。安装包保存在本机。
 
-Beta 使用安装器检测到的 KevinLauncher 程序和数据目录作为默认值。两处都可以在安装界面选择。覆盖安装沿用正式版的数据备份机制，并更新同一组快捷方式和卸载入口。Beta 继续检查正式更新，并在 `2.0.6` 等更高的正式版本发布后提供更新。
+安装器会把检测到的 KevinLauncher 程序目录和数据目录作为 Beta 的默认位置，两处都能在安装界面选择。覆盖安装沿用正式版的数据备份机制，并更新同一组快捷方式和卸载入口。Beta 和正式版的更新选项相同，默认「正式版」，也可以在「设置 → 更新与帮助」切换到「测试版」，切换时不会降级。
 
 ## KEVIN HUD
 
@@ -52,7 +52,7 @@ node scripts/verify-kevin-hud.cjs
 
 GitHub 仓库可启用 [Immutable releases](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository) 锁定已公开资产。代码审阅在本地完成；正式发布门槛只核对 `main` 源码、版本和已验证产物。
 
-在 Actions 中手动触发 `Windows Beta acceptance` 工作流可运行 Windows 安装验收，该工作流只接受 `main`。一次性 Windows 环境会验证 Beta 的自定义安装位置、全新安装、覆盖升级、启动、数据保留和卸载，并核对已发布正式版的旧实例升级路径。
+在 Actions 中手动触发 `Windows Beta acceptance` 工作流可运行 Windows 安装验收，该工作流只接受 `main`。一次性 Windows 环境会验证 Beta 的自定义安装位置、全新安装、覆盖升级、启动、数据保留和卸载，并核对已发布正式版的旧实例升级路径。公开 Beta 仅在用户单独明确授权时发布，沿用现有已校验的预发布流程，不进入正式更新源。
 
 调整启动壳、安装协议或持久化格式时，同步更新 `scripts/release-compatibility.json` 相应协议号。热更新会核对 Electron、宿主文件、协议和数据格式，遇到变化时使用完整安装程序。热更新启动连续两次失败会使用上一健康代码，保留同格式的用户数据和更新前备份。
 

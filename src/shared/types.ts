@@ -584,7 +584,7 @@ export type AfterLaunchAction = 'none' | 'minimize' | 'tray' | 'close'
 /** Launch-at-login behaviour: off, show the window, or start hidden in the tray. */
 export type AutoStartMode = 'off' | 'window' | 'tray'
 /** Which GitHub releases the launcher self-updater follows. */
-export type UpdateChannel = 'stable'
+export type UpdateChannel = 'stable' | 'beta'
 
 /** 特别版主题标识（可扩展；`default` 表示不套用主题）。 */
 export type SpecialThemeId = 'default' | 'starsnow' | (string & {})
@@ -693,7 +693,7 @@ export interface LauncherSettings {
   autoStart: AutoStartMode
   /** 侧边栏是否应用当前应用的玻璃材质（否则用主题色）。 */
   sidebarMaterial: boolean
-  /** The installed launcher follows stable releases. */
+  /** 启动器自更新通道：正式版，或同时接收 Beta 的测试版。 */
   updateChannel: UpdateChannel
   /** Download speed limit in MB/s (0 = unlimited). */
   downloadLimitMbps: number
@@ -710,7 +710,8 @@ export interface LauncherSettings {
 }
 
 export const LAUNCHER_BEHAVIOR_FIELDS = [
-  'closeAction', 'afterLaunch', 'autoStart', 'sidebarMaterial', 'downloadLimitMbps', 'themeAreas'
+  'closeAction', 'afterLaunch', 'autoStart', 'sidebarMaterial', 'updateChannel', 'downloadLimitMbps',
+  'themeAreas'
 ] as const satisfies readonly (keyof LauncherSettings)[]
 export type LauncherBehaviorPatch = Partial<Pick<LauncherSettings, (typeof LAUNCHER_BEHAVIOR_FIELDS)[number]>>
 
@@ -763,6 +764,8 @@ export interface AppUpdateStatus {
   info: AppUpdateInfo | null
   /** Set when the last check failed (network / rate limit / …). */
   error?: string
+  /** Update channel this result was computed for. */
+  channel?: UpdateChannel
 }
 
 /** Lifecycle of the in-app upgrade. */

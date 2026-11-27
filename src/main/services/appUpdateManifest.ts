@@ -16,9 +16,23 @@ export interface UpdateManifest {
   critical: boolean
 }
 
+/** Metadata published next to a verified, installer-only Beta release. */
+export interface BetaVerification {
+  version: string
+  installer: string
+  size: number
+  sha256: string
+}
+
 /** Versions become installation directory names as well as release tags. */
 export const SAFE_VERSION = /^\d+(?:\.\d+)*(?:-[0-9A-Za-z.-]+)?$/
 export const STABLE_VERSION = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/
+/** Canonical public Beta tag (`x.y.z-beta.N`, no leading zeroes). */
+export const BETA_VERSION = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)-beta\.[1-9]\d*$/
+
+export function isBetaVersion(value: unknown): value is string {
+  return typeof value === 'string' && BETA_VERSION.test(value)
+}
 
 export function payloadAssetName(version: string): string {
   return `KevinLauncher-${version}-app.zip`
@@ -99,4 +113,25 @@ export function parseUpdateManifest(raw: string, expectedVersion?: string): Upda
     installerSize, installerUnpackedSize: installerUnpackedSize as number | undefined,
     installerName, installerSha256: installerSha256.toLowerCase(), ...optional
   }
+}
+
+/**
+ * Parse the locally generated `beta-verification.json` that a verified Beta
+ * publishes next to its installer. Beta releases are installer-only, so the
+ * release-level permission checks are part of the metadata we accept.
+ */
+export function parseBetaVerification(raw: string, expectedVersion?: string): BetaVerification {
+  const data: unknown = JSON.parse(raw)
+  if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Beta 验证清单格式无效')
+  const { version, installer, size, sha256, installerMode, entryMode, runtimeMode } =
+    data as Record<string, unknown>
+  if (typeof version !== 'string' || !isBetaVersion(version) ||
+      (expectedVersion !== undefined && version !== expectedVersion) ||
+      installer !== installerAssetName(version) ||
+      !isPositiveFileSize(size) || !isSha256(sha256) ||
+      installerMode !== 'requireAdministrator' || entryMode !== 'requireAdministrator' ||
+      runtimeMode !== 'asInvoker') {
+    throw new Error('Beta 验证清单缺少匹配的版本、安装包、大小、校验值或执行权限')
+  }
+  return { version, installer, size, sha256: sha256.toLowerCase() }
 }

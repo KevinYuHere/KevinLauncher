@@ -21,7 +21,7 @@ export interface LauncherConfig {
   apps: AppEntry[]
   linkedLaunches?: LinkedLaunch[]
   ui?: Partial<UiPrefs>
-  launcher?: Omit<Partial<LauncherSettings>, 'updateChannel'> & { updateChannel?: 'stable' | 'beta' }
+  launcher?: Partial<LauncherSettings>
 }
 
 export class ConfigValidationError extends DataError {
@@ -195,7 +195,9 @@ export function normalizeLauncherConfig(value: unknown): LauncherConfig {
     entry.updatedAt ??= entry.createdAt
   }
   if (config.launcher) {
-    if (config.launcher.updateChannel === 'beta') config.launcher.updateChannel = 'stable'
+    // Missing means the default stable channel. An invalid saved value is left
+    // untouched so the schema validation above rejects it without data loss.
+    if (!Object.hasOwn(config.launcher, 'updateChannel')) config.launcher.updateChannel = 'stable'
     // Older configs/backups carry one `fontFamily`; map it to both independent
     // choices. An explicit per-script `null` is kept and means system default.
     const legacyFont = normalizeLauncherFontFamily(config.launcher.fontFamily)

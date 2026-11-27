@@ -24,6 +24,7 @@ import type {
   LauncherBehaviorPatch,
   LauncherFontScript,
   SpecialThemeId,
+  UpdateChannel,
   UsageReport
 } from '@shared/types'
 import { DEFAULT_GLASS_APPEARANCE, MATERIAL_DEFAULTS } from '@shared/types'
@@ -1133,7 +1134,24 @@ export default function SettingsView({
               />
 
               <Row name="当前版本" desc={version} />
-              <Row name="更新通道" desc={trialBuild ? '本地试用' : '正式版'} />
+              <Row
+                name="更新通道"
+                desc={
+                  launcher.updateChannel === 'beta'
+                    ? '接收新的 Beta 和更高的正式版，按版本号取最高；切回正式版不会回退已安装的版本。'
+                    : '只接收版本号更高的正式版；从测试版切回不会回退已安装的版本。'
+                }
+                action={
+                  <Segmented
+                    value={launcher.updateChannel}
+                    onChange={(value) => onSetBehavior({ updateChannel: value as UpdateChannel })}
+                    options={[
+                      { value: 'stable', label: '正式版' },
+                      { value: 'beta', label: '测试版' }
+                    ]}
+                  />
+                }
+              />
 
               <Row
                 name="下载限速"

@@ -4,12 +4,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AppUpdateChecker } from '../src/main/services/appUpdate'
-import { parseUpdateManifest } from '../src/main/services/appUpdateManifest'
+import { parseBetaVerification, parseUpdateManifest } from '../src/main/services/appUpdateManifest'
 import { pendingDataTransfer, runWithDataAccess, withShutdownDataAccess } from '../src/main/ipc/dataAccess'
 
 const mocks = vi.hoisted(() => ({
   data: '',
   currentVersion: '2.0.4',
+  channel: 'stable' as 'stable' | 'beta',
   openPath: vi.fn(async () => ''),
   quit: vi.fn(),
   relaunch: vi.fn(),
@@ -36,7 +37,7 @@ vi.mock('../src/main/services/appVersion', () => ({
   })
 }))
 vi.mock('../src/main/services/appStore', () => ({
-  AppStore: { launcherSettings: async () => ({ updateChannel: 'stable' }) }
+  AppStore: { launcherSettings: async () => ({ updateChannel: mocks.channel }) }
 }))
 vi.mock('../src/main/services/updateDownload', async importOriginal => ({
   ...await importOriginal<typeof import('../src/main/services/updateDownload')>(),
@@ -65,9 +66,80 @@ const manifest = (electron: string, installer = false) => ({
   ...(installer ? { installerName, installerSize: Buffer.byteLength(asset), installerSha256: sha256 } : {})
 })
 
+const betaVersion = '3.0.0-beta.8'
+const betaInstallerName = `KevinLauncher-Installer-${betaVersion}.exe`
+const betaInstaller = 'verified beta installer bytes'
+const betaInstallerSha = createHash('sha256').update(betaInstaller).digest('hex')
+const betaVerification = {
+  version: betaVersion,
+  installer: betaInstallerName,
+  size: Buffer.byteLength(betaInstaller),
+  sha256: betaInstallerSha,
+  installerMode: 'requireAdministrator',
+  entryMode: 'requireAdministrator',
+  runtimeMode: 'asInvoker'
+}
+
+function stableManifest(releaseVersion: string): Record<string, unknown> {
+  return {
+    version: releaseVersion,
+    electron: '44.7.0',
+    appSize: 16384,
+    payloadSize: Buffer.byteLength(asset),
+    payloadSha256: sha256,
+    compatibility
+  }
+}
+
+function betaRelease(assetSize = Buffer.byteLength(betaInstaller)) {
+  return {
+    tag_name: `v${betaVersion}`,
+    name: `KevinLauncher ${betaVersion}`,
+    body: `Beta ${betaVersion} notes`,
+    prerelease: true,
+    assets: [
+      { name: 'beta-verification.json', id: 21 },
+      { name: betaInstallerName, id: 20, size: assetSize }
+    ]
+  }
+}
+
+function stableRelease(releaseVersion: string) {
+  return { tag_name: `v${releaseVersion}`, prerelease: false, assets: [] }
+}
+
+interface StubGitHubOptions {
+  stableVersions?: string[]
+  betaVerificationBody?: unknown
+  deferredStableManifest?: { version: string; response: Promise<Response> }
+}
+
+function stubGitHub(releases: unknown[], options: StubGitHubOptions = {}): ReturnType<typeof vi.fn> {
+  const fetchMock = vi.fn(async (input: string) => {
+    if (input.endsWith('/releases')) return Response.json(releases)
+    const stableVersion = options.stableVersions?.find(item => input.endsWith(`/v${item}/update-manifest.json`))
+    if (stableVersion) {
+      if (options.deferredStableManifest?.version === stableVersion) {
+        return options.deferredStableManifest.response
+      }
+      return Response.json(stableManifest(stableVersion))
+    }
+    if (input.endsWith('/releases/assets/21')) {
+      return Response.json(options.betaVerificationBody ?? betaVerification)
+    }
+    if (input.endsWith('/releases/assets/20') || input.endsWith(`/${betaInstallerName}`)) {
+      return new Response(betaInstaller, { status: 200 })
+    }
+    throw new Error(`Unexpected URL in test: ${input}`)
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  return fetchMock
+}
+
 beforeEach(async () => {
   vi.clearAllMocks()
   mocks.currentVersion = '2.0.4'
+  mocks.channel = 'stable'
   mocks.flush.mockImplementation(async (beforeDispose?: () => Promise<void>) => { await beforeDispose?.() })
   dir = await fs.mkdtemp(join(tmpdir(), 'app-update-test-'))
   extractedVersion = version
@@ -282,5 +354,155 @@ describe('update manifest integrity', () => {
     } finally {
       replace.mockRestore()
     }
+  })
+})
+
+describe('update channels', () => {
+  it('offers the verified installer-only beta.8 on the Beta channel', async () => {
+    mocks.currentVersion = '3.0.0-beta.7'
+    mocks.channel = 'beta'
+    stubGitHub([betaRelease()])
+    const checker = new AppUpdateChecker()
+    const status = await checker.check('manual')
+    expect(status).toMatchObject({
+      hasUpdate: true,
+      info: {
+        version: betaVersion,
+        payloadUrls: [],
+        installerName: betaInstallerName,
+        installerSize: Buffer.byteLength(betaInstaller),
+        installerSha256: betaInstallerSha,
+        critical: false
+      }
+    })
+
+    checker.begin()
+    await vi.waitFor(() => expect(checker.isRunning()).toBe(false))
+    const installer = join(mocks.data, 'update-staging', betaVersion, betaInstallerName)
+    expect(await fs.readFile(installer, 'utf8')).toBe(betaInstaller)
+    expect(mocks.openPath).toHaveBeenCalledWith(installer)
+    expect(mocks.extract).not.toHaveBeenCalled()
+    expect(mocks.backup).not.toHaveBeenCalled()
+    expect(mocks.quit).toHaveBeenCalledOnce()
+    expect(checker.stateSnapshot().critical).toBe(false)
+  })
+
+  it('keeps Beta releases out of the stable channel', async () => {
+    mocks.currentVersion = '2.0.5'
+    const fetchMock = stubGitHub(
+      [betaRelease(), stableRelease('2.0.6')],
+      { stableVersions: ['2.0.6'] }
+    )
+    const status = await new AppUpdateChecker().check('manual')
+    expect(status.info?.version).toBe('2.0.6')
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes(betaVersion))).toBe(false)
+  })
+
+  it('lets a stable release win over a Beta by SemVer', async () => {
+    mocks.currentVersion = '3.0.0-beta.7'
+    mocks.channel = 'beta'
+    stubGitHub(
+      [betaRelease(), stableRelease('3.0.0')],
+      { stableVersions: ['3.0.0'] }
+    )
+    const status = await new AppUpdateChecker().check('manual')
+    expect(status.info?.version).toBe('3.0.0')
+    expect(status.info?.payloadUrls.length).toBeGreaterThan(0)
+  })
+
+  it('skips legacy pre-releases without a verified installer pair', async () => {
+    mocks.currentVersion = '1.3.0'
+    mocks.channel = 'beta'
+    const legacy = {
+      tag_name: 'v2.0.0-beta.3',
+      prerelease: true,
+      assets: [{ name: 'KevinLauncher-Installer-2.0.0-beta.3.exe', id: 31 }]
+    }
+    stubGitHub(
+      [legacy, stableRelease('2.0.0')],
+      { stableVersions: ['2.0.0'] }
+    )
+    const status = await new AppUpdateChecker().check('manual')
+    expect(status.info?.version).toBe('2.0.0')
+  })
+
+  it('rejects a Beta whose verification does not match the listed installer size', async () => {
+    mocks.currentVersion = '3.0.0-beta.7'
+    mocks.channel = 'beta'
+    stubGitHub([betaRelease(Buffer.byteLength(betaInstaller) + 1)])
+    const status = await new AppUpdateChecker().check('manual')
+    expect(status.hasUpdate).toBe(false)
+    expect(status.error).toContain('Beta')
+  })
+
+  it('validates the published Beta verification schema', () => {
+    expect(parseBetaVerification(JSON.stringify(betaVerification), betaVersion)).toEqual({
+      version: betaVersion,
+      installer: betaInstallerName,
+      size: Buffer.byteLength(betaInstaller),
+      sha256: betaInstallerSha
+    })
+    expect(() => parseBetaVerification(JSON.stringify({
+      ...betaVerification, version: '3.0.0-beta.08'
+    }), '3.0.0-beta.08')).toThrow()
+    expect(() => parseBetaVerification(JSON.stringify({
+      ...betaVerification, installerMode: 'asInvoker'
+    }), betaVersion)).toThrow()
+  })
+
+  it('keeps per-channel cooldowns and cached offers when switching channels', async () => {
+    mocks.currentVersion = '2.0.5'
+    mocks.channel = 'beta'
+    const fetchMock = stubGitHub(
+      [betaRelease(), stableRelease('2.0.6')],
+      { stableVersions: ['2.0.6'] }
+    )
+    const checker = new AppUpdateChecker()
+    expect((await checker.check('auto')).info?.version).toBe(betaVersion)
+
+    // Explicit check immediately after the switch must not return the Beta offer.
+    mocks.channel = 'stable'
+    expect((await checker.check('auto')).info?.version).toBe('2.0.6')
+    expect((await checker.check('manual')).info?.version).toBe('2.0.6')
+
+    mocks.channel = 'beta'
+    expect((await checker.check('manual')).info?.version).toBe(betaVersion)
+
+    const cache = JSON.parse(await fs.readFile(join(mocks.data, 'update-check.json'), 'utf8')) as {
+      channels: Record<string, { info?: { version?: string } }>
+    }
+    expect(cache.channels.stable.info?.version).toBe('2.0.6')
+    expect(cache.channels.beta.info?.version).toBe(betaVersion)
+
+    // A fresh checker reads both the automatic and manual state from disk.
+    const calls = fetchMock.mock.calls.length
+    const reloaded = new AppUpdateChecker()
+    expect((await reloaded.check('auto')).info?.version).toBe(betaVersion)
+    expect((await reloaded.check('manual')).info?.version).toBe(betaVersion)
+    expect(fetchMock).toHaveBeenCalledTimes(calls)
+  })
+
+  it('does not return an in-flight check from the previous channel', async () => {
+    mocks.currentVersion = '2.0.5'
+    let resolveStable!: (response: Response) => void
+    const stableResponse = new Promise<Response>(resolve => { resolveStable = resolve })
+    const fetchMock = stubGitHub(
+      [betaRelease(), stableRelease('2.0.6')],
+      {
+        stableVersions: ['2.0.6'],
+        deferredStableManifest: { version: '2.0.6', response: stableResponse }
+      }
+    )
+    const checker = new AppUpdateChecker()
+    const first = checker.check('manual')
+    await vi.waitFor(() => expect(fetchMock.mock.calls.some(([url]) =>
+      String(url).endsWith('/v2.0.6/update-manifest.json'))).toBe(true))
+
+    mocks.channel = 'beta'
+    const second = checker.check('manual')
+    resolveStable(Response.json(stableManifest('2.0.6')))
+    const [firstStatus, secondStatus] = await Promise.all([first, second])
+    expect(firstStatus.info?.version).toBe(betaVersion)
+    expect(secondStatus.info?.version).toBe(betaVersion)
   })
 })

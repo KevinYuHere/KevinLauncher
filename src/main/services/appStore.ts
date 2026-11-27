@@ -95,8 +95,7 @@ async function readConfig(file: string): Promise<LauncherConfig> {
       config = normalizeLauncherConfig(result.data)
     }
   }
-  if (result.status !== 'ok' || (result.data as LauncherConfig).version !== CURRENT_VERSION ||
-      (result.data as LauncherConfig).launcher?.updateChannel === 'beta') {
+  if (result.status !== 'ok' || (result.data as LauncherConfig).version !== CURRENT_VERSION) {
     await writeConfig(file, config)
   }
   state = { file, config }
@@ -226,7 +225,7 @@ export class AppStore {
       throw new ConfigValidationError('INVALID_CONFIG', '启动器设置字段无效')
     }
     return this.mutate((config) => {
-      const next = { ...config.launcher, ...patch, updateChannel: 'stable' as const }
+      const next = { ...config.launcher, ...patch }
       if (Object.hasOwn(patch, 'fontFamily')) {
         next.fontFamily = normalizeLauncherFontFamily(patch.fontFamily)
       }
@@ -357,7 +356,7 @@ function launcherSettings(settings: LauncherConfig['launcher']): LauncherSetting
     afterLaunch: settings?.afterLaunch ?? 'none',
     autoStart: settings?.autoStart ?? 'off',
     sidebarMaterial: settings?.sidebarMaterial ?? true,
-    updateChannel: 'stable',
+    updateChannel: settings?.updateChannel === 'beta' ? 'beta' : 'stable',
     downloadLimitMbps: settings?.downloadLimitMbps ?? 0,
     themeAreas: settings?.themeAreas ?? {},
     themeLocks: settings?.themeLocks ?? {},
