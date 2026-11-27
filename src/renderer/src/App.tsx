@@ -1024,7 +1024,7 @@ export default function App(): ReactElement {
       )
     }
     if (view === 'gallery' && entry) {
-      return <GalleryView key={entry.id} active={visible} entry={entry} onBack={back} onEdit={() => setView('settings')} />
+      return <GalleryView key={entry.id} active={windowIsVisible} entry={entry} onBack={back} onEdit={() => setView('settings')} />
     }
     if (view === 'update' && entry) {
       return (

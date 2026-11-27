@@ -86,7 +86,7 @@ function isVersionForChannel(version: string, channel: Channel): boolean {
  * installer-only Beta release format.
  */
 function isVerifiedBetaInstaller(info: AppUpdateInfo): boolean {
-  return isBetaVersion(info.version) && info.critical !== true &&
+  return isBetaVersion(info.version) &&
     isPositiveFileSize(info.installerSize) && isSha256(info.installerSha256) &&
     info.installerName === installerAssetName(info.version) && info.installerUrls.length > 0 &&
     info.payloadUrls.length === 0
@@ -430,7 +430,11 @@ function betaCandidates(list: GitHubRelease[]): ChannelCandidate[] {
 async function latestBetaFromList(): Promise<AppUpdateInfo | null> {
   const list = await fetchReleaseList()
   if (!list) return null
+  const current = currentAppVersion()
   for (const candidate of betaCandidates(list)) {
+    // An offer is only ever an upgrade; do not fetch metadata for the running
+    // or an older release.
+    if (!isNewerVersion(candidate.version, current)) continue
     try {
       const info = candidate.beta
         ? await betaInfoFromRelease(candidate.release)

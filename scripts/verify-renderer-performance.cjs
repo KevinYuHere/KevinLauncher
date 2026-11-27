@@ -13,6 +13,7 @@ const { pathToFileURL } = require('node:url')
 const args = process.argv.slice(2)
 const out = path.resolve(args.find(arg => !arg.startsWith('--')) || path.join(__dirname, '../out'))
 const baseline = args.includes('--baseline')
+const galleryWhilePaused = args.includes('--gallery-while-paused')
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-renderer-perf-'))
 app.setPath('userData', temp)
 app.setPath('crashDumps', path.join(temp, 'crashes'))
@@ -152,8 +153,27 @@ async function fixture() {
     await until(`!!document.querySelector(${JSON.stringify(selector)})`, label)
     return performance.now() - started
   }
+  // Gallery thumbnails are static visible content: the shared visual-activity
+  // gate (game running / paused visuals) must not stop them loading. The tile
+  // `active` prop is wired to window visibility only.
+  async function verifyGalleryWhilePaused() {
+    win.webContents.send('window:activity', false)
+    await until("document.documentElement.hasAttribute('data-visual-paused')", 'paused visual session')
+    const pausedWorkers = await run('window.__perfStats.activeWorkers')
+    await nav('图库', '.gallery-thumb')
+    await until("!!document.querySelector('.gallery-thumb img')", 'gallery thumbnails keep loading while visuals are paused')
+    assert.equal(await run("document.documentElement.hasAttribute('data-visual-paused')"), true,
+      'gallery must not resume paused visuals')
+    return pausedWorkers
+  }
   await open()
   const firstUsableMs = round(performance.now() - start)
+  if (galleryWhilePaused) {
+    const pausedWorkers = await verifyGalleryWhilePaused()
+    console.log(JSON.stringify({ mode: 'gallery-while-paused', firstUsableMs, pausedWorkers }))
+    win.destroy()
+    return
+  }
   if (!baseline) await until("!!document.querySelector('.glass-defs filter')", 'liquid map decoded and installed')
   const afterStart = await run('window.__perfStats')
   const startupMetrics = await metrics()
@@ -209,10 +229,9 @@ async function fixture() {
   if (!baseline) {
     assert.equal(await run("!!document.querySelector('canvas.launch-fx')"), false)
     const stateBefore = await run('window.__perfStats.activeWorkers')
-    win.webContents.send('window:activity', false)
-    await until("document.documentElement.hasAttribute('data-visual-paused')", 'paused visual session')
-    const stateHidden = await run('window.__perfStats.activeWorkers')
+    const stateHidden = await verifyGalleryWhilePaused()
     assert.ok(stateHidden < stateBefore, 'liquid worker stops when the desktop becomes inactive')
+    await nav('主页', '.stage .home')
     win.webContents.send('window:activity', true)
     await until("!document.documentElement.hasAttribute('data-visual-paused')", 'resumed visual session')
     const startButton = "document.querySelector('.start-btn')"
