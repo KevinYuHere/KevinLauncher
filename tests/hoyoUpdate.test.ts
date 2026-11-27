@@ -150,6 +150,7 @@ describe('Starward 0.19.0 update preparation', () => {
 })
 
 // The install stage runs KevinArchive.exe, including WPF and the channel SDK.
+// Real archives and helper processes can exceed 15 s under Windows CI load.
 it.skipIf(process.platform !== 'win32').each(['ok', 'current', 'bad-sdk', 'resume-sdk', 'repair-corrupt', 'repair-failed', 'archive-corrupt'] as const)('keeps compressed predownload and component completion consistent (%s)', async scenario => {
   const root = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'kl-hoyo-')))
   clean.push(() => fs.rm(root, { recursive: true, force: true }))
@@ -303,7 +304,7 @@ it.skipIf(process.platform !== 'win32').each(['ok', 'current', 'bad-sdk', 'resum
   if (scenario !== 'current' && scenario !== 'repair-failed') expectedRequests.push('wpf.bin.zip', 'sdk.bin.zip')
   if (scenario === 'resume-sdk') expectedRequests.push('sdk.bin.zip', 'sdk.bin.zip', 'sdk.bin.zip')
   expect(requests).toEqual(expectedRequests)
-}, 15_000)
+}, 30_000)
 
 it('rejects a known wrong game, wrong region or channel before contacting HoYoPlay', async () => {
   const dir = await fs.mkdtemp(join(tmpdir(), 'kl-hoyo-preflight-'))

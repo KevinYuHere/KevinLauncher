@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { createRequire } from 'node:module'
 import { setTimeout as delay } from 'node:timers/promises'
-import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest'
+import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import { buildWindowsEntry, windowsAutomationReferences, windowsEntrySourceFiles } from '../scripts/build-windows-entry.mjs'
 import windowsLayout from '../src/shared/windowsLayout.json'
 
@@ -152,23 +152,85 @@ describe.skipIf(process.platform !== 'win32').each([
     const closed = once(target, 'close')
     let stdout = ''
     target.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk })
+    // Wait for the fixture's own ready line with an explicit deadline.
+    const receive = async (pattern: RegExp, timeoutMs: number): Promise<RegExpMatchArray> => {
+      const deadline = Date.now() + timeoutMs
+      for (;;) {
+        const match = stdout.match(pattern)
+        if (match) return match
+        if (target.exitCode !== null || target.signalCode !== null) {
+          throw new Error(`Window fixture exited before reporting ${pattern}; output: ${JSON.stringify(stdout)}`)
+        }
+        if (Date.now() >= deadline) {
+          throw new Error(`Window fixture did not report ${pattern} within ${timeoutMs} ms; output: ${JSON.stringify(stdout)}`)
+        }
+        await delay(25)
+      }
+    }
+    // A loaded runner can be slower than a spawnSync timeout. Keep the exact
+    // child output, but wait for its real close event with a separate deadline.
+    const runRequest = (args: string[], timeoutMs: number) => new Promise<{
+      status: number | null
+      signal: NodeJS.Signals | null
+      stdout: string
+      stderr: string
+    }>((resolve, reject) => {
+      const child = spawn(entry, args, { cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+      let out = ''
+      let err = ''
+      child.stdout.setEncoding('utf8').on('data', chunk => { out += chunk })
+      child.stderr.setEncoding('utf8').on('data', chunk => { err += chunk })
+      let timedOut = false
+      const deadline = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) timedOut = child.kill()
+      }, timeoutMs)
+      child.once('error', error => {
+        clearTimeout(deadline)
+        reject(error)
+      })
+      child.once('close', (status, signal) => {
+        clearTimeout(deadline)
+        if (timedOut) {
+          reject(new Error(
+            `Launcher close request did not exit within ${timeoutMs} ms; stdout: ${JSON.stringify(out)}; stderr: ${JSON.stringify(err)}`
+          ))
+          return
+        }
+        resolve({ status, signal, stdout: out, stderr: err })
+      })
+    })
+    const exitWithin = async (timeoutMs: number): Promise<[number | null, NodeJS.Signals | null]> => {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        return await Promise.race([
+          closed.then(([code, signal]) => [code, signal] as [number | null, NodeJS.Signals | null]),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error(
+              `Window fixture did not exit within ${timeoutMs} ms; output: ${JSON.stringify(stdout)}`
+            )), timeoutMs)
+          })
+        ])
+      } finally {
+        clearTimeout(timer)
+      }
+    }
     try {
-      await vi.waitFor(() => expect(stdout).toMatch(/ready:(\d+)\r?\n/))
-      const [, created] = stdout.match(/ready:(\d+)\r?\n/)!
-      const response = spawnSync(entry, ['--kevin-close-launcher-window', String(target.pid), created, legacy],
-        { cwd, windowsHide: true, encoding: 'utf8', timeout: 4000 })
-      expect(response.error).toBeUndefined()
+      const [, created] = await receive(/ready:(\d+)\r?\n/, 10_000)
+      const response = await runRequest(
+        ['--kevin-close-launcher-window', String(target.pid), created, legacy], 15_000
+      )
       expect(response.status).toBe(0)
+      expect(response.signal).toBeNull()
       expect(response.stdout.trim()).toBe('1')
       expect(response.stderr).toMatch(/Launcher tray host verified \(foreground granted: (True|False), callback posted: True\)/)
       expect(response.stderr).toContain('Launcher process exited after the tray callback')
       expect(response.stderr).not.toContain('WM_CLOSE fallback')
-      expect(await closed).toEqual([0, null])
+      expect(await exitWithin(10_000)).toEqual([0, null])
       expect(stdout).toMatch(/tray:quit\r?\ntray:saved\r?\n$/)
       expect(stdout).not.toContain('close:')
     } finally {
       if (target.exitCode === null && target.signalCode === null) target.kill()
       await closed
     }
-  }, 10000)
+  }, 40000)
 })

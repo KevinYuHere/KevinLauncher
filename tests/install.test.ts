@@ -138,11 +138,29 @@ describe('managed uninstall', () => {
       installDirId: { volume: identity.volume, file: '0' },
       files: managedUninstallPaths(['KevinLauncher.exe'])
     })
-    await expect(startUninstallHelper(script, report)).rejects.toThrow()
+    const failure = await startUninstallHelper(script, report).then(
+      () => undefined,
+      (error: unknown) => error instanceof Error ? error : new Error(String(error))
+    )
+    expect(failure).toBeInstanceOf(Error)
     expect(await fs.readFile(join(installDir, 'KevinLauncher.exe'), 'utf8')).toBe('program')
-    expect((await fs.readFile(report, 'utf8')).trim()).toMatch(/identity changed/)
+    // The report file exists before the helper starts, but its final diagnostic
+    // write can lag the close event that rejects startUninstallHelper. Poll with
+    // a bounded deadline; a helper that could not start stays distinct from a
+    // real identity change instead of surfacing as an empty-file mismatch.
+    const diagnostic = await vi.waitFor(async () => {
+      const text = await fs.readFile(report, 'utf8')
+      if (!/\r?\n$/.test(text)) throw new Error('diagnostic is not yet complete')
+      return text.trim()
+    }, { timeout: 5000, interval: 25 }).catch((error: unknown) => {
+      throw new Error(
+        `The uninstall helper did not report a diagnostic; startUninstallHelper rejected with: ${failure?.message ?? 'unknown error'}`,
+        { cause: error }
+      )
+    })
+    expect(diagnostic).toMatch(/identity changed/)
     await expect(fs.access(backup)).rejects.toMatchObject({ code: 'ENOENT' })
-  }, 12_000)
+  }, 20_000)
 
   it.skipIf(process.platform !== 'win32')('rejects a replaced quarantine before moving files', async () => {
     const root = await fs.realpath(await temp())

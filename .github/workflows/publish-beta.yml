@@ -1,0 +1,214 @@
+name: Publish verified Beta
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: 已通过 Windows Beta acceptance 的运行 ID
+        required: true
+        type: string
+      beta_version:
+        description: Beta 版本号（x.y.z-beta.n，不含 v 前缀）
+        required: true
+        type: string
+      release_notes:
+        description: Release 说明（按原文写入说明文件）
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: publish-beta
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish verified Beta
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Validate the verified Beta source
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          BETA_VERSION: ${{ inputs.beta_version }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != 'refs/heads/main' ]]; then
+            echo '::error::Only refs/heads/main can publish a Beta.' >&2
+            exit 1
+          fi
+          if [[ ! "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]]; then
+            echo '::error::source_run_id must contain digits only.' >&2
+            exit 1
+          fi
+          if [[ ! "$BETA_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-beta\.[1-9][0-9]*$ ]]; then
+            echo '::error::beta_version must be a SemVer Beta without a v prefix, for example 3.0.0-beta.8.' >&2
+            exit 1
+          fi
+          source_json="$(gh api "repos/$GH_REPO/actions/runs/$SOURCE_RUN_ID")"
+          if ! source_sha="$(jq -er --arg repo "$GH_REPO" '
+              select(
+                .repository.full_name == $repo and
+                .event == "workflow_dispatch" and
+                .path == ".github/workflows/verify-trial.yml" and
+                .head_branch == "main" and
+                .status == "completed" and
+                .conclusion == "success" and
+                (.head_sha | test("^[0-9a-f]{40}$"))
+              ) | .head_sha
+            ' <<<"$source_json")"; then
+            echo "::error::source_run_id $SOURCE_RUN_ID is not a successful main workflow_dispatch from verify-trial.yml." >&2
+            exit 1
+          fi
+          ci_json="$(gh api "repos/$GH_REPO/actions/workflows/ci.yml/runs?event=push&branch=main&head_sha=$source_sha&per_page=100")"
+          if ! jq -e --arg sha "$source_sha" '
+              (.workflow_runs | type == "array") and
+              any(
+                .workflow_runs[];
+                .event == "push" and
+                .head_branch == "main" and
+                .head_sha == $sha and
+                .path == ".github/workflows/ci.yml" and
+                .status == "completed" and
+                .conclusion == "success"
+              )
+            ' <<<"$ci_json" >/dev/null; then
+            echo "::error::The exact source commit $source_sha has no successful main push CI." >&2
+            exit 1
+          fi
+          {
+            printf 'run_id=%s\n' "$SOURCE_RUN_ID"
+            printf 'beta_version=%s\n' "$BETA_VERSION"
+            printf 'sha=%s\n' "$source_sha"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Download the frozen Beta artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-beta-release
+          path: frozen-beta
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.source.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Verify the frozen Beta manifest and assets
+        id: frozen
+        env:
+          BETA_VERSION: ${{ steps.source.outputs.beta_version }}
+          RELEASE_NOTES: ${{ inputs.release_notes }}
+          ARTIFACT_DIR: ${{ github.workspace }}/frozen-beta
+        run: |
+          set -euo pipefail
+          if [[ ! -d "$ARTIFACT_DIR" ]]; then
+            echo '::error::The source artifact was not downloaded.' >&2
+            exit 1
+          fi
+          mapfile -d '' -t files < <(find "$ARTIFACT_DIR" -type f -print0)
+          if (( ${#files[@]} != 2 )); then
+            echo "::error::Expected only the installer and beta-verification.json in the source artifact." >&2
+            exit 1
+          fi
+          mapfile -d '' -t installers < <(find "$ARTIFACT_DIR" -type f -name 'KevinLauncher-Installer-*.exe' -print0)
+          mapfile -d '' -t manifests < <(find "$ARTIFACT_DIR" -type f -name 'beta-verification.json' -print0)
+          if (( ${#installers[@]} != 1 || ${#manifests[@]} != 1 )); then
+            echo '::error::The source artifact must contain exactly one installer and one beta-verification.json.' >&2
+            exit 1
+          fi
+
+          installer="${installers[0]}"
+          manifest="${manifests[0]}"
+          expected_installer="KevinLauncher-Installer-${BETA_VERSION}.exe"
+          if [[ "$(basename -- "$installer")" != "$expected_installer" ]]; then
+            echo "::error::The installer filename does not match $BETA_VERSION." >&2
+            exit 1
+          fi
+          if [[ "$(dirname -- "$installer")" != "$(dirname -- "$manifest")" ]]; then
+            echo '::error::The installer and beta-verification.json must be from the same build.' >&2
+            exit 1
+          fi
+
+          if ! jq -e --arg version "$BETA_VERSION" --arg installer "$expected_installer" '
+              type == "object" and
+              .version == $version and
+              .installer == $installer and
+              (.size | type) == "number" and
+              .size > 0 and
+              .size == (.size | floor) and
+              (.sha256 | type) == "string" and
+              (.sha256 | test("^[0-9a-f]{64}$")) and
+              .installerMode == "requireAdministrator" and
+              .entryMode == "requireAdministrator" and
+              .runtimeMode == "asInvoker"
+            ' "$manifest" >/dev/null; then
+            echo '::error::beta-verification.json is not the expected successful Beta manifest.' >&2
+            exit 1
+          fi
+          actual_size="$(stat --format='%s' -- "$installer")"
+          manifest_size="$(jq -er '.size' "$manifest")"
+          if [[ "$actual_size" != "$manifest_size" ]]; then
+            echo '::error::The installer size does not match beta-verification.json.' >&2
+            exit 1
+          fi
+          actual_sha="$(sha256sum -- "$installer" | cut -d ' ' -f 1)"
+          manifest_sha="$(jq -er '.sha256' "$manifest")"
+          if [[ "$actual_sha" != "$manifest_sha" ]]; then
+            echo '::error::The installer SHA-256 does not match beta-verification.json.' >&2
+            exit 1
+          fi
+
+          work_dir="$(mktemp -d "${RUNNER_TEMP:?}/publish-beta.XXXXXX")"
+          assets_dir="$work_dir/assets"
+          notes_file="$work_dir/RELEASE_NOTES.md"
+          mkdir -p -- "$assets_dir"
+          cp -- "$installer" "$assets_dir/$expected_installer"
+          cp -- "$manifest" "$assets_dir/beta-verification.json"
+          printf '%s' "$RELEASE_NOTES" > "$notes_file"
+          {
+            printf 'installer=%s\n' "$assets_dir/$expected_installer"
+            printf 'manifest=%s\n' "$assets_dir/beta-verification.json"
+            printf 'notes_file=%s\n' "$notes_file"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish the verified Beta without replacement
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BETA_VERSION: ${{ steps.source.outputs.beta_version }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          INSTALLER: ${{ steps.frozen.outputs.installer }}
+          MANIFEST: ${{ steps.frozen.outputs.manifest }}
+          NOTES_FILE: ${{ steps.frozen.outputs.notes_file }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$BETA_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-beta\.[1-9][0-9]*$ ||
+                ! "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo '::error::Validated Beta metadata is missing or invalid.' >&2
+            exit 1
+          fi
+          tag="v$BETA_VERSION"
+          if gh release view "$tag" --repo "$GH_REPO" >/dev/null 2>&1; then
+            echo "::error::Release $tag already exists; refusing to replace it." >&2
+            exit 1
+          fi
+          if gh api "repos/$GH_REPO/git/ref/tags/$tag" >/dev/null 2>&1; then
+            echo "::error::Tag $tag already exists; refusing to move it." >&2
+            exit 1
+          fi
+          gh release create "$tag" \
+            --repo "$GH_REPO" \
+            --target "$SOURCE_SHA" \
+            --prerelease \
+            --latest=false \
+            --notes-file "$NOTES_FILE" \
+            "$INSTALLER" \
+            "$MANIFEST"

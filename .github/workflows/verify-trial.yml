@@ -23,6 +23,8 @@ jobs:
         scenario: [fresh, legacy-tray]
     env:
       npm_config_registry: https://registry.npmjs.org/
+      VITEST_MIN_FORKS: '2'
+      VITEST_MAX_FORKS: '2'
     steps:
       - uses: actions/checkout@v4
         with:
