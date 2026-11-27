@@ -16,6 +16,11 @@ vi.mock('../src/main/services/powershell', async importOriginal => ({
 }))
 vi.mock('../src/main/services/logger', () => ({ log() {} }))
 
+// Detached native helpers can start slowly on busy Windows CI runners, so the
+// three real dispatch probes get a bounded wait wider than Vitest's 1s default.
+const DETACHED_PROBE_WAIT_MS = 10_000
+const DETACHED_PROBE_TEST_TIMEOUT_MS = 15_000
+
 let temp: string
 beforeEach(async () => {
   temp = await fs.mkdtemp(join(tmpdir(), 'kl-launch-args-'))
@@ -41,8 +46,8 @@ describe.skipIf(process.platform !== 'win32')('Windows launch dispatch', () => {
     await vi.waitFor(async () => {
       const saved = JSON.parse(await fs.readFile(result, 'utf8'))
       expect({ ...saved, cwd: await fs.realpath(saved.cwd) }).toEqual({ args, cwd: await fs.realpath(temp), custom: '值 & %' })
-    })
-  })
+    }, { timeout: DETACHED_PROBE_WAIT_MS })
+  }, DETACHED_PROBE_TEST_TIMEOUT_MS)
 
   it('passes spaces, a trailing backslash and cmd metacharacters through a real batch file', async () => {
     const script = join(temp, '测试 & 参数.cmd')
@@ -60,8 +65,8 @@ describe.skipIf(process.platform !== 'win32')('Windows launch dispatch', () => {
     expect(launch).toMatchObject({ ok: true, confirmation: 'requested' })
     await vi.waitFor(async () => {
       expect(JSON.parse(await fs.readFile(result, 'utf8'))).toEqual(args)
-    })
-  })
+    }, { timeout: DETACHED_PROBE_WAIT_MS })
+  }, DETACHED_PROBE_TEST_TIMEOUT_MS)
 
   it('passes an argument and an environment override through Windows PowerShell -File', async () => {
     const script = join(temp, '脚本 文件.ps1')
@@ -76,8 +81,8 @@ describe.skipIf(process.platform !== 'win32')('Windows launch dispatch', () => {
     expect(launch).toMatchObject({ ok: true, confirmation: 'requested' })
     await vi.waitFor(async () => {
       expect(JSON.parse(await fs.readFile(result, 'utf8'))).toEqual([value, '短 路径 & %'])
-    }, { timeout: 4000 })
-  })
+    }, { timeout: DETACHED_PROBE_WAIT_MS })
+  }, DETACHED_PROBE_TEST_TIMEOUT_MS)
 
   it('reports shortcut dispatch as a request and passes escaped argv and environment to the Windows shell', async () => {
     vi.mocked(isElevated).mockResolvedValueOnce(false)

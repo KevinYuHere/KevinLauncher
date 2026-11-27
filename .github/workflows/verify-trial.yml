@@ -23,8 +23,10 @@ jobs:
         scenario: [fresh, legacy-tray]
     env:
       npm_config_registry: https://registry.npmjs.org/
-      VITEST_MIN_FORKS: '2'
-      VITEST_MAX_FORKS: '2'
+      # Native launch probes spawn real executables during package-test. One
+      # fork keeps parallel fixtures from starving their helper processes.
+      VITEST_MIN_FORKS: '1'
+      VITEST_MAX_FORKS: '1'
     steps:
       - uses: actions/checkout@v4
         with:
