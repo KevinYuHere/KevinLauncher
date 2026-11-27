@@ -150,8 +150,9 @@ describe('managed uninstall', () => {
     // real identity change instead of surfacing as an empty-file mismatch.
     const diagnostic = await vi.waitFor(async () => {
       const text = await fs.readFile(report, 'utf8')
-      if (!/\r?\n$/.test(text)) throw new Error('diagnostic is not yet complete')
-      return text.trim()
+      const trimmed = text.trim()
+      if (!trimmed || !/\r?\n$/.test(text)) throw new Error('diagnostic is not yet complete')
+      return trimmed
     }, { timeout: 5000, interval: 25 }).catch((error: unknown) => {
       throw new Error(
         `The uninstall helper did not report a diagnostic; startUninstallHelper rejected with: ${failure?.message ?? 'unknown error'}`,

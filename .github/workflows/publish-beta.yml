@@ -200,13 +200,21 @@ jobs:
             echo "::error::Release $tag already exists; refusing to replace it." >&2
             exit 1
           fi
-          if gh api "repos/$GH_REPO/git/ref/tags/$tag" >/dev/null 2>&1; then
-            echo "::error::Tag $tag already exists; refusing to move it." >&2
+          if ! tag_json="$(gh api "repos/$GH_REPO/git/ref/tags/$tag")"; then
+            echo "::error::Tag $tag does not exist; create the lightweight tag at $SOURCE_SHA before dispatch." >&2
+            exit 1
+          fi
+          if ! jq -e --arg ref "refs/tags/$tag" --arg sha "$SOURCE_SHA" '
+              .ref == $ref and
+              .object.type == "commit" and
+              .object.sha == $sha
+            ' <<<"$tag_json" >/dev/null; then
+            echo "::error::Tag $tag must be a lightweight tag pointing at $SOURCE_SHA; refusing to create or move it." >&2
             exit 1
           fi
           gh release create "$tag" \
             --repo "$GH_REPO" \
-            --target "$SOURCE_SHA" \
+            --verify-tag \
             --prerelease \
             --latest=false \
             --notes-file "$NOTES_FILE" \
