@@ -1,0 +1,1302 @@
+/* =========================================================================
+   KEVIN HUD — compact launch/telemetry plate.
+
+   The default face stays deliberately quiet: a matte charcoal fill, one inset
+   edge and a short one-shot ripple. No permanent grain, stripes or busy
+   material pattern is painted in solid mode. Materials are opt-in via the
+   existing app/custom background modes.
+
+   One short, finite 600ms timeline owns the entrance:
+     0ms       a shorter plate appears near its direction path
+     6% (36ms) the plate is fully opaque
+     40%       (240ms) the plate has grown to the exact host height/radius
+     12%       (72ms) the icon begins its glide from the centre
+     55%       (330ms) the icon arrives; the name and status start from their
+                       own sides of the settled title row
+     80%       (480ms) the title is fully readable
+    Visible items start 40ms after the plate and finish their tight stagger at
+   332ms: just after the plate shapes, not in a long empty hold. On the reverse
+   exit the item wave is gone by 292ms and the plate starts contracting at
+   360ms, so elements lead the outer frame by a near, readable beat. Ordinary
+   exit aliases and a transient Web Animations reverse share the same keyframes,
+   durations, displacement and delays. A transient close reverses the existing
+   CSSAnimations in place via the Web Animations API, preserving their clock
+   without a CSS direction flip. Ordinary value/colour/offset updates only
+   change custom properties and never restart the entrance.
+   ========================================================================= */
+
+.kevin-hud-root {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483000;
+  pointer-events: none;
+  font-family: var(--app-font, "Segoe UI"), "Microsoft YaHei UI", system-ui, -apple-system,
+    sans-serif;
+  font-size: 12px;
+  line-height: 1;
+  color-scheme: dark;
+  text-rendering: geometricPrecision;
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+
+  /* Direction fallbacks; the resolved visual writes the actual user choice on
+     the surface. The same values are consumed forwards and in reverse. */
+  --khud-enter-x: 0px;
+  --khud-enter-y: 0px;
+  --khud-enter-scale: 0.6;
+  --khud-motion-duration: 600ms;
+  --khud-reveal-duration: 220ms;
+  --khud-min-width: 448px;
+  --khud-max-width: 1600px;
+  --khud-content-pad-x: 12px;
+  --khud-content-pad-y: 4px;
+  --khud-cell-inline-pad: 4px;
+  --khud-item-gap: 8px;
+  --khud-copy-gap: 0px;
+  --khud-cell-min: 54px;
+  --khud-cell-gap: 8px;
+  --khud-cell-min-width: 0px;
+  --khud-description-align: left;
+  --khud-value-align: right;
+}
+
+.kevin-hud-root *,
+.kevin-hud-root *::before,
+.kevin-hud-root *::after {
+  box-sizing: border-box;
+}
+
+/* Keep the root fallbacks aligned with the shared five-direction contract so a
+   host that has not applied the inline surface tokens still gets a direction. */
+.kevin-hud-root[data-direction='left'] {
+  --khud-enter-x: -28px;
+  --khud-enter-y: 0px;
+  --khud-enter-scale: 0.72;
+}
+
+.kevin-hud-root[data-direction='right'] {
+  --khud-enter-x: 28px;
+  --khud-enter-y: 0px;
+  --khud-enter-scale: 0.72;
+}
+
+.kevin-hud-root[data-direction='top'] {
+  --khud-enter-x: 0px;
+  --khud-enter-y: -20px;
+  --khud-enter-scale: 0.72;
+}
+
+.kevin-hud-root[data-direction='bottom'] {
+  --khud-enter-x: 0px;
+  --khud-enter-y: 20px;
+  --khud-enter-scale: 0.72;
+}
+
+.kevin-hud-root[data-direction='center'] {
+  --khud-enter-x: 0px;
+  --khud-enter-y: 0px;
+  --khud-enter-scale: 0.6;
+}
+
+/* ---- host / plate geometry --------------------------------------------- */
+
+.kevin-hud-anchor {
+  position: absolute;
+  width: clamp(
+    var(--khud-min-width, 448px),
+    var(--khud-width, 448px),
+    var(--khud-max-width, 1600px)
+  );
+  height: var(--khud-height, 48px);
+}
+
+/* The dedicated HUD BrowserWindow is already placed and sized by the main
+   process. Its height is the configured lower bound raised for the current
+   item typography; fill that actual host height in every phase. Applying
+   x/y/anchor or a phase-specific height again would double-position it. */
+.kevin-hud-root[data-host='window'] .kevin-hud-anchor {
+  inset: 0;
+  width: auto;
+  height: auto;
+}
+
+.kevin-hud-surface {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: clamp(
+    var(--khud-min-width, 448px),
+    var(--khud-width, 448px),
+    var(--khud-max-width, 1600px)
+  );
+  height: var(--khud-plate-height, var(--khud-height, 48px));
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 8px);
+  overflow: hidden;
+  color: var(--khud-text, #ffffff);
+  background: transparent;
+  border: 0;
+  border-radius: var(--khud-radius, 24px);
+  box-shadow: none;
+  font-size: calc(12px * var(--khud-font-scale, 1));
+  font-kerning: normal;
+  isolation: isolate;
+  transform: translate3d(-50%, -50%, 0);
+}
+
+.kevin-hud-root[data-host='window'] .kevin-hud-surface {
+  width: 100%;
+  height: var(--khud-plate-height, 100%);
+  max-width: none;
+  max-height: 100%;
+}
+
+/* The background group carries one opacity for the fill, the app/custom glass
+   sheen and the backdrop filter. A zero background opacity therefore removes
+   the whole glass face instead of leaving a filtered ghost behind. */
+.kevin-hud-surface[data-background='app'] .kevin-hud-background,
+.kevin-hud-surface[data-background='custom'] .kevin-hud-background {
+  -webkit-backdrop-filter: var(--khud-backdrop, none);
+  backdrop-filter: var(--khud-backdrop, none);
+}
+
+.kevin-hud-background,
+.kevin-hud-foreground,
+.kevin-hud-fill,
+.kevin-hud-material,
+.kevin-hud-ripple {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.kevin-hud-background {
+  z-index: 0;
+  overflow: hidden;
+  border-radius: inherit;
+  opacity: var(--khud-background-opacity, 1);
+}
+
+/* Foreground opacity fades the text, artwork, glyphs, progress ring, border,
+   ripple and decorations together; it never reaches the background group. */
+.kevin-hud-foreground {
+  z-index: 2;
+  /* Shared default edge: 2px sampled #A7AD48. An explicitly saved width
+     (including a legacy 0-px outline) always overrides this fallback. */
+  border: var(--khud-border-width, 2px) solid var(--khud-border-color, #A7AD48);
+  border-radius: inherit;
+  opacity: var(--khud-foreground-opacity, 1);
+}
+
+.kevin-hud-fill {
+  background-color: var(--khud-fill, rgba(49, 47, 48, 1));
+}
+
+/* Gradient mode paints the shared helper's already-normalized CSS verbatim. */
+.kevin-hud-surface[data-background='gradient'] .kevin-hud-fill {
+  background-color: transparent;
+  background-image: var(--khud-gradient, none);
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
+}
+
+/* Opt-in material faces only. Solid/default mode always keeps the reference
+   matte fill, even when another material was previously chosen. */
+.kevin-hud-material {
+  background-image: none;
+  background-repeat: no-repeat;
+  opacity: 0;
+}
+
+.kevin-hud-surface[data-background='app'] .kevin-hud-material {
+  background-image: var(--glass-sheen, var(--khud-material-sheen, none));
+  background-size: var(--glass-size, var(--khud-material-size, auto));
+  background-repeat: var(--glass-repeat, var(--khud-material-repeat, no-repeat));
+  opacity: 0.82;
+}
+
+.kevin-hud-surface[data-background='custom'] .kevin-hud-material {
+  background-image: var(--khud-material-sheen, none);
+  background-size: var(--khud-material-size, auto);
+  background-repeat: var(--khud-material-repeat, no-repeat);
+  opacity: 0.7;
+}
+
+.kevin-hud-surface[data-background='solid'] .kevin-hud-material {
+  display: none;
+}
+
+/* ---- opt-in material definitions --------------------------------------- */
+
+.kevin-hud-surface {
+  --khud-material-size: auto;
+  --khud-material-repeat: no-repeat;
+  --khud-material-sheen: linear-gradient(
+    108deg,
+    color-mix(in srgb, var(--khud-text, #fff) 9%, transparent),
+    transparent 34%,
+    transparent 72%,
+    color-mix(in srgb, var(--khud-text, #fff) 5%, transparent)
+  );
+}
+
+.kevin-hud-surface[data-material='mica'] {
+  --khud-material-size: 7px 8px;
+  --khud-material-repeat: repeat;
+  --khud-material-sheen:
+    radial-gradient(
+      circle at 24% 26%,
+      color-mix(in srgb, var(--khud-text, #fff) 11%, transparent) 0 0.55px,
+      transparent 0.8px
+    ),
+    radial-gradient(
+      circle at 68% 64%,
+      color-mix(in srgb, var(--khud-text, #fff) 7%, transparent) 0 0.45px,
+      transparent 0.8px
+    );
+}
+
+.kevin-hud-surface[data-material='liquid'] {
+  --khud-material-sheen:
+    linear-gradient(
+      106deg,
+      color-mix(in srgb, var(--khud-text, #fff) 15%, transparent),
+      transparent 24%,
+      transparent 68%,
+      color-mix(in srgb, var(--khud-text, #fff) 8%, transparent)
+    ),
+    radial-gradient(
+      ellipse at 18% -35%,
+      color-mix(in srgb, var(--khud-text, #fff) 14%, transparent),
+      transparent 55%
+    );
+}
+
+.kevin-hud-surface[data-material='shine'] {
+  --khud-material-sheen:
+    linear-gradient(
+      112deg,
+      transparent 12%,
+      color-mix(in srgb, var(--khud-text, #fff) 18%, transparent) 35%,
+      transparent 57%
+    ),
+    linear-gradient(
+      112deg,
+      transparent 57%,
+      color-mix(in srgb, var(--khud-text, #fff) 9%, transparent) 78%,
+      transparent 96%
+    );
+}
+
+.kevin-hud-surface[data-material='starfrost'] {
+  --khud-material-size: 11px 13px;
+  --khud-material-repeat: repeat;
+  --khud-material-sheen: repeating-linear-gradient(
+    118deg,
+    transparent 0 13px,
+    color-mix(in srgb, var(--khud-text, #fff) 9%, transparent) 13px 13.5px,
+    transparent 13.5px 31px
+  );
+}
+
+.kevin-hud-surface[data-material='astral'] {
+  --khud-material-size: 100% 100%, 100% 100%, 13px 17px;
+  --khud-material-repeat: no-repeat, no-repeat, repeat;
+  --khud-material-sheen:
+    radial-gradient(circle at 18% 76%, rgba(137, 124, 255, 0.18), transparent 38%),
+    radial-gradient(circle at 76% 8%, rgba(92, 206, 219, 0.11), transparent 43%),
+    radial-gradient(
+      circle at 54% 55%,
+      color-mix(in srgb, var(--khud-text, #fff) 10%, transparent) 0 0.55px,
+      transparent 1px
+    );
+}
+
+/* ---- content ----------------------------------------------------------- */
+
+.kevin-hud-content {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: var(--khud-item-gap, 8px);
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  padding: var(--khud-content-pad-y, 4px) var(--khud-content-pad-x, 12px);
+}
+
+/* The dedicated memory composition is built against the full 448 x 48
+   reference capsule. Its own 20–25 DIP leading inset and 4 DIP trailing inset
+   already own the horizontal rhythm, so the generic padding would double it. */
+.kevin-hud-content[data-memory-only='true'] {
+  padding: 0;
+}
+
+.kevin-hud-identity {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  width: min(42%, 280px);
+  min-width: 76px;
+  height: 100%;
+}
+
+/* Identity-only announcements use the full plate so the trailing launch status
+   is genuinely right-aligned; a settled bank keeps a readable but bounded
+   leading block so the sampled row gets the rest. */
+.kevin-hud-content[data-bank='false'] .kevin-hud-identity {
+  flex: 1 1 auto;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}
+
+/* The icon is absolutely positioned so it can start at the centre of the plate
+   and glide to the leading slot without changing the title's layout. */
+.kevin-hud-icon-motion {
+  position: absolute;
+  top: 50%;
+  left: var(--khud-icon-slot-left, 11px);
+  z-index: 2;
+  display: block;
+  line-height: 0;
+  transform: translate3d(-50%, -50%, 0);
+}
+
+.kevin-hud-icon-frame {
+  display: grid;
+  place-items: center;
+  width: var(--khud-icon-size, 22px);
+  height: var(--khud-icon-size, 22px);
+  overflow: hidden;
+  color: var(--khud-icon-color, currentColor);
+  background: color-mix(in srgb, var(--khud-text, #fff) 7%, transparent);
+  border-radius: 7px;
+  transform: translate(var(--khud-icon-x, 0px), var(--khud-icon-y, 0px));
+}
+
+.kevin-hud-icon-art {
+  display: block;
+  width: 76%;
+  height: 76%;
+  object-fit: contain;
+  pointer-events: none;
+}
+
+/* The launch identity is a round app badge between the play marker and the
+   app name. Sampled appIcon cells keep the compact rounded square. */
+.kevin-hud-identity .kevin-hud-icon-frame,
+.kevin-hud-identity .kevin-hud-icon-art {
+  border-radius: 50%;
+}
+
+.kevin-hud-title-motion {
+  position: absolute;
+  top: 50%;
+  left: var(--khud-title-left, 42px);
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--khud-status-gap, 10px);
+  min-width: 0;
+  transform: translate3d(0, -50%, 0);
+}
+
+.kevin-hud-identity[data-icon='false'] .kevin-hud-title-motion {
+  left: 0;
+}
+
+.kevin-hud-title-block {
+  display: flex;
+  flex: 0 1 auto;
+  align-items: center;
+  width: auto;
+  min-width: 0;
+  gap: 0;
+  transform: translate(var(--khud-text-x, 0px), var(--khud-text-y, 0px));
+}
+
+/* The marker belongs to the icon's motion wrapper: it sits immediately left of
+   the circular icon and glides with it, so the entrance never separates the
+   triangle from the app icon. */
+.kevin-hud-icon-motion .kevin-hud-launch-sign {
+  position: absolute;
+  top: 50%;
+  left: calc(
+    -1 * (var(--khud-launch-mark-width, 7px) + var(--khud-launch-mark-gap, 7px))
+  );
+  width: var(--khud-launch-mark-width, 7px);
+  height: 9px;
+  opacity: 0.82;
+  color: var(--khud-item-value-color, var(--khud-text, #fff));
+  transform: translate3d(0, -50%, 0);
+}
+
+/* Trailing launch status. The static title wrapper owns the layout; this label
+   runs its own title animation so it can start from the opposite side of the
+   name while sharing the same fade and exact reverse on close. */
+.kevin-hud-launching {
+  flex: 0 0 auto;
+  margin-inline-start: auto;
+  color: color-mix(in srgb, var(--khud-text, #fff) 72%, transparent);
+  font-size: calc(var(--khud-status-size, 11.5px) * var(--khud-font-scale, 1));
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: var(--khud-status-tracking, 0.08em);
+  white-space: nowrap;
+  transform: translate(var(--khud-text-x, 0px), var(--khud-text-y, 0px));
+}
+
+.kevin-hud-app-name {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--khud-item-value-color, var(--khud-text, #fff));
+  font-size: calc(var(--khud-title-size, 12.5px) * var(--khud-font-scale, 1));
+  font-weight: 650;
+  line-height: 1.12;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Single-line sampled bank. The track distributes free space evenly; every
+   cell keeps the finite reserve written by the shared sizing helper. When the
+   content still cannot fit, the track scrolls horizontally (CSS only) inside
+   the clipped bank. Values themselves are never wrapped or ellipsized. */
+.kevin-hud-bank {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.kevin-hud-track {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  gap: var(--khud-item-gap, var(--khud-cell-gap, 8px));
+}
+
+.kevin-hud-cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* Base 0 lets free space distribute evenly when the row is roomy. Each cell
+     keeps the stable reserve produced by shared sizing for every legal value
+     format, so a telemetry sample never changes its own min-width. The
+     user-configured per-item DIP floor is a second, independent lower bound. */
+  flex: 1 1 0;
+  min-width: max(
+    var(--khud-cell-width, var(--khud-cell-min, 54px)),
+    var(--khud-cell-min-width, 0px)
+  );
+  height: 100%;
+  padding: 0;
+}
+
+.kevin-hud-icon-cell {
+  flex: 0 0 var(--khud-cell-width, var(--khud-cell-min, 54px));
+  min-width: var(--khud-cell-width, var(--khud-cell-min, 54px));
+  justify-content: flex-start;
+}
+
+/* The monitored app identity is a regular metric cell: the real icon is the
+   description, the actual name is the value. The customised memory-only cell
+   keeps the complete used/total/unit/percentage string. Their real content is
+   the overflow floor, so `max-content` widens the cell for the existing bank
+   scroll instead of ellipsizing or overlapping a neighbour. The copy keeps the
+   measured reserve as its min-width, which already contains the user's numeric
+   floor. The announcement identity is separate below. */
+.kevin-hud-cell[data-cell='appName'],
+.kevin-hud-cell[data-memory-full='true'] {
+  min-width: max-content;
+}
+
+.kevin-hud-cell[data-cell='appName'][data-orientation='horizontal'] .kevin-hud-copy {
+  align-items: center;
+}
+
+.kevin-hud-copy {
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-start;
+  width: 100%;
+  min-width: var(--khud-cell-width, 0px);
+  /* The label/value gap is the user's minimum DIP gap, including 0. */
+  gap: var(--khud-copy-gap, 0px);
+  padding-inline: var(--khud-cell-inline-pad, 4px);
+  transform: translate(var(--khud-text-x, 0px), var(--khud-text-y, 0px));
+}
+
+/* Same-side combinations keep the description → value order and move the
+   whole pair to the chosen edge or centre. A real flex gap prevents a centred
+   pair from ever overlapping even when both parts are at their widest. */
+.kevin-hud-cell[data-orientation='horizontal'][data-align-mode='left']
+  .kevin-hud-copy {
+  justify-content: flex-start;
+}
+
+.kevin-hud-cell[data-orientation='horizontal'][data-align-mode='right']
+  .kevin-hud-copy {
+  justify-content: flex-end;
+}
+
+.kevin-hud-cell[data-orientation='horizontal'][data-align-mode='center']
+  .kevin-hud-copy {
+  justify-content: center;
+}
+
+/* Opposite sides each hug their own edge. The default is description left and
+   value right; choosing the reverse is allowed and simply mirrors the visual
+   order while keeping the DOM order description → value. */
+.kevin-hud-cell[data-orientation='horizontal'][data-align-mode='split']
+  .kevin-hud-copy {
+  justify-content: space-between;
+}
+
+.kevin-hud-cell[data-orientation='horizontal'][data-align-mode='split'][data-align-reverse='true']
+  .kevin-hud-copy {
+  flex-direction: row-reverse;
+}
+
+/* One centred part and one edge part use a three-track grid: the centre track
+   is the auto column, both sides share the remaining 1fr. When the edge item
+   needs its natural width, that side becomes minmax(max-content, 1fr), so the
+   centred part yields naturally without overlapping. Only one side is occupied,
+   so the user's gap belongs to that edge item's inner margin; a column gap
+   would also be charged against the empty side and exceed the measured item.
+   No JavaScript width measurement is involved. */
+.kevin-hud-cell[data-orientation='horizontal'][data-align-mode='mixed']
+  .kevin-hud-copy {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  justify-content: initial;
+  column-gap: 0;
+}
+
+.kevin-hud-cell[data-orientation='horizontal'][data-align-mode='mixed'][data-align-center='description'][data-value-align='left']
+  .kevin-hud-copy,
+.kevin-hud-cell[data-orientation='horizontal'][data-align-mode='mixed'][data-align-center='value'][data-description-align='left']
+  .kevin-hud-copy {
+  grid-template-columns: minmax(max-content, 1fr) auto 1fr;
+}
+
+.kevin-hud-cell[data-orientation='horizontal'][data-align-mode='mixed'][data-align-center='description'][data-value-align='right']
+  .kevin-hud-copy,
+.kevin-hud-cell[data-orientation='horizontal'][data-align-mode='mixed'][data-align-center='value'][data-description-align='right']
+  .kevin-hud-copy {
+  grid-template-columns: 1fr auto minmax(max-content, 1fr);
+}
+
+.kevin-hud-cell[data-orientation='horizontal'][data-align-mode='mixed']
+  .kevin-hud-copy
+  > :is(
+    .kevin-hud-metric-description,
+    .kevin-hud-metric-value
+  )[data-align='left'] {
+  grid-column: 1;
+  grid-row: 1;
+  justify-self: start;
+  margin-inline-end: var(--khud-copy-gap, 0px);
+}
+
+.kevin-hud-cell[data-orientation='horizontal'][data-align-mode='mixed']
+  .kevin-hud-copy
+  > :is(
+    .kevin-hud-metric-description,
+    .kevin-hud-metric-value
+  )[data-align='center'] {
+  grid-column: 2;
+  grid-row: 1;
+  justify-self: center;
+}
+
+.kevin-hud-cell[data-orientation='horizontal'][data-align-mode='mixed']
+  .kevin-hud-copy
+  > :is(
+    .kevin-hud-metric-description,
+    .kevin-hud-metric-value
+  )[data-align='right'] {
+  grid-column: 3;
+  grid-row: 1;
+  justify-self: end;
+  margin-inline-start: var(--khud-copy-gap, 0px);
+}
+
+.kevin-hud-metric-description {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  min-width: 0;
+  color: var(
+    --khud-item-description-color,
+    color-mix(in srgb, var(--khud-text, #fff) 82%, transparent)
+  );
+  opacity: 1;
+}
+
+.kevin-hud-metric-label {
+  flex: 0 0 auto;
+  font-size: calc(var(--khud-item-description-size, 8.5px) * var(--khud-font-scale, 1));
+  font-weight: var(--khud-description-weight, 700);
+  line-height: 1;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.kevin-hud-metric-icon {
+  display: block;
+  flex: 0 0 auto;
+  inline-size: var(--khud-item-icon-size, 12px);
+  block-size: var(--khud-item-icon-size, 12px);
+  overflow: visible;
+}
+
+/* The monitored app identity reuses the description slot for the real app
+   icon. Its size follows the descriptor control; the artwork keeps its own
+   shape and colours unless a description colour was set as a tint. Only the
+   announcement's leading badge stays circular. */
+.kevin-hud-metric-app-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  inline-size: var(--khud-item-icon-size, 12px);
+  block-size: var(--khud-item-icon-size, 12px);
+  color: var(
+    --khud-item-description-color,
+    color-mix(in srgb, var(--khud-text, #fff) 82%, transparent)
+  );
+}
+
+.kevin-hud-metric-app-icon .kevin-hud-icon-art {
+  width: 100%;
+  height: 100%;
+}
+
+.kevin-hud-metric[data-description-bold='true'] .kevin-hud-metric-icon {
+  stroke-width: 2;
+}
+
+.kevin-hud-metric-value {
+  flex: 0 0 auto;
+  min-width: var(--khud-value-width, 0px);
+  margin-inline-start: 0;
+  color: var(--khud-item-value-color, var(--khud-text, #fff));
+  font-size: calc(var(--khud-item-value-size, 14px) * var(--khud-font-scale, 1));
+  font-weight: var(--khud-value-weight, 650);
+  line-height: 1.06;
+  letter-spacing: 0.01em;
+  text-align: right;
+  white-space: nowrap;
+  /* Deliberately no text-overflow/ellipsis: a longer-than-reserved value grows
+     the cell and triggers the bank's true-overflow scroll instead. */
+  font-variant-numeric: tabular-nums slashed-zero;
+  font-feature-settings: 'tnum' 1, 'zero' 1;
+}
+
+.kevin-hud-cell[data-value-align='left'] .kevin-hud-metric-value {
+  text-align: left;
+}
+
+.kevin-hud-cell[data-value-align='center'] .kevin-hud-metric-value {
+  text-align: center;
+}
+
+.kevin-hud-cell[data-value-align='right'] .kevin-hud-metric-value {
+  text-align: right;
+}
+
+.kevin-hud-metric[data-unavailable='true'] .kevin-hud-metric-value {
+  opacity: 0.5;
+  letter-spacing: 0.06em;
+}
+
+/* Optional vertical item: description always stays above the value, each part
+   follows its own horizontal alignment, and the gap runs along the vertical
+   axis. No measured JavaScript width is involved. */
+.kevin-hud-metric[data-orientation='vertical'] .kevin-hud-copy {
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+  gap: var(--khud-copy-gap, 0px);
+  row-gap: var(--khud-copy-gap, 0px);
+  column-gap: 0;
+}
+
+.kevin-hud-metric[data-orientation='vertical'] .kevin-hud-metric-description {
+  align-self: flex-start;
+}
+
+.kevin-hud-metric[data-orientation='vertical'] .kevin-hud-metric-value {
+  align-self: stretch;
+  margin-inline-start: 0;
+}
+
+.kevin-hud-metric[data-orientation='vertical']
+  .kevin-hud-metric-description[data-align='left'] {
+  align-self: flex-start;
+}
+
+.kevin-hud-metric[data-orientation='vertical']
+  .kevin-hud-metric-description[data-align='center'] {
+  align-self: center;
+}
+
+.kevin-hud-metric[data-orientation='vertical']
+  .kevin-hud-metric-description[data-align='right'] {
+  align-self: flex-end;
+}
+
+.kevin-hud-metric[data-orientation='vertical']
+  .kevin-hud-metric-value[data-align='left'] {
+  align-self: flex-start;
+  text-align: left;
+}
+
+.kevin-hud-metric[data-orientation='vertical']
+  .kevin-hud-metric-value[data-align='center'] {
+  align-self: center;
+  text-align: center;
+}
+
+.kevin-hud-metric[data-orientation='vertical']
+  .kevin-hud-metric-value[data-align='right'] {
+  align-self: flex-end;
+  text-align: right;
+}
+
+/* Compact frames keep both description and value readable; only the type is
+   reduced. Any real overflow remains a scroll problem, never an ellipsis. */
+/* Compact frames keep the same item colours; only the value type is reduced.
+   The description stays the reference light white instead of being faded to
+   grey by a second opacity layer. */
+.kevin-hud-surface[data-compact='true'] .kevin-hud-metric-value {
+  font-size: calc(
+    min(var(--khud-item-value-size, 14px), 12px) * var(--khud-font-scale, 1)
+  );
+}
+
+/* ---- default memory readout ------------------------------------------- */
+
+/* The dedicated readout is born as its own pill. Inside the HUD it inherits the
+   host glass instead of painting a second dark capsule: only its leading
+   used/total cluster, empty centre and trailing percent/gauge remain. */
+.kevin-hud-memory {
+  --kevin-hud-memory-width: 100%;
+  /* The typography and badge ratios are the 448 x 48 reference. Reference the
+     configured/content height instead of 100% so percentage-based font maths
+     never turns into a width percentage. */
+  --kevin-hud-memory-height: var(--khud-content-min-height, 48px);
+  --kevin-hud-memory-background: transparent;
+  --kevin-hud-memory-edge: transparent;
+
+  display: flex;
+  align-items: center;
+  flex: 1 0 auto;
+  width: 100%;
+  /* The full used / total / percentage readout is wider than the compact
+     generic memory value. Reserve its documented form; the app-wide per-item
+     minWidth is an additional floor. A narrower host then gets the same
+     true-overflow scroll as every other row, never clipped text. */
+  min-width: max(
+    var(--khud-memory-min-width, 300px),
+    var(--khud-cell-min-width, 0px)
+  );
+  max-width: 100%;
+  height: 100%;
+}
+
+.kevin-hud-memory-visual {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+}
+
+.kevin-hud-memory .kevin-hud-memory-readout {
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  min-inline-size: 0;
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.kevin-hud-memory[data-memory-amounts='false'] .kevin-hud-memory-readout__amounts {
+  display: none;
+}
+
+/* ---- overflow auto-scroll --------------------------------------------- */
+
+/* Only a genuinely overflowing, visible bank is animated. Fixed widths and an
+   auto-width window that the work area already clamped both end up here; the
+   CSS transform loops gently between the two ends without a RAF loop. */
+.kevin-hud-bank[data-overflow='true'] .kevin-hud-track {
+  width: max-content;
+  min-width: 100%;
+  animation-name: kevin-hud-scroll;
+  animation-duration: var(--khud-overflow-duration, 9000ms);
+  animation-timing-function: cubic-bezier(0.42, 0, 0.28, 1);
+  animation-iteration-count: infinite;
+  animation-direction: alternate;
+  /* Let the short entrance finish, then give the overflowed row a short read
+     beat before it starts drifting; this stays tied to the shared timeline. */
+  animation-delay: calc(var(--khud-motion-duration, 600ms) + 100ms);
+  animation-fill-mode: both;
+}
+
+.kevin-hud-root[data-phase='exit'] .kevin-hud-bank[data-overflow='true'] .kevin-hud-track {
+  animation-play-state: paused;
+}
+
+/* ---- one-shot ripple --------------------------------------------------- */
+
+.kevin-hud-ripple {
+  z-index: 3;
+  inset: 1px;
+  border: 1px solid var(--khud-border-color, #A7AD48);
+  border-radius: inherit;
+  opacity: 0;
+}
+
+/* ---- finite, reversible timeline -------------------------------------- */
+
+.kevin-hud-surface[data-motion='enter'] {
+  animation-name: kevin-hud-plate;
+  animation-duration: var(--khud-motion-duration, 600ms);
+  animation-timing-function: cubic-bezier(0.2, 0.72, 0.2, 1);
+  animation-fill-mode: both;
+}
+
+.kevin-hud-surface[data-motion='enter'] .kevin-hud-icon-motion {
+  animation-name: kevin-hud-icon;
+  animation-duration: var(--khud-motion-duration, 600ms);
+  animation-timing-function: cubic-bezier(0.2, 0.72, 0.2, 1);
+  animation-fill-mode: both;
+}
+
+/* The title wrapper is static. Each label animates separately so a centred
+   identity can open the name leftward and the trailing status rightward on the
+   same clock; the shared keyframe reads each element's own origin tokens. */
+.kevin-hud-surface[data-motion='enter'] .kevin-hud-title-motion > .kevin-hud-title-block,
+.kevin-hud-surface[data-motion='enter'] .kevin-hud-title-motion > .kevin-hud-launching {
+  animation-name: kevin-hud-title;
+  animation-duration: var(--khud-motion-duration, 600ms);
+  animation-timing-function: cubic-bezier(0.22, 0.7, 0.3, 1);
+  animation-fill-mode: both;
+}
+
+.kevin-hud-surface[data-motion='enter'] [data-khud-reveal] {
+  animation-name: kevin-hud-reveal;
+  animation-duration: var(--khud-reveal-duration, 220ms);
+  animation-timing-function: cubic-bezier(0.2, 0.72, 0.2, 1);
+  animation-delay: var(--khud-reveal-delay, 0ms);
+  animation-fill-mode: both;
+}
+
+.kevin-hud-surface[data-motion='enter'] .kevin-hud-ripple {
+  animation-name: kevin-hud-ripple;
+  animation-duration: var(--khud-motion-duration, 600ms);
+  animation-timing-function: linear;
+  animation-fill-mode: both;
+}
+
+/* A transient close keeps the exact same CSS animations and clock, but the
+   clock is reversed programmatically with Animation.reverse(). Keep their CSS
+   animation-direction unchanged here: a CSS reverse on negative playback would
+   double-invert the clock. `data-exit-clock` / `data-exit-mode` remain on the
+   surface as observable evidence of that branch. */
+
+/* A settled close starts fresh reverse aliases on the same DOM nodes. The
+   alias keyframes are identical to the entrance; `reverse` plays them from
+   their final pose, which is the state already on screen. */
+.kevin-hud-surface[data-motion='exit'] {
+  animation-name: kevin-hud-plate-exit;
+  animation-duration: var(--khud-motion-duration, 600ms);
+  animation-timing-function: cubic-bezier(0.2, 0.72, 0.2, 1);
+  animation-direction: reverse;
+  animation-fill-mode: both;
+}
+
+.kevin-hud-surface[data-motion='exit'] .kevin-hud-icon-motion {
+  animation-name: kevin-hud-icon-exit;
+  animation-duration: var(--khud-motion-duration, 600ms);
+  animation-timing-function: cubic-bezier(0.2, 0.72, 0.2, 1);
+  animation-direction: reverse;
+  animation-fill-mode: both;
+}
+
+.kevin-hud-surface[data-motion='exit'] .kevin-hud-title-motion > .kevin-hud-title-block,
+.kevin-hud-surface[data-motion='exit'] .kevin-hud-title-motion > .kevin-hud-launching {
+  animation-name: kevin-hud-title-exit;
+  animation-duration: var(--khud-motion-duration, 600ms);
+  animation-timing-function: cubic-bezier(0.22, 0.7, 0.3, 1);
+  animation-direction: reverse;
+  animation-fill-mode: both;
+}
+
+.kevin-hud-surface[data-motion='exit'] [data-khud-reveal] {
+  animation-name: kevin-hud-reveal-exit;
+  animation-duration: var(--khud-reveal-duration, 220ms);
+  animation-timing-function: cubic-bezier(0.2, 0.72, 0.2, 1);
+  animation-delay: var(--khud-reveal-exit-delay, 0ms);
+  animation-direction: reverse;
+  animation-fill-mode: both;
+}
+
+.kevin-hud-surface[data-motion='exit'] .kevin-hud-ripple {
+  animation-name: kevin-hud-ripple-exit;
+  animation-duration: var(--khud-motion-duration, 600ms);
+  animation-timing-function: linear;
+  animation-direction: reverse;
+  animation-fill-mode: both;
+}
+
+/* 0ms shorter/inset, 36ms fully opaque, 240ms exact settled height, then hold.
+   On reverse the plate contracts back to the shorter pose and fades. No
+   intermediate height is taller than the settled height. */
+@keyframes kevin-hud-plate {
+  0% {
+    height: var(--khud-open-height, 33px);
+    border-radius: var(--khud-open-radius, 17px);
+    opacity: 0;
+    transform: translate3d(
+        calc(-50% + var(--khud-enter-x, 0px)),
+        calc(-50% + var(--khud-enter-y, 0px)),
+        0
+      )
+      scale(var(--khud-enter-scale, 0.6));
+  }
+
+  6% {
+    opacity: 1;
+  }
+
+  40% {
+    height: var(--khud-plate-height, var(--khud-height, 48px));
+    border-radius: var(--khud-radius, 24px);
+    opacity: 1;
+    transform: translate3d(-50%, -50%, 0) scale(1);
+  }
+
+  100% {
+    height: var(--khud-plate-height, var(--khud-height, 48px));
+    border-radius: var(--khud-radius, 24px);
+    opacity: 1;
+    transform: translate3d(-50%, -50%, 0) scale(1);
+  }
+}
+
+/* The icon pops at the centre, holds briefly, then arrives at the leading slot
+   at 330ms. Reverse: glide back, then pop out, on the same clock. */
+@keyframes kevin-hud-icon {
+  0% {
+    left: 50%;
+    opacity: 0;
+    transform: translate3d(-50%, -50%, 0) scale(0.7);
+  }
+
+  8% {
+    opacity: 1;
+    transform: translate3d(-50%, -50%, 0) scale(1.06);
+  }
+
+  12% {
+    left: 50%;
+    opacity: 1;
+    transform: translate3d(-50%, -50%, 0) scale(1);
+  }
+
+  55% {
+    left: var(--khud-icon-slot-left, 11px);
+    opacity: 1;
+    transform: translate3d(-50%, -50%, 0) scale(1);
+  }
+
+  100% {
+    left: var(--khud-icon-slot-left, 11px);
+    opacity: 1;
+    transform: translate3d(-50%, -50%, 0) scale(1);
+  }
+}
+
+/* The title text waits until the icon is leading, then fades in from 330 to
+   480ms. The wrapper does not move: each label composes its own signed origin
+   with the configured text offset, so the name and status can travel in
+   opposite directions. Only explicit top/bottom presets add vertical travel.
+   Reverse: the labels fade out first, which is the same step read backwards. */
+@keyframes kevin-hud-title {
+  0%,
+  55% {
+    opacity: 0;
+    transform: translate3d(
+      calc(var(--khud-title-origin-x, 0px) + var(--khud-text-x, 0px)),
+      calc(var(--khud-title-origin-y, 0px) + var(--khud-text-y, 0px)),
+      0
+    );
+  }
+
+  80%,
+  100% {
+    opacity: 1;
+    transform: translate3d(
+      var(--khud-text-x, 0px),
+      var(--khud-text-y, 0px),
+      0
+    );
+  }
+}
+
+/* Each visible item starts at its alignment-owned signed origin, then settles.
+   The identity block is measured as one leading element; sampled cells use
+   their real settled centres. */
+@keyframes kevin-hud-reveal {
+  0% {
+    opacity: 0;
+    transform: translate3d(
+      var(--khud-origin-x, 0px),
+      var(--khud-origin-y, 0px),
+      0
+    );
+  }
+
+  55% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes kevin-hud-ripple {
+  0% {
+    opacity: 0;
+    transform: scale(0.998);
+  }
+
+  8% {
+    opacity: var(--khud-ripple-peak-opacity, 0.24);
+    transform: scale(1);
+  }
+
+  62% {
+    opacity: 0;
+    transform: scale(var(--khud-ripple-end-scale, 1.003));
+  }
+
+  100% {
+    opacity: 0;
+    transform: scale(var(--khud-ripple-end-scale, 1.003));
+  }
+}
+
+/* Endpoints are deliberately identical to the entrance keyframes. Exit uses
+   these aliases with `animation-direction: reverse` so a finished entrance can
+   start a fresh reverse animation on the very same element. */
+@keyframes kevin-hud-plate-exit {
+  0% {
+    height: var(--khud-open-height, 33px);
+    border-radius: var(--khud-open-radius, 17px);
+    opacity: 0;
+    transform: translate3d(
+        calc(-50% + var(--khud-enter-x, 0px)),
+        calc(-50% + var(--khud-enter-y, 0px)),
+        0
+      )
+      scale(var(--khud-enter-scale, 0.6));
+  }
+
+  6% {
+    opacity: 1;
+  }
+
+  40% {
+    height: var(--khud-plate-height, var(--khud-height, 48px));
+    border-radius: var(--khud-radius, 24px);
+    opacity: 1;
+    transform: translate3d(-50%, -50%, 0) scale(1);
+  }
+
+  100% {
+    height: var(--khud-plate-height, var(--khud-height, 48px));
+    border-radius: var(--khud-radius, 24px);
+    opacity: 1;
+    transform: translate3d(-50%, -50%, 0) scale(1);
+  }
+}
+
+@keyframes kevin-hud-icon-exit {
+  0% {
+    left: 50%;
+    opacity: 0;
+    transform: translate3d(-50%, -50%, 0) scale(0.7);
+  }
+
+  8% {
+    opacity: 1;
+    transform: translate3d(-50%, -50%, 0) scale(1.06);
+  }
+
+  12% {
+    left: 50%;
+    opacity: 1;
+    transform: translate3d(-50%, -50%, 0) scale(1);
+  }
+
+  55% {
+    left: var(--khud-icon-slot-left, 11px);
+    opacity: 1;
+    transform: translate3d(-50%, -50%, 0) scale(1);
+  }
+
+  100% {
+    left: var(--khud-icon-slot-left, 11px);
+    opacity: 1;
+    transform: translate3d(-50%, -50%, 0) scale(1);
+  }
+}
+
+@keyframes kevin-hud-title-exit {
+  0%,
+  55% {
+    opacity: 0;
+    transform: translate3d(
+      calc(var(--khud-title-origin-x, 0px) + var(--khud-text-x, 0px)),
+      calc(var(--khud-title-origin-y, 0px) + var(--khud-text-y, 0px)),
+      0
+    );
+  }
+
+  80%,
+  100% {
+    opacity: 1;
+    transform: translate3d(
+      var(--khud-text-x, 0px),
+      var(--khud-text-y, 0px),
+      0
+    );
+  }
+}
+
+@keyframes kevin-hud-reveal-exit {
+  0% {
+    opacity: 0;
+    transform: translate3d(
+      var(--khud-origin-x, 0px),
+      var(--khud-origin-y, 0px),
+      0
+    );
+  }
+
+  55% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes kevin-hud-ripple-exit {
+  0% {
+    opacity: 0;
+    transform: scale(0.998);
+  }
+
+  8% {
+    opacity: var(--khud-ripple-peak-opacity, 0.24);
+    transform: scale(1);
+  }
+
+  62% {
+    opacity: 0;
+    transform: scale(var(--khud-ripple-end-scale, 1.003));
+  }
+
+  100% {
+    opacity: 0;
+    transform: scale(var(--khud-ripple-end-scale, 1.003));
+  }
+}
+
+/* Interior horizontal auto-scroll, used only when the active bank genuinely
+   overflows. The distance is measured once per layout/format change; ordinary
+   sample text never triggers a re-measure. */
+@keyframes kevin-hud-scroll {
+  from {
+    transform: translate3d(0, 0, 0);
+  }
+
+  to {
+    transform: translate3d(calc(-1 * var(--khud-overflow-distance, 0px)), 0, 0);
+  }
+}
+
+/* ---- responsive / accessibility --------------------------------------- */
+
+@media (max-width: 360px) {
+  /* Do not hide the description or shrink a value below its reserved slot at a
+     narrow host: the measured bank scroll is the only overflow response. */
+  .kevin-hud-root[data-host='window'] .kevin-hud-content {
+    gap: var(--khud-item-gap, 8px);
+  }
+}
+
+/* Pure reduced motion: no entrance, glide, title fade or ripple. The static
+   announcement pose already uses the configured height; exit disappears
+   instantly. Overflow auto-scroll is disabled as well. */
+@media (prefers-reduced-motion: reduce) {
+  .kevin-hud-root *,
+  .kevin-hud-root *::before,
+  .kevin-hud-root *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+
+  .kevin-hud-root[data-phase='exit'] .kevin-hud-surface {
+    opacity: 0;
+    visibility: hidden;
+  }
+
+  .kevin-hud-bank[data-overflow='true'] .kevin-hud-track {
+    width: 100%;
+    transform: none;
+  }
+
+  .kevin-hud-ripple {
+    display: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .kevin-hud-surface {
+    color: CanvasText;
+  }
+
+  .kevin-hud-foreground {
+    border-color: CanvasText;
+  }
+
+  .kevin-hud-background,
+  .kevin-hud-fill,
+  .kevin-hud-material,
+  .kevin-hud-ripple {
+    display: none;
+  }
+}

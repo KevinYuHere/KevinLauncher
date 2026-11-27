@@ -11,11 +11,11 @@ import { burstMitiaMolecules, burstThemeTriangles, startMitiaHoldStar } from '..
  * Holding keeps repeating the effect. The games-bar toggle is excluded: it has
  * its own molecule trail (without a star).
  */
-export default function ThemeClickEffect(): null {
+export default function ThemeClickEffect({ active = true }: { active?: boolean }): null {
   const theme = useAreaTheme('clickEffect')
 
   useEffect(() => {
-    if (theme === 'default') return undefined
+    if (!active || theme === 'default') return undefined
     const mitia = theme === 'mitia'
 
     let holdTimer = 0
@@ -80,7 +80,7 @@ export default function ThemeClickEffect(): null {
       window.removeEventListener('pointercancel', onUp, true)
       window.removeEventListener('blur', onBlur)
     }
-  }, [theme])
+  }, [theme, active])
 
   return null
 }

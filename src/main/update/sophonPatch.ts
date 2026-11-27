@@ -1,17 +1,19 @@
-import { promises as fs, createReadStream, createWriteStream } from 'fs'
+import { promises as fs, constants, createReadStream, createWriteStream } from 'fs'
 import { pipeline } from 'stream/promises'
-import { gamePath, retryHoYo } from './hoyoFiles'
+import { gamePath, requirePlainGamePath, retryHoYo } from './hoyoFiles'
 import { join, dirname } from 'path'
-import { execFile } from 'child_process'
-import { promisify } from 'util'
 import { fields } from './sophonProto'
 import type { HardLinkService } from '../services/hardLinkService'
 import { forEachResource, resourceProgress } from './hoyoSchedule'
 import { cacheHoYoResource } from './hoyoResourceCache'
+import type { RecordSophonCache } from './sophonCacheOwnership'
 import { md5File } from '../services/hash'
+import { allowGameFileWrite } from '../services/writableGameFile'
+import { requireDiskSpace } from '../services/diskSpace'
+import { runTaskProcess } from '../services/taskProcess'
+import { temporaryGameFile } from './hoyoTemp'
 import { downloadGameFile, downloadManifest, getHoYoMetadata, hoyoFetch } from './hoyoNetwork'
 
-const exec = promisify(execFile)
 const CHUNK_API = 'https://downloader-api.mihoyo.com/downloader/sophon_chunk/api'
 
 export class PatchBuildNotFound extends Error {}
@@ -70,7 +72,7 @@ export async function getPatchBuild(branch: {
   const url =
     `${CHUNK_API}/getPatchBuild?branch=${encodeURIComponent(branch.branch)}` +
     `&package_id=${encodeURIComponent(branch.packageId)}&password=${encodeURIComponent(branch.password)}`
-  return getHoYoMetadata(`GameSophonPatchBuild_${branch.packageId}`,
+  return getHoYoMetadata(`GameSophonPatchBuild_${JSON.stringify([branch.packageId, branch.branch])}`,
     async token => parsePatchBuild(await hoyoFetch(url, { signal: token, method: 'POST' })), signal)
 }
 
@@ -238,17 +240,29 @@ export async function collectPatchFiles(build: PatchBuild, version: string, blac
   return { tasks, deletes }
 }
 
-async function patchSlice(dir: string, task: PatchTask, signal: AbortSignal, onProgress: (bytes: number) => void): Promise<string> {
+async function patchSlice(root: string, dir: string, task: PatchTask, signal: AbortSignal, onProgress: (bytes: number) => void, work?: string): Promise<string> {
   const { chunk, category } = task
   const blob = gamePath(dir, chunk.patchName)
-  const slice = blob + '_' + chunk.patchOffset
+  const previousSlice = blob + '_' + chunk.patchOffset
+  const slice = work ? temporaryGameFile(root, work, 'slices', previousSlice) : previousSlice
   const end = chunk.patchOffset + chunk.patchLength - 1
-  await fs.mkdir(dirname(blob), { recursive: true })
+  await requirePlainGamePath(root, blob)
+  await requirePlainGamePath(root, slice)
+  await fs.mkdir(dirname(slice), { recursive: true })
   if (await fileMatches(blob, chunk.patchFileSize, chunk.patchFileMd5)) {
     await fs.rm(slice, { force: true })
     if (chunk.patchLength === 0) await fs.writeFile(slice, '')
     else await pipeline(createReadStream(blob, { start: chunk.patchOffset, end }), createWriteStream(slice), { signal })
     return slice
+  }
+  if (work) {
+    await requirePlainGamePath(root, previousSlice)
+    const previousSize = await fs.stat(previousSlice).then(stat => stat.isFile() ? stat.size : -1, () => -1)
+    if (previousSize > 0 && previousSize <= chunk.patchLength) {
+      await fs.copyFile(previousSlice, slice, constants.COPYFILE_EXCL).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== 'EEXIST' && error.code !== 'ENOENT') throw error
+      })
+    }
   }
   const url = category.diffUrlPrefix + '/' + chunk.patchName + category.diffSuffix
   await downloadGameFile({ url, path: slice, size: chunk.patchLength, offset: chunk.patchOffset, signal, onProgress })
@@ -257,7 +271,9 @@ async function patchSlice(dir: string, task: PatchTask, signal: AbortSignal, onP
 
 export async function runSophonPatch(build: PatchBuild, version: string, dir: string, predownload: boolean,
   hpatchz: string, blacklist: string[], progress: (done: number, total: number) => void, signal: AbortSignal,
-  links?: HardLinkService, prepared?: Awaited<ReturnType<typeof collectPatchFiles>>, finished = new Set<string>()): Promise<void> {
+  links?: HardLinkService, prepared?: Awaited<ReturnType<typeof collectPatchFiles>>, finished = new Set<string>(),
+  work?: string, recordCache?: RecordSophonCache
+): Promise<void> {
   const { tasks, deletes } = prepared ?? await collectPatchFiles(build, version, blacklist, signal)
   const cache = join(dir, 'ldiff')
 
@@ -265,12 +281,23 @@ export async function runSophonPatch(build: PatchBuild, version: string, dir: st
     const unique = new Map<string, PatchTask>()
     for (const task of tasks) if (!unique.has(task.chunk.patchName)) unique.set(task.chunk.patchName, task)
     const total = [...unique.values()].reduce((sum, t) => sum + t.chunk.patchFileSize, 0)
+    if (work) {
+      let required = 0
+      for (const { chunk } of unique.values()) {
+        if (!await fileMatches(gamePath(cache, chunk.patchName), chunk.patchFileSize, chunk.patchFileMd5)) {
+          required += chunk.patchFileSize
+        }
+      }
+      await requireDiskSpace([{ path: cache, bytes: required }])
+    }
     const report = resourceProgress(total, progress)
     await forEachResource([...unique.values()], signal, async ({ category, chunk }, token) => {
       const count = (n: number) => report(chunk.patchName, n)
       if (!finished.has(chunk.patchName)) {
-        await cacheHoYoResource(gamePath(cache, chunk.patchName), category.diffUrlPrefix + '/' + chunk.patchName + category.diffSuffix,
-          chunk.patchFileSize, chunk.patchFileMd5, links, token, count)
+        const path = gamePath(cache, chunk.patchName)
+        const published = await cacheHoYoResource(dir, path, category.diffUrlPrefix + '/' + chunk.patchName + category.diffSuffix,
+          chunk.patchFileSize, chunk.patchFileMd5, links, token, count, work)
+        await recordCache?.(path, published)
         finished.add(chunk.patchName)
       }
       count(chunk.patchFileSize)
@@ -278,46 +305,65 @@ export async function runSophonPatch(build: PatchBuild, version: string, dir: st
     return
   }
   const total = tasks.reduce((sum, task) => sum + task.chunk.patchLength, 0)
+  if (work) {
+    let missing = 0
+    let patchBytes = 0
+    for (const { asset, chunk } of tasks) {
+      signal.throwIfAborted()
+      if (finished.has(asset.assetName) || await fileMatches(gamePath(dir, asset.assetName), asset.size, asset.md5)) continue
+      missing += asset.size
+      patchBytes += chunk.patchLength
+    }
+    await requireDiskSpace([{ path: dir, bytes: missing }, { path: cache, bytes: patchBytes }])
+  }
   const count = resourceProgress(total, progress)
   await forEachResource(tasks, signal, async (task, token) => {
     const { asset, chunk } = task
     const target = gamePath(dir, asset.assetName)
     const source = chunk.originalFileName ? gamePath(dir, chunk.originalFileName) : null
-    const removeSource = async (invalidate = true) => {
+    const removeSource = async () => {
       if (source) {
+        await allowGameFileWrite(source)
         await fs.rm(source, { force: true })
-        if (invalidate) links?.deleteFile(source)
+        links?.deleteFile(source)
       }
     }
     if (!finished.has(asset.assetName)) {
+      await requirePlainGamePath(dir, target)
+      if (source) await requirePlainGamePath(dir, source)
       const linked = links && await links.tryLink(target, asset.size, asset.md5, token)
       if (linked) {
         if (source && target.toLowerCase() !== source.toLowerCase()) await removeSource()
       } else if (await fileMatches(target, asset.size, asset.md5)) {
+        if (source && target.toLowerCase() !== source.toLowerCase()) await removeSource()
         void links?.insert(target, asset.size, asset.md5)
       } else if (!source || await fileMatches(source, chunk.originalFileLength, chunk.originalFileMd5)) {
-        const slice = await retryHoYo(() => patchSlice(cache, task, token, n => count(asset.assetName, n)), token)
-        const temp = target + '.tmp'
+        const slice = await retryHoYo(() => patchSlice(dir, cache, task, token, n => count(asset.assetName, n), work), token)
+        const temp = work ? temporaryGameFile(dir, work, 'patches', target) : target + '.tmp'
+        await requirePlainGamePath(dir, temp)
         await fs.mkdir(dirname(target), { recursive: true })
+        await fs.mkdir(dirname(temp), { recursive: true })
         try {
           await fs.rm(temp, { force: true })
           if (!source && (task.mode === 0 || task.mode === 1)) await fs.copyFile(slice, temp)
-          else await exec(hpatchz, ['-f', source ?? '', slice, temp], { windowsHide: true, signal: token })
-          await removeSource(false)
+          else await runTaskProcess(hpatchz, ['-f', source ?? '', slice, temp], { signal: token })
           if (await fileMatches(temp, asset.size, asset.md5)) {
+            await allowGameFileWrite(target)
             await fs.rename(temp, target)
+            if (source && target.toLowerCase() !== source.toLowerCase()) await removeSource()
             void links?.insert(target, asset.size, asset.md5)
           }
         } finally { await fs.rm(temp, { force: true }) }
-      } else if (source.toLowerCase() !== target.toLowerCase()) await removeSource()
+      }
       finished.add(asset.assetName)
     }
     count(asset.assetName, chunk.patchLength)
   })
   for (const name of deletes) {
     const path = gamePath(dir, name)
+    await requirePlainGamePath(dir, path)
+    await allowGameFileWrite(path)
     await fs.rm(path, { force: true })
     links?.deleteFile(path)
   }
-  if (!prepared) await fs.rm(cache, { recursive: true, force: true })
 }

@@ -50,17 +50,28 @@ export default function WindowControls(): ReactElement {
 
   return (
     <div className="win-controls">
-      <button className="win-btn" title="最小化" onClick={() => void window.api.windowMinimize()}>
+      <button
+        className="win-btn"
+        aria-label="最小化"
+        title="最小化"
+        onClick={() => void window.api.windowMinimize()}
+      >
         <MinIcon />
       </button>
       <button
         className="win-btn"
+        aria-label={maximized ? '还原' : '最大化'}
         title={maximized ? '还原' : '最大化'}
         onClick={() => void window.api.windowToggleMaximize().then(setMaximized)}
       >
         {maximized ? <RestoreIcon /> : <MaxIcon />}
       </button>
-      <button className="win-btn close" title="关闭" onClick={() => void window.api.windowClose()}>
+      <button
+        className="win-btn close"
+        aria-label="关闭"
+        title="关闭"
+        onClick={() => void window.api.windowClose()}
+      >
         <CloseIcon />
       </button>
     </div>

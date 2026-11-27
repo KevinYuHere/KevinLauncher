@@ -1,4 +1,6 @@
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -10,9 +12,14 @@ import {
 import type {
   AddonDescriptor,
   AppEntry,
+  AppSettingsPatch,
   AppUpdateInfo,
   AppUpdateState,
+  CacheKind,
+  DiskCacheKind,
+  FeatureIntro,
   HomeModuleId,
+  LauncherFontScript,
   LauncherSettings,
   LaunchMethod,
   LinkedLaunch,
@@ -23,7 +30,8 @@ import type {
   UsageReport,
   WallpaperSettings
 } from '@shared/types'
-import { currentWallpaper, isVideoFile } from '@shared/appEntry'
+import { currentWallpaper, defaultLaunchMethod, isVideoFile } from '@shared/appEntry'
+import { dataErrorDetails } from '@shared/dataErrors'
 import Rail from './components/Rail'
 import { perf } from './perfProbe'
 import GamesRow from './components/GamesRow'
@@ -34,9 +42,9 @@ import HomeView from './components/HomeView'
 import GachaView from './components/GachaView'
 import UpdateView from './components/UpdateView'
 import SettingsView from './components/SettingsView'
+import GameDiscovery from './components/GameDiscovery'
 import ModuleManagerView from './components/ModuleManagerView'
 import LinkedLaunchView from './components/LinkedLaunchView'
-import LaunchTransition from './components/LaunchTransition'
 import Toaster, { showToast } from './components/toast'
 import ThemeClickEffect from './components/ThemeClickEffect'
 import { sweepAfterPageSlide } from './themeTextSweep'
@@ -61,6 +69,26 @@ import { SpecialThemeProvider } from './theme/ThemeScope'
 import { extractVideoAccent } from './videoAccent'
 import { usePreparedWallpaper } from './usePreparedWallpaper'
 import { installWallpaperRegionUpdater, updateWallpaperRegions } from './wallpaperRegion'
+import { useVisualActivity, useWindowVisible } from './useWindowVisible'
+import { useDebouncedEntitySave } from './useDebouncedEntitySave'
+import { linkedLaunchRuntimeKey, useKevinHudLaunch } from './useKevinHudLaunch'
+import { useDialogFocus } from './components/useDialogFocus'
+import { setLiquidVisible } from './liquidMaterial'
+import { setSpringsActive } from './drag/spring'
+import { clearThumbnailCache, thumbnailCacheUsage } from './gallery/thumbs'
+import { clearWallpaperCache, wallpaperDiskUsage, wallpaperMemoryUsage } from './wallpaperPrepared'
+import { formatBytes } from './format'
+import { applyLauncherTypography } from './launcherTypography'
+
+const LaunchTransition = lazy(() => import('./components/LaunchTransition'))
+
+function updateInfoSource(entry: AppEntry): string {
+  return JSON.stringify([entry.addonId, entry.gameDirectory?.trim() || defaultLaunchMethod(entry)?.targetPath])
+}
+
+function infoFor(entry: AppEntry, result?: { source: string; info: UpdateInfo }): UpdateInfo | undefined {
+  return result?.source === updateInfoSource(entry) ? result.info : undefined
+}
 
 /** Local calendar date as `YYYY-MM-DD` (used to run daily update checks). */
 function localDate(): string {
@@ -91,8 +119,11 @@ export default function App(): ReactElement {
   const [linkedFocusId, setLinkedFocusId] = useState<string | null>(null)
   const [linkedLaunches, setLinkedLaunches] = useState<LinkedLaunch[]>([])
   const [totals, setTotals] = useState<Record<string, number>>({})
-  const [updateInfos, setUpdateInfos] = useState<Record<string, UpdateInfo>>({})
+  const [updateInfos, setUpdateInfos] = useState<Record<string, { source: string; info: UpdateInfo }>>({})
   const [updateStatuses, setUpdateStatuses] = useState<Record<string, UpdateStatus>>({})
+  const updateInfoRequests = useRef(new Map<string, symbol>())
+  const updateProgressRevisions = useRef(new Map<string, number>())
+  const completedUpdateIds = useRef(new Map<string, string>())
 
   const [gamesHidden, setGamesHidden] = useState(false)
   const [peeking, setPeeking] = useState(false)
@@ -104,11 +135,13 @@ export default function App(): ReactElement {
     blur: number
     dim: number
   } | null>(null)
-  const bgSaveTimer = useRef<number | undefined>(undefined)
   const bgRaf = useRef(0)
+  const saveBgTuning = useDebouncedEntitySave()
   const [launcherSettings, setLauncherSettings] = useState<LauncherSettings>({
     iconFile: null,
     fontFamily: null,
+    fontFamilyEn: null,
+    fontFamilyZh: null,
     closeAction: 'close',
     afterLaunch: 'none',
     autoStart: 'off',
@@ -117,13 +150,39 @@ export default function App(): ReactElement {
     downloadLimitMbps: 0,
     themeAreas: {},
     themeLocks: {},
-    themePolicyVersion: null
+    themePolicyVersion: null,
+    themePolicyApplied: [],
+    featureIntroApplied: []
   })
   const [fonts, setFonts] = useState<string[]>([])
   const [version, setVersion] = useState('')
   const [cropSrc, setCropSrc] = useState<string | null>(null)
   const cropResolver = useRef<((value: string | null) => void) | null>(null)
   const [appsLoaded, setAppsLoaded] = useState(false)
+  const [startupError, setStartupError] = useState('')
+  const [startupAttempt, setStartupAttempt] = useState(0)
+  const visible = useVisualActivity(running.some(({ appId, confirmed }) =>
+    confirmed !== false && apps.some((entry) => entry.id === appId && entry.addonId)))
+  const { launchFx, playLaunchFx, finishLaunchFx, handOff } = useKevinHudLaunch({
+    visible,
+    commit: (runtimeKey, reducedMotion) =>
+      window.api.kevinHudCommitLaunch(runtimeKey, reducedMotion)
+  })
+  const windowIsVisible = useWindowVisible()
+  const [windowShown, setWindowShown] = useState(false)
+  const [introQueue, setIntroQueue] = useState<FeatureIntro[]>([])
+  const featureIntro = introQueue[0] ?? null
+  const featureDialog = useRef<HTMLDivElement>(null)
+  const featureRequested = useRef(false)
+  useDialogFocus(featureDialog, featureIntro !== null)
+  useLayoutEffect(() => {
+    document.documentElement.toggleAttribute('data-visual-paused', !visible)
+    setLiquidVisible(visible)
+    setSpringsActive(visible)
+    return () => {
+      document.documentElement.removeAttribute('data-visual-paused')
+    }
+  }, [visible])
   const [gachaNotice, setGachaNotice] = useState<{
     name: string
     bannerName: string
@@ -135,20 +194,20 @@ export default function App(): ReactElement {
   const checkedUpdateDate = useRef<Map<string, string>>(new Map())
   const [appUpdate, setAppUpdate] = useState<AppUpdateInfo | null>(null)
   const [appUpdateState, setAppUpdateState] = useState<AppUpdateState>(IDLE_APP_UPDATE)
+  const criticalDialog = useRef<HTMLDivElement>(null)
+  const criticalUpdateError = appUpdateState.phase === 'error' && appUpdateState.critical === true
+  useDialogFocus(criticalDialog, criticalUpdateError)
   const [dismissedUpdate, setDismissedUpdate] = useState<string | null>(null)
   const [checkingUpdate, setCheckingUpdate] = useState(false)
-  const [launchFx, setLaunchFx] = useState<{
-    effect: AppEntry['launchEffect']
-    key: number
-    originX: number
-    originY: number
-  } | null>(null)
   const [updateCheckText, setUpdateCheckText] = useState('')
   const [dataDir, setDataDir] = useState('')
   /** Windows desktop wallpaper — background when the launcher has no apps. */
   const [desktopWall, setDesktopWall] = useState<string | null>(null)
   const [programDir, setProgramDir] = useState('')
   const [usage, setUsage] = useState<UsageReport | null>(null)
+  const [cleaningUsage, setCleaningUsage] = useState(false)
+  const clearingCache = useRef(false)
+  const usageRevision = useRef(0)
 
   const refreshApps = useCallback(async (): Promise<void> => {
     setApps(await window.api.listApps())
@@ -216,30 +275,72 @@ export default function App(): ReactElement {
   }, [gamesHidden])
 
   useEffect(() => {
+    let current = true
+    setStartupError('')
+    const showLoadError = (error: unknown): void => {
+      if (current) setStartupError(dataErrorDetails(error)?.message ?? (error instanceof Error ? error.message : String(error)))
+    }
     void (async (): Promise<void> => {
-      setAddons(await window.api.listAddons())
-      setGamesHidden((await window.api.getUiPrefs()).gamesRowHidden)
-      await refreshApps()
-      await refreshRunning()
-      await refreshTotals()
-      await refreshLinked()
-      setAppsLoaded(true)
+      try {
+        const [addons, prefs, settings] = await Promise.all([
+          window.api.listAddons(), window.api.getUiPrefs(), window.api.getLauncherSettings(),
+          refreshApps(), refreshRunning(), refreshTotals(), refreshLinked()
+        ])
+        if (!current) return
+        setAddons(addons)
+        setGamesHidden(prefs.gamesRowHidden)
+        setLauncherSettings(settings)
+        setAppsLoaded(true)
+      } catch (error) {
+        showLoadError(error)
+      }
     })()
     const offApps = window.api.onAppsChanged(() => {
-      void refreshApps()
-      void refreshLinked()
+      void Promise.all([refreshApps(), refreshLinked()]).catch((error) =>
+        showToast(`刷新应用列表失败：${dataErrorDetails(error)?.message ?? (error as Error).message}`)
+      )
     })
-    const offRunning = window.api.onRunningChanged(() => void refreshRunning())
-    const offPlayTime = window.api.onPlayTimeChanged(() => void refreshTotals())
+    const offRunning = window.api.onRunningChanged(() => void refreshRunning().catch(console.error))
+    const offPlayTime = window.api.onPlayTimeChanged(() => void refreshTotals().catch(console.error))
     return () => {
+      current = false
       offApps()
       offRunning()
       offPlayTime()
     }
-  }, [refreshApps, refreshRunning, refreshTotals, refreshLinked])
+  }, [refreshApps, refreshRunning, refreshTotals, refreshLinked, startupAttempt, showToast])
 
   useEffect(() => {
-    void window.api.getLauncherSettings().then(setLauncherSettings)
+    if (appsLoaded && !startupError) void window.api.confirmAppReady().catch(console.error)
+  }, [appsLoaded, startupError])
+
+  useEffect(() => window.api.onWindowShown(() => setWindowShown(true)), [])
+
+  // Release introductions are fetched only once the real main window is shown,
+  // then queued so a theme refresh or another dialog cannot make one vanish.
+  useEffect(() => {
+    if (!appsLoaded || startupError || featureRequested.current ||
+        (!windowIsVisible && !windowShown)) return
+    featureRequested.current = true
+    void window.api.consumeUpgradeFeatures().then((intro) => {
+      if (!intro) return
+      setIntroQueue((queue) => queue.some((item) =>
+        item.title === intro.title && item.body === intro.body) ? queue : [...queue, intro])
+    }).catch((error) => {
+      featureRequested.current = false
+      console.error(error)
+    })
+  }, [appsLoaded, startupError, windowIsVisible, windowShown])
+
+  // The persisted marker is written only after this dialog was actually mounted
+  // and rendered while the window was visible, never when the policy is merely
+  // read or the theme is applied.
+  useEffect(() => {
+    if (!featureIntro || !windowIsVisible) return
+    void window.api.completeUpgradeIntro().catch(console.error)
+  }, [featureIntro, windowIsVisible])
+
+  useEffect(() => {
     void window.api.listFonts().then(setFonts)
     void window.api.appVersion().then(setVersion)
     void window.api.desktopWallpaper().then(setDesktopWall)
@@ -247,7 +348,6 @@ export default function App(): ReactElement {
       setDataDir(info.current)
       setProgramDir(info.programDir)
     })
-    void window.api.housekeepingUsage().then(setUsage)
     return window.api.onLauncherChanged(() =>
       void window.api.getLauncherSettings().then(setLauncherSettings)
     )
@@ -256,16 +356,30 @@ export default function App(): ReactElement {
   // Launcher self-update: adopt the result of the startup / 24h check (the main
   // process runs it) and of any later check.
   useEffect(() => {
-    void window.api.appUpdateStatus().then((status) => {
-      if (status.info) setAppUpdate(status.info)
+    let alive = true
+    let received = false
+    const off = window.api.onAppUpdateAvailable((info) => {
+      received = true
+      setAppUpdate(info)
     })
-    return window.api.onAppUpdateAvailable(setAppUpdate)
+    void window.api.appUpdateStatus().then((status) => {
+      if (alive && !received && status.info) setAppUpdate(status.info)
+    }).catch(console.error)
+    return () => { alive = false; off() }
   }, [])
 
   // Download / install progress for the rail indicator.
   useEffect(() => {
-    void window.api.appUpdateState().then(setAppUpdateState)
-    return window.api.onAppUpdateState(setAppUpdateState)
+    let alive = true
+    let received = false
+    const off = window.api.onAppUpdateState((state) => {
+      received = true
+      setAppUpdateState(state)
+    })
+    void window.api.appUpdateState().then((state) => {
+      if (alive && !received) setAppUpdateState(state)
+    }).catch(console.error)
+    return () => { alive = false; off() }
   }, [])
 
   // Once the download has taken over, the dialog steps aside; the rail ring shows
@@ -298,14 +412,15 @@ export default function App(): ReactElement {
   }, [])
 
 
+  // Resolve the legacy single font and the independent English/Chinese choices
+  // into one controlled font-face pair plus the existing `--app-font` token.
   useEffect(() => {
-    const root = document.documentElement
-    if (launcherSettings.fontFamily) {
-      root.style.setProperty('--app-font', `"${launcherSettings.fontFamily}"`)
-    } else {
-      root.style.removeProperty('--app-font')
-    }
-  }, [launcherSettings.fontFamily])
+    applyLauncherTypography(document, launcherSettings)
+  }, [
+    launcherSettings.fontFamily,
+    launcherSettings.fontFamilyEn,
+    launcherSettings.fontFamilyZh
+  ])
 
   // Non-blocking gacha fetch notification (survives page switches).
   useEffect(() => {
@@ -356,7 +471,7 @@ export default function App(): ReactElement {
         setUpdateCheckText(`发现新版本 ${status.info.version}`)
         showToast(`发现新版本 ${status.info.version}`)
       } else if (status.error) {
-        setUpdateCheckText(`检查失败：${status.error}`)
+        setUpdateCheckText(`检查更新失败：${status.error}`)
         showToast(`检查更新失败：${status.error}`)
       } else {
         setUpdateCheckText('已是最新版本')
@@ -367,33 +482,73 @@ export default function App(): ReactElement {
     }
   }, [showToast])
 
-  /** Cleans the selected caches and refreshes the usage report. */
-  const handleCleanUsage = useCallback(
-    async (kinds: ('staging' | 'thumbs' | 'logs')[]): Promise<void> => {
-      try {
-        setUsage(await window.api.housekeepingClean(kinds))
-        showToast('已清理所选缓存')
-      } catch (error) {
-        showToast(`清理失败：${(error as Error).message}`)
+  const refreshUsage = useCallback(async (): Promise<void> => {
+    const revision = ++usageRevision.current
+    const [disk, wallpaperDisk] = await Promise.all([
+      window.api.housekeepingUsage(), wallpaperDiskUsage().catch(() => null)
+    ])
+    if (revision === usageRevision.current) {
+      setUsage({ ...disk, wallpaperDisk, thumbnailMemory: thumbnailCacheUsage(),
+        wallpaperMemory: wallpaperMemoryUsage() })
+    }
+  }, [])
+
+  useEffect(() => {
+    if (view === 'settings') void refreshUsage().catch(console.error)
+  }, [view, refreshUsage])
+
+  const handleCleanUsage = useCallback(async (kinds: CacheKind[]): Promise<void> => {
+    if (clearingCache.current) return
+    clearingCache.current = true
+    setCleaningUsage(true)
+    const failures: string[] = []
+    let memory = kinds.includes('thumbs') ? clearThumbnailCache() : 0
+    let disk = 0
+    try {
+      const diskKinds = kinds.filter((kind): kind is DiskCacheKind => kind !== 'wallpaper')
+      if (diskKinds.length) {
+        try {
+          const result = await window.api.housekeepingClean(diskKinds)
+          disk += result.diskBytes
+          failures.push(...result.failures)
+        } catch (error) {
+          failures.push(dataErrorDetails(error)?.message ?? (error as Error).message)
+        }
       }
-    },
-    [showToast]
-  )
+      if (kinds.includes('wallpaper')) {
+        const result = await clearWallpaperCache()
+        memory += result.memory
+        disk += result.disk
+        if (result.failure) failures.push(result.failure)
+      }
+      await refreshUsage().catch((error) => {
+        failures.push(dataErrorDetails(error)?.message ?? (error as Error).message)
+      })
+      showToast(`清理完成，释放磁盘 ${formatBytes(disk)}、内存 ${formatBytes(memory)}` +
+        (failures.length ? `。以下内容未能清理：${failures.join('；')}` : ''))
+    } finally {
+      clearingCache.current = false
+      setCleaningUsage(false)
+    }
+  }, [refreshUsage])
 
   /** Moves every setting to a new data directory (the launcher restarts). */
   const handleChangeDataDir = useCallback(async (): Promise<void> => {
     const picked = await window.api.dataDirPick(dataDir)
     if (!picked) return
     if (directoriesOverlap(picked, programDir)) {
-      showToast('数据目录不能与程序目录相同，也不能互相包含')
+      showToast('数据目录不能与程序目录相同或互相包含，请选择其它位置')
       return
     }
-    if (!(await confirm(`将把现有数据迁移到：\n${picked}\n\n完成后启动器会自动重启。`))) return
-    showToast('正在迁移数据…')
+    if (!(await confirm(
+      `将把现有数据迁移到：\n${picked}\n\n迁移成功后会重启启动器并清理原目录；` +
+      '失败时会保留原数据。'
+    ))) return
+    showToast('正在迁移数据，请不要关闭启动器…')
     try {
       await window.api.dataDirSet(picked)
     } catch (error) {
-      showToast(`更换数据目录失败：${(error as Error).message}`)
+      showToast(`数据迁移失败：${dataErrorDetails(error)?.message ?? (error as Error).message}`)
     }
   }, [dataDir, programDir, showToast])
 
@@ -414,20 +569,25 @@ export default function App(): ReactElement {
     if (view !== 'linkedLaunch') setLinkedFocusId(null)
   }, [view])
 
-  const checkUpdate = useCallback(async (appId: string): Promise<void> => {
-    try {
-      const info = await window.api.updateInfo(appId)
-      setUpdateInfos((prev) => ({ ...prev, [appId]: info }))
-    } catch {
-      /* ignore update check errors */
-    }
-  }, [])
-
   /** Latest app list, so the window-shown handler always sees fresh data. */
   const appsRef = useRef<AppEntry[]>([])
-  useEffect(() => {
-    appsRef.current = apps
-  }, [apps])
+  appsRef.current = apps
+  const checkUpdate = useCallback(async (appId: string): Promise<UpdateInfo | null> => {
+    const entry = appsRef.current.find((app) => app.id === appId)
+    if (!entry) return null
+    const source = updateInfoSource(entry)
+    const request = Symbol()
+    updateInfoRequests.current.set(appId, request)
+    try {
+      const info = await window.api.updateInfo(appId)
+      const latest = appsRef.current.find((app) => app.id === appId)
+      if (updateInfoRequests.current.get(appId) !== request || !latest || updateInfoSource(latest) !== source) return null
+      setUpdateInfos((prev) => ({ ...prev, [appId]: { source, info } }))
+      return info
+    } finally {
+      if (updateInfoRequests.current.get(appId) === request) updateInfoRequests.current.delete(appId)
+    }
+  }, [])
 
   // Check every supported game for updates once per day. Runs when the app list
   // loads/changes and whenever the window becomes visible (startup or tray).
@@ -436,9 +596,10 @@ export default function App(): ReactElement {
       const date = localDate()
       for (const app of list ?? appsRef.current) {
         if (!app.addonId) continue
-        if (checkedUpdateDate.current.get(app.id) === date) continue
-        checkedUpdateDate.current.set(app.id, date)
-        void checkUpdate(app.id)
+        const key = JSON.stringify([date, updateInfoSource(app)])
+        if (checkedUpdateDate.current.get(app.id) === key) continue
+        checkedUpdateDate.current.set(app.id, key)
+        void checkUpdate(app.id).catch(console.error)
       }
     },
     [checkUpdate]
@@ -449,6 +610,9 @@ export default function App(): ReactElement {
   }, [apps, runDailyChecks])
 
   useEffect(() => window.api.onWindowShown(() => runDailyChecks()), [runDailyChecks])
+  useEffect(() => window.api.onShutdownFailed((message) => {
+    showToast(`数据保存失败，启动器会继续运行以免丢失；详情：${message}`)
+  }), [])
 
   const handleAddApp = useCallback(
     async (input: NewAppEntry, iconDataUrl: string | null): Promise<void> => {
@@ -464,60 +628,76 @@ export default function App(): ReactElement {
 
   /** Merge a partial change into an app (settings page edits it in place). */
   const handlePatchEntry = useCallback(
-    async (entry: AppEntry, patch: Partial<AppEntry>): Promise<void> => {
-      await window.api.updateApp({ ...entry, ...patch })
+    async (appId: string, patch: AppSettingsPatch): Promise<void> => {
+      try {
+        await window.api.updateApp(appId, patch)
+      } catch (error) {
+        const detail = dataErrorDetails(error)?.message ??
+          (error instanceof Error ? error.message : '请稍后重试')
+        showToast(`应用设置保存失败：${detail}`)
+      }
     },
     []
   )
 
   /** Play an app's launch effect, radiating from `el` (defaults to window centre). */
   const presentLaunchFx = useCallback(
-    (effect: AppEntry['launchEffect'], el?: HTMLElement | null): void => {
-      if (effect === 'none') return
+    (effect: AppEntry['launchEffect'], el?: HTMLElement | null) => {
+      if (effect === 'none') return null
       // Only the gravity effect is anchored to the launch button's atom; every
       // other effect starts at the clicked element.
       const atom = document.querySelector<HTMLElement>('.home .start-atom')
       const anchor = effect === 'gravity' || effect === 'nova' ? (atom ?? el) : el
       const r = anchor?.getBoundingClientRect()
-      setLaunchFx({
-        effect,
-        key: Date.now(),
-        originX: r && r.width ? (r.left + r.width / 2) / window.innerWidth : 0.5,
-        originY: r && r.height ? 1 - (r.top + r.height / 2) / window.innerHeight : 0.4
+      return playLaunchFx(effect, {
+        x: r && r.width ? (r.left + r.width / 2) / window.innerWidth : 0.5,
+        y: r && r.height ? 1 - (r.top + r.height / 2) / window.innerHeight : 0.4
       })
     },
-    []
+    [playLaunchFx]
   )
+
+  /** The launcher's existing post-launch window action. */
+  const runAfterLaunchAction = useCallback(async (): Promise<void> => {
+    const action = launcherSettings.afterLaunch
+    if (action === 'minimize') await window.api.windowMinimize()
+    else if (action === 'tray') await window.api.hideToTray()
+    else if (action === 'close') await window.api.windowClose()
+  }, [launcherSettings.afterLaunch])
 
   const handleLaunch = useCallback(
     async (id: string, methodId?: string): Promise<void> => {
       const entry = apps.find((a) => a.id === id)
-      presentLaunchFx(
+      const effectRun = presentLaunchFx(
         entry?.launchEffect ?? 'none',
         document.querySelector('.home .start-wrap') as HTMLElement | null
       )
       const result = await window.api.launchApp(id, methodId)
       if (!result.ok) {
-        showToast(result.error ?? '启动失败')
+        showToast(result.error ? `未能启动：${result.error}` : '未能启动，请检查启动文件是否正确')
         return
       }
       if (result.message) showToast(result.message)
+      else if (result.confirmation === 'requested') showToast('启动请求已交给系统，请稍候')
       // A launch may be a wallpaper-rotation trigger.
       if (entry?.wallpaperSettings?.trigger === 'appLaunch') {
         await window.api.wallpaperAdvance(id)
       }
-      const action = launcherSettings.afterLaunch
-      if (action === 'minimize') await window.api.windowMinimize()
-      else if (action === 'tray') await window.api.hideToTray()
-      else if (action === 'close') await window.api.windowClose()
+      // `kevinHudStarted` means this launch prepared a HUD request, not that the
+      // HUD already started. With a prepared request, commit it exactly once
+      // after this launch's transition; otherwise keep the legacy timing.
+      const hudPrepared = result.kevinHudStarted === true
+      const hudOwned = await handOff(effectRun, id, hudPrepared)
+      if (!hudOwned) await runAfterLaunchAction()
     },
-    [apps, showToast, launcherSettings.afterLaunch, presentLaunchFx]
+    [apps, showToast, presentLaunchFx, handOff, runAfterLaunchAction]
   )
 
   const handleStop = useCallback(
     async (id: string): Promise<void> => {
       const result = await window.api.stopApp(id)
-      showToast(result.killed > 0 ? `已停止（结束 ${result.killed} 个进程）` : '已停止')
+      if (!result.ok) showToast(result.error ? `未能停止：${result.error}` : '未能停止，请稍后重试')
+      else showToast(result.killed > 0 ? `已停止，并结束了 ${result.killed} 个相关进程` : '已停止')
     },
     [showToast]
   )
@@ -525,25 +705,34 @@ export default function App(): ReactElement {
   // Live update/download progress (feeds the home-screen controls).
   useEffect(() => {
     return window.api.onUpdateProgress((status) => {
+      updateProgressRevisions.current.set(status.appId, (updateProgressRevisions.current.get(status.appId) ?? 0) + 1)
       setUpdateStatuses((prev) => ({ ...prev, [status.appId]: status }))
       // Once an update finishes, drop the stale "hasUpdate" flag so the button
       // falls back from "开始更新" to "启动" immediately, then re-check for the
       // authoritative version.
       if (status.phase === 'done') {
-        setUpdateInfos((prev) => {
+        if (status.taskId && completedUpdateIds.current.get(status.appId) === status.taskId) return
+        if (status.taskId) completedUpdateIds.current.set(status.appId, status.taskId)
+        // Supersede a pre-completion version lookup that's still in flight.
+        updateInfoRequests.current.delete(status.appId)
+        if (status.mode === 'update') setUpdateInfos((prev) => {
           const cur = prev[status.appId]
-          return cur ? { ...prev, [status.appId]: { ...cur, hasUpdate: false } } : prev
+          return cur ? { ...prev, [status.appId]: { ...cur, info: { ...cur.info, hasUpdate: false } } } : prev
         })
-        void checkUpdate(status.appId)
+        void checkUpdate(status.appId).catch(console.error)
       }
     })
   }, [checkUpdate])
 
   useEffect(() => {
     if (!currentId) return
+    let alive = true
+    const revision = updateProgressRevisions.current.get(currentId)
     void window.api.updateStatus(currentId).then((status) => {
+      if (!alive || revision !== updateProgressRevisions.current.get(currentId)) return
       setUpdateStatuses((prev) => ({ ...prev, [currentId]: status }))
-    })
+    }).catch(console.error)
+    return () => { alive = false }
   }, [currentId])
 
   const handleUpdate = useCallback(
@@ -557,7 +746,8 @@ export default function App(): ReactElement {
         await window.api.updateStart(id, mode)
       } catch (error) {
         const label = mode === 'preDownload' ? '预下载' : '更新'
-        showToast(`${label}失败：${(error as Error).message}`)
+        const detail = dataErrorDetails(error)?.message ?? (error as Error).message
+        showToast(`${label}失败：${detail}`)
       }
     },
     [updateStatuses, showToast]
@@ -565,10 +755,12 @@ export default function App(): ReactElement {
 
   const handleRemove = useCallback(
     async (entry: AppEntry): Promise<void> => {
-      if (!(await confirm(`确定移除「${entry.name}」吗？`))) return
+      if (!(await confirm(
+        `确定从启动器移除「${entry.name}」吗？磁盘上的文件和游戏数据不会被删除。`
+      ))) return
       await window.api.removeApp(entry.id)
       setView('home')
-      showToast('已移除')
+      showToast('已从启动器移除，磁盘文件仍然保留')
     },
     [showToast]
   )
@@ -609,8 +801,12 @@ export default function App(): ReactElement {
     setLauncherSettings(await window.api.setLauncherIcon(null))
   }, [])
 
-  const setLauncherFont = useCallback(async (family: string | null): Promise<void> => {
-    setLauncherSettings(await window.api.setLauncherFont(family))
+  const setLauncherFont = useCallback(async (
+    script: LauncherFontScript,
+    family: string | null
+  ): Promise<void> => {
+    const patch = script === 'en' ? { en: family } : { zh: family }
+    setLauncherSettings(await window.api.setLauncherFonts(patch))
   }, [])
 
   // -------------------------------------------------------------- wallpapers
@@ -681,16 +877,25 @@ export default function App(): ReactElement {
     async (id: string, origin?: HTMLElement | null): Promise<void> => {
       // A linked launch is not bound to a single app: play the launch effect of
       // the app you are currently viewing, radiating from the clicked control.
-      presentLaunchFx(current?.launchEffect ?? 'none', origin)
-      const result = await window.api.launchLinkedLaunch(id)
-      if (!result.ok) showToast(result.error ?? '启动失败')
+      const effectRun = presentLaunchFx(current?.launchEffect ?? 'none', origin)
+      // The optional owner lets the main process verify that this app really
+      // owns the linked launch before it prepares the app's HUD.
+      const result = await window.api.launchLinkedLaunch(id, current?.id)
+      if (!result.ok) {
+        showToast(result.error ? `未能启动关联项：${result.error}` : '未能启动关联项，请检查启动文件是否正确')
+        return
+      }
+      if (result.confirmation === 'requested') showToast('启动请求已交给系统，请稍候')
+      const hudPrepared = result.kevinHudStarted === true
+      await handOff(effectRun, linkedLaunchRuntimeKey(id), hudPrepared)
     },
-    [current, showToast, presentLaunchFx]
+    [current, showToast, presentLaunchFx, handOff]
   )
 
   const handleStopLinked = useCallback(
     async (id: string): Promise<void> => {
-      await window.api.stopApp(`linked:${id}`)
+      const result = await window.api.stopApp(`linked:${id}`)
+      if (!result.ok) showToast(result.error ? `未能停止：${result.error}` : '未能停止，请稍后重试')
     },
     []
   )
@@ -727,7 +932,9 @@ export default function App(): ReactElement {
 
   const handleLinkedRemove = useCallback(
     async (id: string): Promise<void> => {
-      if (!(await confirm('确定删除该关联启动吗？'))) return
+      if (!(await confirm(
+        '确定删除这条关联启动吗？只删除启动配置，不会删除磁盘上的文件。'
+      ))) return
       await window.api.removeLinkedLaunch(id)
     },
     []
@@ -736,34 +943,43 @@ export default function App(): ReactElement {
   const exportData = useCallback(async (): Promise<void> => {
     try {
       const path = await window.api.exportData()
-      if (path) showToast(`已导出到 ${path}`)
+      if (path) showToast(`设置备份已导出到 ${path}`)
     } catch (error) {
-      showToast(`导出失败：${(error as Error).message}`)
+      const detail = dataErrorDetails(error)?.message ?? (error as Error).message
+      showToast(`导出设置备份失败：${detail}`)
     }
   }, [showToast])
 
   const importData = useCallback(async (): Promise<void> => {
     if (
-      !(await confirm('导入会覆盖当前全部设置（应用、使用时长、抽卡记录、图标、壁纸），确定继续？'))
+      !(await confirm(
+        '导入备份会覆盖当前的应用、使用时长、抽卡记录、图标、壁纸和启动器设置，且不能撤销。确定继续？'
+      ))
     ) {
       return
     }
     try {
       const result = await window.api.importData()
-      if (result) showToast(`已导入（${result.apps} 个应用）`)
+      if (result) {
+        const warning = result.warnings.length
+          ? `。部分系统设置未能应用：${result.warnings.join('、')}`
+          : ''
+        showToast(`已导入 ${result.apps} 个应用${warning}`)
+      }
     } catch (error) {
-      showToast(`导入失败：${(error as Error).message}`)
+      showToast(`导入设置备份失败：${dataErrorDetails(error)?.message ?? (error as Error).message}`)
     }
   }, [showToast])
 
-  const renderSubView = (entry: AppEntry): ReactElement => {
+  const renderSubView = (entry: AppEntry | null): ReactElement => {
     const back = (): void => setView('home')
-    if (view === 'playtime') {
-      return <PlayTimeView entry={entry} onBack={back} />
+    if (view === 'playtime' && entry) {
+      return <PlayTimeView key={entry.id} entry={entry} onBack={back} />
     }
-    if (view === 'gacha') {
+    if (view === 'gacha' && entry) {
       return (
         <GachaView
+          key={`${entry.id}:${entry.addonId ?? ''}`}
           entry={entry}
           addon={addons.find((a) => a.id === entry.addonId)}
           onBack={back}
@@ -772,15 +988,17 @@ export default function App(): ReactElement {
         />
       )
     }
-    if (view === 'gallery') {
-      return <GalleryView entry={entry} onBack={back} onEdit={() => setView('settings')} />
+    if (view === 'gallery' && entry) {
+      return <GalleryView key={entry.id} active={visible} entry={entry} onBack={back} onEdit={() => setView('settings')} />
     }
-    if (view === 'update') {
+    if (view === 'update' && entry) {
       return (
         <UpdateView
+          key={entry.id}
           entry={entry}
-          info={updateInfos[entry.id]}
-          onChecked={(info) => setUpdateInfos((prev) => ({ ...prev, [entry.id]: info }))}
+          info={infoFor(entry, updateInfos[entry.id])}
+          status={updateStatuses[entry.id]}
+          onCheck={checkUpdate}
           onBack={back}
           onToast={showToast}
         />
@@ -801,7 +1019,7 @@ export default function App(): ReactElement {
         />
       )
     }
-    if (view === 'modules') {
+    if (view === 'modules' && entry) {
       return (
         <ModuleManagerView
           entry={entry}
@@ -817,7 +1035,7 @@ export default function App(): ReactElement {
           onSetModuleLabel={(label) => void window.api.setModuleLabel(entry.id, label)}
           onSetLaunchEffect={(effect) => void window.api.setLaunchEffect(entry.id, effect)}
           onSetLaunchMethods={(methods, defaultId) =>
-            void handleSetLaunchMethods(entry.id, methods, defaultId)
+            handleSetLaunchMethods(entry.id, methods, defaultId)
           }
           onWallpaperAdd={() => void handleWallpaperAdd()}
           onWallpaperRemove={(id) => void handleWallpaperRemove(id)}
@@ -839,10 +1057,10 @@ export default function App(): ReactElement {
         entry={entry}
         addons={addons}
         onBack={back}
-        onPatchEntry={(patch) => void handlePatchEntry(entry, patch)}
+        onPatchEntry={(patch) => { if (entry) void handlePatchEntry(entry.id, patch) }}
         onPickIcon={() => void handlePickAppIcon()}
         onResetIcon={() => void handleResetAppIcon()}
-        onRemove={() => void handleRemove(entry)}
+        onRemove={() => { if (entry) void handleRemove(entry) }}
         onOpenModuleSettings={(section) => {
           setModuleSection(section)
           setView('modules')
@@ -852,26 +1070,27 @@ export default function App(): ReactElement {
         version={version}
         onPickLauncherIcon={() => void pickLauncherIcon()}
         onClearLauncherIcon={() => void clearLauncherIcon()}
-        onSetFont={(family) => void setLauncherFont(family)}
+        onSetLauncherFont={(script, family) => void setLauncherFont(script, family)}
         onSetBehavior={(patch) => {
           void window.api.setLauncherBehavior(patch).then((settings) => {
             setLauncherSettings(settings)
-            // Switching channel re-checks immediately so the indicator is accurate.
-            if (patch.updateChannel) void handleCheckUpdate()
-          })
+          }).catch((error) => showToast(
+            `启动器设置保存失败：${dataErrorDetails(error)?.message ?? (error as Error).message}`
+          ))
         }}
         onExportData={() => void exportData()}
         onImportData={() => void importData()}
         dataDir={dataDir}
         onChangeDataDir={() => void handleChangeDataDir()}
         usage={usage}
+        cleaningUsage={cleaningUsage}
         onCleanUsage={(kinds) => void handleCleanUsage(kinds)}
         onCheckUpdate={() => void handleCheckUpdate()}
         checkingUpdate={checkingUpdate}
         updateCheckText={updateCheckText}
         onExportLogs={() =>
           void window.api.exportLogs().then((p) => {
-            if (p) showToast(`已导出日志到 ${p}`)
+            if (p) showToast(`日志已导出到 ${p}`)
           })
         }
       />
@@ -891,19 +1110,19 @@ export default function App(): ReactElement {
   // Video wallpapers cannot be sampled by the main process, so decode the first
   // frame here and update the auto theme colour when the video changes.
   useEffect(() => {
-    if (!current || !current.autoTheme || !isVideo || !bg) return undefined
-    let cancelled = false
+    if (!visible || !current || !current.autoTheme || !isVideo || !bg) return undefined
+    const controller = new AbortController()
     const appId = current.id
-    void extractVideoAccent(bg).then((color) => {
-      if (!cancelled && color && color !== current.themeColor) {
+    void extractVideoAccent(bg, controller.signal).then((color) => {
+      if (!controller.signal.aborted && color && color !== current.themeColor) {
         void window.api.setThemeColor(appId, color)
       }
     })
     return () => {
-      cancelled = true
+      controller.abort()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bg, isVideo, current?.autoTheme, current?.id])
+  }, [bg, isVideo, current?.autoTheme, current?.id, visible])
 
   // Viewport in CSS px + device pixel ratio. Background preparation depends on
   // it: a wallpaper is rasterised once per size, so resizing waits for the drag
@@ -932,7 +1151,7 @@ export default function App(): ReactElement {
     }
   }, [])
 
-  const prepared = usePreparedWallpaper(isVideo ? null : bg, winSize.w + 128, winSize.h + 128, winSize.dpr)
+  const prepared = usePreparedWallpaper(isVideo ? null : bg, winSize.w + 128, winSize.h + 128, winSize.dpr, visible)
   useLayoutEffect(() => {
     if (!bg) { setBgDisplay(null); return }
     const tuning = { blur: current?.backgroundBlur ?? 0, dim: current?.backgroundDim ?? 0 }
@@ -947,14 +1166,22 @@ export default function App(): ReactElement {
   // time an app is shown) and on an interval. `appLaunch` is handled in
   // `handleLaunch`.
   const startedApps = useRef<Set<string>>(new Set())
+  const switchedWallpaperFor = useRef<string | null>(null)
   useEffect(() => {
-    if (!current) return undefined
+    if (!current) {
+      switchedWallpaperFor.current = null
+      return undefined
+    }
     const settings = current.wallpaperSettings
     const trigger = settings?.trigger
     if (trigger === 'appSwitch') {
-      void window.api.wallpaperAdvance(current.id)
+      if (switchedWallpaperFor.current !== current.id) {
+        switchedWallpaperFor.current = current.id
+        void window.api.wallpaperAdvance(current.id)
+      }
       return undefined
     }
+    switchedWallpaperFor.current = null
     if (trigger === 'launcherStart') {
       if (!startedApps.current.has(current.id)) {
         startedApps.current.add(current.id)
@@ -963,6 +1190,7 @@ export default function App(): ReactElement {
       return undefined
     }
     if (trigger === 'interval') {
+      if (!visible) return undefined
       if (!startedApps.current.has(current.id)) {
         startedApps.current.add(current.id)
         void window.api.wallpaperAdvance(current.id)
@@ -976,27 +1204,28 @@ export default function App(): ReactElement {
     }
     return undefined
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [current?.id, current?.wallpaperSettings?.trigger, current?.wallpaperSettings?.intervalMinutes])
+  }, [current?.id, current?.wallpaperSettings?.trigger, current?.wallpaperSettings?.intervalMinutes, visible])
 
   // Live background tuning from the settings sliders: update instantly, persist
   // debounced.
   const handleBgTuning = useCallback(
     (blur: number, dim: number): void => {
-      // Coalesce the live preview to one update per frame (dragging stays smooth).
-      if (!bgRaf.current) {
-        bgRaf.current = requestAnimationFrame(() => {
-          bgRaf.current = 0
-          setBgDisplay((prev) => (prev ? { ...prev, blur, dim } : prev))
-        })
-      }
-      if (bgSaveTimer.current) window.clearTimeout(bgSaveTimer.current)
       const id = current?.id
-      bgSaveTimer.current = window.setTimeout(() => {
-        if (id) void window.api.setBgTuning(id, { blur, dim })
-      }, 180)
+      if (!id) return
+      cancelAnimationFrame(bgRaf.current)
+      bgRaf.current = requestAnimationFrame(() => {
+        setBgDisplay((prev) => (prev ? { ...prev, blur, dim } : prev))
+      })
+      saveBgTuning(id, 180, () => {
+        void window.api.setBgTuning(id, { blur, dim }).catch((error) => {
+          const detail = dataErrorDetails(error)?.message ?? (error as Error).message
+          showToast(`壁纸模糊和压暗保存失败：${detail}`)
+        })
+      })
     },
-    [current?.id]
+    [current?.id, saveBgTuning]
   )
+  useLayoutEffect(() => () => cancelAnimationFrame(bgRaf.current), [currentId])
 
   // Apply the current app's glass. Live edits in the settings page call
   // `applyGlass` themselves (immediate, no App re-render); this keeps other
@@ -1045,8 +1274,17 @@ export default function App(): ReactElement {
     updateWallpaperRegions()
   }, [displaySrc, imageWidth, imageHeight, winSize])
 
-  useEffect(() => installWallpaperRegionUpdater(), [])
+  useEffect(() => visible ? installWallpaperRegionUpdater() : undefined, [visible])
 
+  const videoLayer = useRef<HTMLVideoElement>(null)
+  const videoSource = bgDisplay?.kind === 'video' ? bgDisplay.src : null
+  useEffect(() => {
+    const video = videoLayer.current
+    if (!video) return
+    if (visible) void video.play().catch(() => undefined)
+    else video.pause()
+    return () => video.pause()
+  }, [videoSource, visible])
   // Publish the current app's wallpaper blur / dim so popups and dialogs can
   // show the same wallpaper appearance.
   useEffect(() => {
@@ -1124,7 +1362,10 @@ export default function App(): ReactElement {
     }
   }, [view, currentId])
 
-  // Navigation and app changes share a single transition lifecycle.
+  // Navigation and app changes share a single transition lifecycle. Only
+  // `.stage` (inside this wrapper) animates: a transform on `.app-anim` makes
+  // its fixed rail/topbar and every backdrop-filter surface re-composite, which
+  // flashed the whole window grey at the start of each switch.
   useLayoutEffect(() => {
     const el = animRef.current
     if (!el) return
@@ -1158,10 +1399,10 @@ export default function App(): ReactElement {
   return (
     <SpecialThemeProvider assignments={launcherSettings.themeAreas}>
       <div className="app">
-      {/* The wallpaper lives outside `.app-anim` on purpose: it is a full-window
-          layer, and animating it (even only counter-animating it) forced the
-          compositor to re-composite the whole background on every frame of the
-          page-slide transition — much heavier with a large wallpaper. */}
+      {/* The wallpaper stays outside `.app-anim` and the sliding stage: a
+          full-window layer inside the page transition forced the compositor to
+          re-composite the background (and every glass surface above it) on
+          each frame — much heavier with a large wallpaper. */}
       {bgDisplay && bgDisplay.kind === 'image' && (
         // No `key`: the same <img> swaps sources, so Chromium keeps painting the
         // previous wallpaper until the new bitmap is ready (a remount painted a
@@ -1177,10 +1418,11 @@ export default function App(): ReactElement {
       {bgDisplay && bgDisplay.kind === 'video' && (
         <video
           key={bgDisplay.src}
+          ref={videoLayer}
           className="bg-layer"
           src={bgDisplay.src}
           crossOrigin="anonymous"
-          autoPlay
+          preload={visible ? 'auto' : 'none'}
           muted
           loop
           playsInline
@@ -1225,7 +1467,8 @@ export default function App(): ReactElement {
             }
           }}
         >
-          <div className={`games-collapser${!gamesHidden || peeking ? '' : ' collapsed'}`}>
+          <div className={`games-collapser${!gamesHidden || peeking ? '' : ' collapsed'}`}
+            ref={(el) => { if (el) el.inert = gamesHidden && !peeking }}>
             <GamesRow
               apps={apps}
               currentId={currentId}
@@ -1248,6 +1491,8 @@ export default function App(): ReactElement {
           </div>
           <button
             className="games-toggle"
+            aria-label={gamesHidden ? '固定展开游戏栏' : '收起游戏栏'}
+            aria-expanded={!gamesHidden || peeking}
             title={gamesHidden ? '固定展开游戏栏' : '收起游戏栏'}
             onClick={handleGamesToggle}
           >
@@ -1268,8 +1513,15 @@ export default function App(): ReactElement {
       )}
 
       <main className="stage">
-          {!appsLoaded ? null : !current ? (
-            <div className="welcome glass">
+          {view === 'settings' || view === 'linkedLaunch' ? renderSubView(current) :
+          startupError && (!appsLoaded || apps.length === 0) ? (
+            <div className="welcome glass" role="alert">
+              <h2>读取启动器数据失败</h2>
+              <p>错误信息：{startupError}</p>
+              <button className="btn" onClick={() => setStartupAttempt((attempt) => attempt + 1)}>重试</button>
+            </div>
+          ) : !appsLoaded ? <div className="welcome glass" role="status">正在读取应用…</div> : apps.length === 0 ? (
+            <div className="welcome welcome-discovery glass">
               <div className="welcome-logo">
                 <img
                   src={
@@ -1281,19 +1533,26 @@ export default function App(): ReactElement {
                 />
               </div>
               <h2>KevinLauncher</h2>
-              <p>还没有任何应用。添加任意 exe / bat / 脚本或其它启动器。</p>
+              <p>还没有添加应用。可添加程序、脚本或其它启动器，也可以先扫描本机游戏。</p>
               <button className="start-btn" onClick={() => setShowAdd(true)}>
                 添加应用
               </button>
+              <GameDiscovery onAdded={() => void refreshApps()} />
             </div>
+          ) : !current ? (
+            <div className="welcome glass" role="status">正在切换应用…</div>
           ) : view === 'home' ? (
             <HomeView
+              key={current.id}
               entry={current}
               addon={currentAddon}
-              running={!!currentRunning}
+              running={!!currentRunning && currentRunning.confirmed !== false}
+              starting={currentRunning?.confirmed === false}
               startedAt={currentRunning?.startedAt}
+              elapsedSec={currentRunning?.elapsedSec}
+              activeSince={currentRunning?.activeSince}
               totalSec={totals[current.id] ?? 0}
-              updateInfo={updateInfos[current.id]}
+              updateInfo={infoFor(current, updateInfos[current.id])}
               updateStatus={updateStatuses[current.id] ?? null}
               linkedLaunches={linkedLaunches}
               runningKeys={running.map((r) => r.appId)}
@@ -1337,11 +1596,17 @@ export default function App(): ReactElement {
       )}
 
       <Toaster />
-      <ThemeClickEffect />
+      <ThemeClickEffect active={visible} />
 
       <ConfirmHost />
 
-      <LaunchTransition trigger={launchFx} onDone={() => setLaunchFx(null)} />
+      {visible && launchFx && <Suspense fallback={null}>
+        <LaunchTransition
+          key={launchFx.key}
+          trigger={launchFx}
+          onDone={() => finishLaunchFx(launchFx.key)}
+        />
+      </Suspense>}
 
       {gachaNotice && (
         <div className="gacha-toast">
@@ -1350,15 +1615,16 @@ export default function App(): ReactElement {
         </div>
       )}
 
-      {appUpdateState.phase === 'error' && appUpdateState.critical && (
-        <div className="critical-blocker" role="alertdialog" aria-modal="true">
+      {criticalUpdateError && (
+        <div ref={criticalDialog} className="critical-blocker" role="alertdialog" aria-modal="true"
+          aria-label="重要更新未能完成" tabIndex={-1}>
           <div className="critical-card glass">
             <span className="critical-icon" aria-hidden="true">
               !
             </span>
             <h2>重要更新未能完成</h2>
-            <p>{appUpdateState.error || appUpdateState.message || '请检查网络后重试。'}</p>
-            <p className="critical-note">更新会在下次启动时继续重试，期间仍可正常启动游戏。</p>
+            <p>更新失败原因：{appUpdateState.error || appUpdateState.message || '暂时无法确定，请检查网络后重试。'}</p>
+            <p className="critical-note">更新会在下次启动时继续重试，期间仍可正常启动应用。</p>
             <div className="critical-actions">
               <button className="btn primary" onClick={handleUpdateStart}>
                 重试
@@ -1367,7 +1633,7 @@ export default function App(): ReactElement {
                 className="btn"
                 onClick={() =>
                   void window.api.exportLogs().then((path) => {
-                    if (path) showToast(`已导出日志到 ${path}`)
+                    if (path) showToast(`日志已导出到 ${path}`)
                   })
                 }
               >
@@ -1378,7 +1644,42 @@ export default function App(): ReactElement {
         </div>
       )}
 
-      {appUpdate && appUpdate.version !== dismissedUpdate && (
+      {featureIntro && (
+        <div className="modal-mask">
+          <div
+            ref={featureDialog}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="feature-intro-title"
+            tabIndex={-1}
+            className="modal update-modal wallpaper-region"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <span className="wp-region-layer" aria-hidden="true" />
+            <div className="modal-header">
+              <h2 id="feature-intro-title">{featureIntro.title}</h2>
+            </div>
+            <div className="modal-body">
+              <div className="update-notes">
+                {[featureIntro.body, ...featureIntro.features.map((line) => `· ${line}`)]
+                  .filter(Boolean)
+                  .join('\n')}
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button
+                className="btn primary"
+                data-dialog-first
+                onClick={() => setIntroQueue((queue) => queue.slice(1))}
+              >
+                {featureIntro.buttonLabel || '开始使用'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {appUpdate && !featureIntro && appUpdate.version !== dismissedUpdate && (
         <AppUpdateDialog
           info={appUpdate}
           onStart={handleUpdateStart}

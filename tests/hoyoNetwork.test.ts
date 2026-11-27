@@ -5,9 +5,12 @@ import * as zlib from 'node:zlib'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { md5Bytes } from '../src/main/services/hash'
 import {
-  downloadGameFile, downloadManifest, getHoYoMetadata, hoyoFetch, hoyoPortBudget, retryHoYo, withHoYoNetwork
+  downloadGameFile, downloadManifest, getHoYoMetadata, hoyoFetch, hoyoPortBudget, retryHoYo, streamGameBytes, withHoYoNetwork
 } from '../src/main/update/hoyoNetwork'
 import { startHoyoHttpFixture } from './fixtures/hoyoHttpFixture'
+import { getSophonBuild } from '../src/main/update/sophon'
+import { getPatchBuild } from '../src/main/update/sophonPatch'
+import { pruneHoYoCache } from '../src/main/update/hoyoCache'
 
 let directory: string
 let server: Awaited<ReturnType<typeof startHoyoHttpFixture>>
@@ -25,6 +28,34 @@ afterEach(async () => {
 })
 
 describe('Starward file transfer', () => {
+  it('times out a stalled body and cancels its reader', async () => {
+    const cancel = vi.fn()
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new Uint8Array([1, 2])) },
+      cancel
+    })))
+    const source = streamGameBytes(server.url, new AbortController().signal, () => {}, 40)
+    expect((await source.next()).value).toEqual(new Uint8Array([1, 2]))
+    await expect(source.next()).rejects.toThrow('长时间没有数据')
+    expect(cancel).toHaveBeenCalledOnce()
+  })
+
+  it('starts a new idle timer on every chunk during a steady slow transfer', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(new ReadableStream<Uint8Array>({
+      async start(controller) {
+        for (const byte of [1, 2, 3, 4, 5]) {
+          await new Promise(resolve => setTimeout(resolve, 35))
+          controller.enqueue(new Uint8Array([byte]))
+        }
+        controller.close()
+      }
+    })))
+    const result: number[] = []
+    for await (const bytes of streamGameBytes(server.url, new AbortController().signal, () => {}, 110)) {
+      result.push(...bytes)
+    }
+    expect(result).toEqual([1, 2, 3, 4, 5])
+  })
   it.each(['honor', 'ignore'] as const)('resumes a complete file when the CDN will %s Range', async range => {
     server.route('/game', { body: '0123456789', range })
     const path = join(directory, 'game.tmp')
@@ -106,6 +137,38 @@ it('identifies each request as the installed KevinLauncher build', async () => {
 
 describe('Starward cache', () => {
   const zstd = (zlib as typeof zlib & { zstdCompressSync?: (bytes: Buffer) => Buffer }).zstdCompressSync
+
+  it('evicts expired and oversized owned entries and preserves unrelated or offline metadata', async () => {
+    for (const [index, name] of ['expired.json', 'old.json', 'new.json', 'offline.json', 'keep.txt'].entries()) {
+      const file = join(directory, name)
+      await fs.writeFile(file, 'data')
+      await fs.utimes(file, new Date(1000 + index * 1000), new Date(1000 + index * 1000))
+    }
+    await pruneHoYoCache(directory, { stems: /\.json$/, age: 4500, bytes: 4,
+      preserved: new Set(['offline.json']) }, 6000)
+    expect((await fs.readdir(directory)).sort()).toEqual(['keep.txt', 'new.json', 'offline.json'])
+  })
+
+  it('keeps CHUNK and LDIFF builds separate for identical package IDs on different branches', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = new URL(String(input))
+      const branch = url.searchParams.get('branch')
+      return Response.json({ retcode: 0, data: {
+        build_id: 'build-' + branch, patch_id: 'patch-' + branch, tag: '1.2.3', manifests: []
+      } })
+    })
+    await withHoYoNetwork(directory, 'runner', async () => {
+      const a = { packageId: 'shared', branch: 'stable', password: '' }
+      const b = { ...a, branch: 'preview' }
+      for (let i = 0; i < 2; i++) {
+        expect((await getSophonBuild(a, '1.2.3')).buildId).toBe('build-stable')
+        expect((await getSophonBuild(b, '1.2.3')).buildId).toBe('build-preview')
+        expect((await getPatchBuild(a)).patchId).toBe('patch-stable')
+        expect((await getPatchBuild(b)).patchId).toBe('patch-preview')
+      }
+    })
+    expect(fetch).toHaveBeenCalledTimes(4)
+  })
 
   it.skipIf(!zstd)('reuses the uncompressed manifest after a reload and validates size and digest', async () => {
     const plain = Buffer.from('verified protobuf fixture')

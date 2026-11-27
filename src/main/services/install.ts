@@ -1,18 +1,27 @@
 import { app, shell } from 'electron'
-import { execFile, spawn } from 'child_process'
+import { execFile } from 'child_process'
 import { promises as fs } from 'fs'
 import { randomUUID } from 'crypto'
-import { dirname, join, relative, resolve, sep } from 'path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'path'
 import { promisify } from 'util'
 import { directorySize } from './updateDownload'
-import { removeAutoStartTask } from './autostart'
+import { AUTO_START_TASK } from './autostart'
 import { currentAppVersion } from './appVersion'
 import { loadJsonSafe, writeFileAtomic } from './atomicFile'
-import { psQuote, runPowerShell } from './powershell'
+import { sha256File } from './hash'
+import { psDataLiteral } from './powershell'
 import { log } from './logger'
 import { directoriesOverlap } from '@shared/paths'
 import { realDirectoryPath } from './dataDir'
 import { createSiblingWorkspace, isFileSystemRoot } from './directoryPath'
+import { availableSpace, requireDiskSpace, type SpaceNeed } from './diskSpace'
+import { canonicalExecutable, hasProcessIdentity, ProcessTree, type ProcInfo } from './processTree'
+import { requestLauncherClose } from './setupProcess'
+import {
+  assertTrialInstallDirectory, launcherDisplayName, launcherExecutableName as EXE,
+  launcherEntryPath, launcherProcessNames, launcherProductName, launcherRuntimeExecutableName as RUNTIME,
+  legacyTrialInstallDirectory, trialBuild, trialInstallDirectory, trialShortcuts
+} from './buildIdentity'
 
 /**
  * Install / uninstall of the launcher itself.
@@ -36,7 +45,6 @@ const UNINSTALL_KEY_MACHINE =
 const APP_KEY = 'HKCU\\Software\\KevinLauncher'
 /** Marker file inside the install directory (also used for stale-file cleanup). */
 const INFO_FILE = 'install.json'
-const EXE = 'KevinLauncher.exe'
 
 export interface InstallInfo {
   version: string
@@ -75,18 +83,19 @@ export interface ApplyProgress {
 }
 
 interface InstallLifecycle {
-  beforeStage: () => Promise<void>
+  beforeStage: (programSpace: readonly SpaceNeed[]) => Promise<void>
   afterCommit: (freshInstall: boolean) => Promise<void>
 }
 
 // ------------------------------------------------------------------- helpers
 
 export function defaultInstallDir(): string {
+  if (trialBuild) return trialInstallDirectory()
   const base = process.env.LOCALAPPDATA ?? app.getPath('home')
   return join(base, 'Programs', 'KevinLauncher')
 }
 
-const shortcuts = (): { startMenu: string; desktop: string } => ({
+const shortcuts = (): { startMenu: string; desktop: string } => trialBuild ? trialShortcuts() : ({
   startMenu: join(
     app.getPath('appData'),
     'Microsoft',
@@ -122,6 +131,7 @@ export async function listFiles(base: string): Promise<string[]> {
 }
 
 async function regQuery(key: string, value: string): Promise<string | null> {
+  if (trialBuild) return null
   try {
     const { stdout } = await exec('reg', ['query', key, '/v', value], { windowsHide: true })
     const match = new RegExp(`${value}\\s+REG_\\w+\\s+(.+)`, 'i').exec(stdout)
@@ -132,18 +142,11 @@ async function regQuery(key: string, value: string): Promise<string | null> {
 }
 
 async function regAdd(key: string, values: [string, string, string][]): Promise<void> {
+  if (trialBuild) return
   for (const [name, type, data] of values) {
     await exec('reg', ['add', key, '/v', name, '/t', type, '/d', data, '/f'], {
       windowsHide: true
     })
-  }
-}
-
-async function regDelete(key: string): Promise<void> {
-  try {
-    await exec('reg', ['delete', key, '/f'], { windowsHide: true })
-  } catch {
-    /* not present */
   }
 }
 
@@ -163,38 +166,43 @@ async function writeInstallInfo(dir: string, version: string, files: string[]): 
   await writeFileAtomic(join(dir, INFO_FILE), JSON.stringify(info, null, 2))
 }
 
-/** Paths of every running KevinLauncher.exe that is not this process. */
+/** Public entry paths of the other launcher processes. */
 export async function runningInstances(): Promise<string[]> {
   try {
-    const stdout = await runPowerShell(
-      'Get-Process KevinLauncher -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Path'
-    )
-    const self = process.execPath.toLowerCase()
-    return stdout
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter((line) => line.toLowerCase().endsWith('.exe'))
-      .filter((line) => line.toLowerCase() !== self)
+    const names = new Set([...launcherProcessNames].map(name => name.toLowerCase()))
+    const self = canonicalExecutable(launcherEntryPath())
+    const instances = new Map<string, string>()
+    for (const process of await ProcessTree.snapshot()) {
+      if (!process.executable || !names.has(process.name.toLowerCase())) continue
+      const entry = launcherEntryPath(process.executable)
+      if (canonicalExecutable(entry) === self ||
+          trialBuild && canonicalExecutable(dirname(entry)) !== canonicalExecutable(defaultInstallDir())) continue
+      instances.set(canonicalExecutable(entry), entry)
+    }
+    return [...instances.values()]
   } catch {
     return []
   }
 }
 
-/** PIDs running the given executable (empty when the path cannot be read). */
-async function pidsUsing(exe: string): Promise<number[]> {
-  const target = psQuote(exe)
-  try {
-    const stdout = await runPowerShell(
-      `Get-Process KevinLauncher -ErrorAction SilentlyContinue | ` +
-        `Where-Object { $_.Path -ieq ${target} } | Select-Object -ExpandProperty Id`
-    )
-    return stdout
-      .split(/\r?\n/)
-      .map((line) => Number.parseInt(line.trim(), 10))
-      .filter((pid) => Number.isInteger(pid) && pid > 0 && pid !== process.pid)
-  } catch {
-    return []
+/** Identify both generations while keeping the current uninstaller's own process tree alive. */
+export function processesUsingInstall(
+  snapshot: ProcInfo[], targetDir: string,
+  owner: { pid: number; ppid: number; execPath: string } = process
+): number[] {
+  const entry = canonicalExecutable(join(targetDir, EXE))
+  const runtime = canonicalExecutable(join(targetDir, RUNTIME))
+  const legacy = trialBuild ? canonicalExecutable(join(legacyTrialInstallDirectory(), EXE)) : undefined
+  const own = new Set(ProcessTree.descendants(snapshot, owner.pid))
+  if (entry !== runtime && canonicalExecutable(owner.execPath) === runtime) {
+    const parent = snapshot.find(item => item.pid === owner.ppid)
+    if (parent?.executable && canonicalExecutable(parent.executable) === entry) own.add(parent.pid)
   }
+  return snapshot.filter(item => {
+    if (own.has(item.pid) || !item.executable) return false
+    const path = canonicalExecutable(item.executable)
+    return path === entry || path === runtime || path === legacy
+  }).map(item => item.pid)
 }
 
 /** True when the executable can be opened for writing (i.e. not in use). */
@@ -212,28 +220,54 @@ async function isUnlocked(file: string): Promise<boolean> {
 /**
  * Closes the launcher **installed in `targetDir`** (best effort).
  *
- * Only processes running `<targetDir>\KevinLauncher.exe` are targeted — this is
- * what makes it safe: the installer itself runs from its own folder, so it can
- * never close itself (a previous "exclude my own path" filter did exactly that
- * when the paths did not compare equal).
+ * Match the public entry and the runtime by their exact installation paths.
+ * Existing single-executable releases remain valid targets.
  *
  * Returns true when the executable is no longer in use.
  */
 export async function closeRunningInstances(targetDir: string): Promise<boolean> {
+  assertTrialInstallDirectory(targetDir)
   const exe = join(targetDir, EXE)
-  const pids = await pidsUsing(exe)
+  const runtime = join(targetDir, RUNTIME)
+  const initial = await ProcessTree.snapshot().catch(error => {
+    log(`install: could not inspect running launcher processes (${String(error)})`)
+    return null
+  })
+  if (!initial) return false
+  const pids = processesUsingInstall(initial, targetDir)
+  const selected = new Set(pids)
+  const matching = initial.filter(hasProcessIdentity).filter(item => selected.has(item.pid))
+  const creationTimes = new Map(matching.map(item => [item.pid, item.createdAt]))
+  const paths = new Map(matching.map(item => [item.pid, canonicalExecutable(item.executable)]))
+  // Keep the browser under the entry, and skip Chromium processes under the same runtime image.
+  const browsers = matching.filter(item => paths.get(item.ppid) !== paths.get(item.pid))
   if (pids.length) {
-    log(`install: closing launcher instance(s) ${pids.join(', ')} at ${targetDir}`)
+    log(`install: requesting normal exit from ${pids.join(', ')} at ${targetDir}`)
     try {
-      await runPowerShell(`Stop-Process -Id ${pids.join(',')} -Force -ErrorAction SilentlyContinue`)
-    } catch {
-      /* reported through the return value */
+      const sent = await requestLauncherClose(browsers)
+      log(`install: launcher close posted to ${sent} window(s)`)
+    } catch (error) {
+      log(`install: launcher exit request failed (${String(error)})`)
     }
-    await new Promise((resolve) => setTimeout(resolve, 1500))
   }
-  // Opening the exe for writing is the reliable "still running?" probe — it does
-  // not depend on being able to read process paths.
-  return isUnlocked(exe)
+  const ownsExecutable = canonicalExecutable(launcherEntryPath()) === canonicalExecutable(exe)
+  const expires = Date.now() + 12_000
+  let remaining: number[] | null = pids
+  while (Date.now() < expires) {
+    remaining = await ProcessTree.snapshot(AbortSignal.timeout(Math.max(1, expires - Date.now())))
+      .then(snapshot => {
+        const active = new Set(processesUsingInstall(snapshot, targetDir))
+        for (const item of snapshot) {
+          // Keep waiting for a previously verified process when CIM temporarily omits its image path.
+          if (item.createdAt !== undefined && creationTimes.get(item.pid) === item.createdAt) active.add(item.pid)
+        }
+        return [...active]
+      }).catch(() => null)
+    if (remaining?.length === 0 && (ownsExecutable || await isUnlocked(exe) && await isUnlocked(runtime))) return true
+    await new Promise((resolve) => setTimeout(resolve, 450))
+  }
+  log(`install: exit wait expired; remaining launcher PIDs: ${remaining?.join(', ') || 'none observed'}`)
+  return false
 }
 
 function assertInstallTarget(dir: string): void {
@@ -248,11 +282,12 @@ function assertInstallTarget(dir: string): void {
 export function normalizeInstallDir(dir: string): string {
   const trimmed = dir.replace(/[\\/]+$/, '')
   if (!trimmed) return defaultInstallDir()
+  if (trialBuild) return trimmed
   // Drive root like "D:" / "D:\"
-  if (/^[a-zA-Z]:$/.test(trimmed)) return join(trimmed + '\\', 'KevinLauncher')
-  if (isFileSystemRoot(dir)) return join(dir, 'KevinLauncher')
-  if (/(^|[\\/])KevinLauncher$/i.test(trimmed)) return trimmed
-  return join(trimmed, 'KevinLauncher')
+  if (/^[a-zA-Z]:$/.test(trimmed)) return join(trimmed + '\\', launcherProductName)
+  if (isFileSystemRoot(dir)) return join(dir, launcherProductName)
+  if (trimmed.split(/[\\/]/).at(-1)?.toLowerCase() === launcherProductName.toLowerCase()) return trimmed
+  return join(trimmed, launcherProductName)
 }
 
 /**
@@ -283,15 +318,32 @@ export async function syncInstalledVersion(installDir: string, version: string):
       const updated: InstallInfo = { ...info, version }
       await writeFileAtomic(join(installDir, INFO_FILE), JSON.stringify(updated, null, 2))
     }
-    const registered = await regQuery(UNINSTALL_KEY, 'DisplayVersion')
+    const location = await regQuery(UNINSTALL_KEY, 'InstallLocation')
+    const registered = location && location.toLowerCase() === installDir.toLowerCase()
+      ? await regQuery(UNINSTALL_KEY, 'DisplayVersion') : null
     if (registered && registered !== version) {
       await regAdd(UNINSTALL_KEY, [['DisplayVersion', 'REG_SZ', version]])
-      await regAdd(APP_KEY, [['Version', 'REG_SZ', version]])
+      const appLocation = await regQuery(APP_KEY, 'InstallLocation')
+      if (appLocation?.toLowerCase() === installDir.toLowerCase()) {
+        await regAdd(APP_KEY, [['Version', 'REG_SZ', version]])
+      }
       log(`install: version entry updated to ${version}`)
     }
   } catch (error) {
     log(`install: could not sync the version entry (${(error as Error).message})`)
   }
+}
+
+/** Record the verified new version before it can become the running app. */
+export async function recordVersionedInstallation(
+  installDir: string, version: string, versionedDirectory: string
+): Promise<void> {
+  const info = await readInstallInfo(installDir)
+  if (!info) return
+  const paths = await listFiles(versionedDirectory)
+  const files = new Set(info.files)
+  for (const file of paths) files.add(`resources/app-${version}/${file}`)
+  await writeFileAtomic(join(installDir, INFO_FILE), JSON.stringify({ ...info, files: [...files] }, null, 2))
 }
 
 /** Finds an existing installation (registry first, then the default path). */
@@ -333,6 +385,7 @@ export async function detectInstallation(): Promise<DetectedInstall | null> {
 
 /** Inspects a candidate install directory (used by the installer UI). */
 export async function inspectTarget(dir: string): Promise<InstallTarget> {
+  assertTrialInstallDirectory(dir)
   const exists = await pathExists(dir)
   const isInstalled = exists && (await pathExists(join(dir, EXE)))
   const info = isInstalled ? await readInstallInfo(dir) : null
@@ -353,15 +406,8 @@ export async function installSize(): Promise<number> {
 }
 
 /** Free bytes on the volume that holds `dir`. */
-export async function freeSpace(dir: string): Promise<number> {
-  const letter = /^([a-zA-Z]):/.exec(dir)?.[1]
-  if (!letter) return 0
-  try {
-    const stdout = await runPowerShell(`(Get-PSDrive -Name ${letter}).Free`)
-    return Number(stdout.trim()) || 0
-  } catch {
-    return 0
-  }
+export async function freeSpace(dir: string): Promise<number | null> {
+  return availableSpace(dir)
 }
 
 // ------------------------------------------------------------------- install
@@ -404,6 +450,7 @@ export function staleFiles(previous: string[], current: string[]): string[] {
 const INSTALL_STAGING_PREFIX = '.kevin-install-'
 const RETIRED_PREFIX = '.kevin-install-retired-'
 const INSTALL_JOURNAL = 'transaction.json'
+const POST_COMMIT = 'post-commit.json'
 
 interface InstallJournal {
   target: string
@@ -518,6 +565,27 @@ async function findInterruptedInstall(target: string): Promise<string | undefine
   return undefined
 }
 
+async function findPostCommitRepair(
+  target: string, version: string
+): Promise<{ transaction: string; freshInstall: boolean } | undefined> {
+  const parent = dirname(target)
+  const entries = await fs.readdir(parent, { withFileTypes: true })
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.startsWith(RETIRED_PREFIX)) continue
+    const transaction = join(parent, entry.name)
+    const journal = await readInstallJournal(transaction, target)
+    if (!journal || retiredPath(journal) !== transaction) continue
+    const result = await loadJsonSafe<{ version: string; freshInstall: boolean }>(
+      join(transaction, POST_COMMIT), 1
+    )
+    if (result.status === 'ok' && result.value?.version === version &&
+        typeof result.value.freshInstall === 'boolean') {
+      return { transaction, freshInstall: result.value.freshInstall }
+    }
+  }
+  return undefined
+}
+
 /** Copy only unmanaged entries, preserving other files placed in this directory. */
 async function preserveUnmanaged(
   target: string,
@@ -567,6 +635,7 @@ export async function applyPayload(
   lifecycle?: InstallLifecycle
 ): Promise<{ files: string[]; bytes: number }> {
   const requested = resolve(targetDir)
+  assertTrialInstallDirectory(requested)
   assertInstallTarget(requested)
   await installationDirectory(requested)
   const target = await realDirectoryPath(requested)
@@ -580,7 +649,7 @@ export async function applyPayload(
     const files = (await listFiles(source)).filter(file => file.toLowerCase() !== INFO_FILE)
     const pointer = 'resources/app-version.txt'
     const required = [
-      EXE, pointer, 'resources/app/out/main/index.js', 'resources/app/loader.js',
+      EXE, RUNTIME, pointer, 'resources/app/out/main/index.js', 'resources/app/loader.js',
       `resources/app-${version}/out/main/index.js`
     ]
     if (required.some(file => !files.includes(file)) ||
@@ -596,10 +665,29 @@ export async function applyPayload(
     }
 
     const existing = await installationDirectory(target)
+    if (existing && lifecycle && await installedVersion(target) === version) {
+      const repair = await findPostCommitRepair(target, version)
+      if (repair) {
+        await lifecycle.beforeStage([])
+        await lifecycle.afterCommit(repair.freshInstall)
+        await fs.rm(repair.transaction, { recursive: true, force: true })
+        return { files, bytes: total }
+      }
+    }
     const priorTree = existing ? target : await findInterruptedInstall(target)
     const freshInstall = !priorTree || !(await installedVersion(priorTree))
-    await lifecycle?.beforeStage()
     const previous = priorTree ? await readInstallInfo(priorTree) : null
+    let unmanagedSize = 0
+    if (priorTree) {
+      const managed = new Set([...files, ...(previous?.files ?? []), INFO_FILE].map(file => file.toLowerCase()))
+      for (const file of await listFiles(priorTree)) {
+        if (!managed.has(file.toLowerCase())) unmanagedSize += (await fs.lstat(join(priorTree, file))).size
+      }
+    }
+    const space = [{ path: target, bytes: total + unmanagedSize }]
+    await requireDiskSpace(space)
+    await lifecycle?.beforeStage(space)
+    await requireDiskSpace(space)
     const staged = join(lease.path, 'next')
     const rollback = join(lease.path, 'previous')
     if (priorTree) await preserveUnmanaged(priorTree, staged, previous?.files ?? [], files)
@@ -642,7 +730,16 @@ export async function applyPayload(
     if (priorTree && !existing) {
       log(`install: recovered ${target} using the saved tree at ${priorTree}`)
     }
-    await lifecycle?.afterCommit(freshInstall)
+    try {
+      if (lifecycle) {
+        await writeFileAtomic(join(lease.path, POST_COMMIT), JSON.stringify({ version, freshInstall }))
+        await lifecycle.afterCommit(freshInstall)
+      }
+    } catch (error) {
+      preserveRollback = true
+      throw new Error('程序文件已安装，系统设置尚未完成。请重新运行同一安装器补完。旧版恢复目录：' +
+        retiredPath(lease.journal), { cause: error })
+    }
     return { files, bytes: total }
   } finally {
     await releaseInstall(lease, preserveRollback)
@@ -665,6 +762,7 @@ async function renameWithRetry(from: string, to: string): Promise<void> {
 
 /** Creates the Start Menu and desktop shortcuts (no prompt, as required). */
 export function writeShortcuts(installDir: string): { startMenu: string; desktop: string } {
+  assertTrialInstallDirectory(installDir)
   const target = join(installDir, EXE)
   const paths = shortcuts()
   const options = {
@@ -672,10 +770,12 @@ export function writeShortcuts(installDir: string): { startMenu: string; desktop
     cwd: installDir,
     icon: target,
     iconIndex: 0,
-    description: 'KevinLauncher'
+    description: launcherDisplayName
   }
-  shell.writeShortcutLink(paths.startMenu, 'create', options)
-  shell.writeShortcutLink(paths.desktop, 'create', options)
+  if (!shell.writeShortcutLink(paths.startMenu, 'create', options) ||
+      !shell.writeShortcutLink(paths.desktop, 'create', options)) {
+    throw new Error('Windows 快捷方式创建失败')
+  }
   return paths
 }
 
@@ -684,6 +784,7 @@ export function writeShortcuts(installDir: string): { startMenu: string; desktop
  * and can remove it (the UninstallString reopens this exe with `--uninstall`).
  */
 export async function writeUninstallEntry(installDir: string, version: string): Promise<void> {
+  if (trialBuild) return
   const exe = join(installDir, EXE)
   const sizeKb = String(Math.max(1, Math.round((await directorySize(installDir)) / 1024)))
   await regAdd(UNINSTALL_KEY, [
@@ -708,55 +809,90 @@ export async function writeUninstallEntry(installDir: string, version: string): 
 
 // ----------------------------------------------------------------- uninstall
 
-/**
- * Removes shortcuts, registry entries and the scheduled task, then deletes the
- * installation. Files of the running process cannot be deleted, so the caller
- * finishes with a small helper after exit (see `finishUninstall`).
- */
-export async function removeInstallation(options: {
-  installDir: string
-  keepUserData: boolean
-  onProgress?: (step: string) => void
-}): Promise<void> {
-  const { installDir, keepUserData, onProgress } = options
-  const paths = shortcuts()
-
-  onProgress?.('正在删除快捷方式…')
-  await fs.rm(paths.startMenu, { force: true }).catch(() => {})
-  await fs.rm(paths.desktop, { force: true }).catch(() => {})
-
-  onProgress?.('正在移除注册表项…')
-  await regDelete(UNINSTALL_KEY)
-  await regDelete(UNINSTALL_KEY_MACHINE)
-  await regDelete(APP_KEY)
-  await removeAutoStartTask()
-
-  if (!keepUserData) {
-    onProgress?.('正在删除用户数据…')
-    await fs.rm(app.getPath('userData'), { recursive: true, force: true }).catch(() => {})
+/** Resolve the shortcut while the target still exists, then bind it to its original contents. */
+export async function uninstallShortcutCleanup(executable: string, links: readonly string[]): Promise<string> {
+  const target = canonicalExecutable(executable)
+  const confirmed: { path: string; sha256: string }[] = []
+  for (const path of links) {
+    try {
+      const stat = await fs.lstat(path)
+      if (!stat.isFile() || stat.isSymbolicLink() || canonicalExecutable(await fs.realpath(path)) !== canonicalExecutable(path)) {
+        continue
+      }
+      const sha256 = await sha256File(path)
+      const linked = shell.readShortcutLink(path).target
+      if (!isAbsolute(linked)) continue
+      const canonical = canonicalExecutable(linked)
+      if (canonical !== target && canonicalExecutable(await fs.realpath(linked)) !== target) continue
+      if (await sha256File(path) === sha256) confirmed.push({ path, sha256 })
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') log('uninstall: unable to verify a launcher shortcut')
+    }
   }
-
-  onProgress?.('正在删除程序文件…')
-  await fs.rm(installDir, { recursive: true, force: true }).catch(() => {})
+  return `
+  foreach ($link in (ConvertFrom-Json -InputObject ${psDataLiteral(JSON.stringify(confirmed))})) {
+    try {
+      if (!(Test-Path -LiteralPath $link.path -PathType Leaf -ErrorAction Stop)) { continue }
+      Assert-PlainPath $link.path
+      $hash = (Get-FileHash -LiteralPath $link.path -Algorithm SHA256 -ErrorAction Stop).Hash
+    } catch { continue }
+    if ($hash -ieq $link.sha256) { Remove-Item -LiteralPath $link.path -ErrorAction Stop }
+  }
+`
 }
 
-/** Deletes whatever is left of the installation after this process exits. */
-export function finishUninstall(installDir: string): void {
-  const script = join(app.getPath('temp'), `kevin-uninstall-${Date.now()}.ps1`)
-  const quoted = `'${installDir.replace(/'/g, "''")}'`
-  const body = `
-$ErrorActionPreference = 'SilentlyContinue'
-$pid0 = ${process.pid}
-while (Get-Process -Id $pid0 -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 300 }
-Start-Sleep -Milliseconds 400
-Remove-Item -LiteralPath ${quoted} -Recurse -Force
-Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force
+/** Deferred cleanup inspects the current target of each system integration. */
+export async function uninstallIntegrationScript(installDir: string, removedDataDir?: string): Promise<string> {
+  assertTrialInstallDirectory(installDir)
+  const registryPath = (key: string) => psDataLiteral(key.replace(/^(HKCU|HKLM)\\/, '$1:\\'))
+  const executable = join(installDir, EXE)
+  const cleanup = await uninstallShortcutCleanup(executable, Object.values(shortcuts()))
+  const shortcutsScript = `
+$exe = ${psDataLiteral(executable)}
+if (!(Test-Path -LiteralPath $exe -ErrorAction Stop)) {
+  ${cleanup}
 `.trim()
-  void fs.writeFile(script, body, 'utf-8').then(() => {
-    spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script], {
-      detached: true,
-      stdio: 'ignore',
-      windowsHide: true
-    }).unref()
-  })
+  if (trialBuild) return shortcutsScript + '\n}'
+  return shortcutsScript + `
+  $tasks = Get-ScheduledTask -TaskPath '\\' -ErrorAction Stop
+  foreach ($task in $tasks) {
+    if ($task.TaskName -ieq ${psDataLiteral(AUTO_START_TASK)} -and
+        @($task.Actions | Where-Object { $_.Execute -and $_.Execute.Trim('"') -ieq $exe }).Count -gt 0) {
+      Unregister-ScheduledTask -InputObject $task -Confirm:$false -ErrorAction Stop
+    }
+  }
+  $runKey = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run'
+  if (Test-Path -LiteralPath $runKey -ErrorAction Stop) {
+    $run = Get-Item -LiteralPath $runKey -ErrorAction Stop
+    $quoted = '"' + $exe + '"'
+    foreach ($name in $run.GetValueNames()) {
+      $value = $run.GetValue($name)
+      if ($value -is [string] -and ($value -ieq $exe -or $value -ieq $quoted -or
+          $value.StartsWith($quoted + ' ', [StringComparison]::OrdinalIgnoreCase) -or
+          $value.StartsWith($exe + ' ', [StringComparison]::OrdinalIgnoreCase))) {
+        Remove-ItemProperty -LiteralPath $runKey -Name $name -ErrorAction Stop
+      }
+    }
+  }
+  foreach ($key in @(${[UNINSTALL_KEY, UNINSTALL_KEY_MACHINE].map(registryPath).join(',')})) {
+    if (!(Test-Path -LiteralPath $key -ErrorAction Stop)) { continue }
+    $location = (Get-ItemProperty -LiteralPath $key -ErrorAction Stop).InstallLocation
+    if ($location -ieq $root) { Remove-Item -LiteralPath $key -Recurse -Force -ErrorAction Stop }
+  }
+  $appKey = ${registryPath(APP_KEY)}
+  if (Test-Path -LiteralPath $appKey -ErrorAction Stop) {
+    $properties = Get-ItemProperty -LiteralPath $appKey -ErrorAction Stop
+    if ($properties.InstallLocation -ieq $root) {
+      foreach ($name in @('Version', 'InstallLocation')) {
+        if ($properties.PSObject.Properties[$name]) {
+          Remove-ItemProperty -LiteralPath $appKey -Name $name -ErrorAction Stop
+        }
+      }
+    }
+    ${removedDataDir ? `if ($properties.DataDir -ieq ${psDataLiteral(removedDataDir)}) {
+      Remove-ItemProperty -LiteralPath $appKey -Name 'DataDir' -ErrorAction Stop
+    }` : ''}
+  }
+}
+`
 }

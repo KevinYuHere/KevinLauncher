@@ -1,4 +1,4 @@
-import { useRef, type PointerEvent as ReactPointerEvent, type RefObject } from 'react'
+import { useEffect, useRef, type PointerEvent as ReactPointerEvent, type RefObject } from 'react'
 import { addTask, makeSpring, stepSpring } from './spring'
 
 /**
@@ -40,6 +40,8 @@ export function useJellyDrag(
   options: JellyDragOptions
 ): { onPointerDown: (event: ReactPointerEvent<HTMLElement>) => void } {
   const opts = useRef(options)
+  const cancelGesture = useRef<(() => void) | undefined>()
+  const stopTask = useRef<(() => void) | undefined>()
   opts.current = options
   const st = useRef({
     drag: null as null | {
@@ -67,7 +69,7 @@ export function useJellyDrag(
     const s = st.current
     if (s.task) return
     s.task = true
-    addTask((dt) => {
+    stopTask.current = addTask((dt) => {
       if (s.halt) {
         // Frozen on release (a FLIP animation owns it now) — stop without clearing.
         s.task = false
@@ -114,8 +116,15 @@ export function useJellyDrag(
     })
   }
 
+  useEffect(() => () => {
+    cancelGesture.current?.()
+    stopTask.current?.()
+    st.current.task = false
+  }, [])
+
   const onPointerDown = (event: ReactPointerEvent<HTMLElement>): void => {
-    if (event.button !== 0) return
+    if (event.button !== 0 || cancelGesture.current) return
+    const pointerId = event.pointerId
     const s = st.current
     s.halt = false
     const bulge = opts.current.popScale ?? 1.1
@@ -125,7 +134,9 @@ export function useJellyDrag(
     s.pop.target = bulge
     ensureTask()
     if (!opts.current.enabled) {
-      const release = (): void => {
+      const release = (e?: PointerEvent): void => {
+        if (e && e.pointerId !== pointerId) return
+        cancelGesture.current = undefined
         window.removeEventListener('pointerup', release)
         window.removeEventListener('pointercancel', release)
         // Guarantee a visible pop even for a very short tap.
@@ -135,6 +146,7 @@ export function useJellyDrag(
       }
       window.addEventListener('pointerup', release)
       window.addEventListener('pointercancel', release)
+      cancelGesture.current = release
       return
     }
     event.preventDefault()
@@ -176,6 +188,7 @@ export function useJellyDrag(
     s.deform.target = 0
 
     const move = (e: PointerEvent): void => {
+      if (e.pointerId !== pointerId) return
       const d = s.drag
       if (!d) return
       // Add the container's scroll delta so the element follows the pointer even
@@ -224,15 +237,17 @@ export function useJellyDrag(
       }
       if (d.active) opts.current.onDrag?.(dx, dy, e.clientX, e.clientY)
     }
-    const up = (): void => {
+    const finish = (commit: boolean): void => {
+      cancelGesture.current = undefined
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', up)
-      window.removeEventListener('pointercancel', up)
+      window.removeEventListener('pointercancel', cancel)
+      window.removeEventListener('blur', blur)
       const d = s.drag
       s.drag = null
       // Only a real drag snaps (so a FLIP can take over); a tap must keep the
       // element so its pop can animate out.
-      if (opts.current.snapOnRelease && d?.active) {
+      if (commit && opts.current.snapOnRelease && d?.active) {
         // Report the drop FIRST (the consumer captures the current, dragged rects
         // for the FLIP), then hand the element straight back so it can never get
         // stuck mid-animation.
@@ -256,13 +271,18 @@ export function useJellyDrag(
       s.pop.target = 1
       s.tx.target = 0
       s.ty.target = 0
-      if (d?.active) opts.current.onDrop?.(d.dx, d.dy, d.lx, d.ly)
+      if (commit && d?.active) opts.current.onDrop?.(d.dx, d.dy, d.lx, d.ly)
       else opts.current.onCancel?.()
       ensureTask()
     }
+    const up = (e: PointerEvent): void => { if (e.pointerId === pointerId) finish(true) }
+    const cancel = (e: PointerEvent): void => { if (e.pointerId === pointerId) finish(false) }
+    const blur = (): void => finish(false)
+    cancelGesture.current = blur
     window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', up)
-    window.addEventListener('pointercancel', up)
+    window.addEventListener('pointercancel', cancel)
+    window.addEventListener('blur', blur)
   }
 
   return { onPointerDown }

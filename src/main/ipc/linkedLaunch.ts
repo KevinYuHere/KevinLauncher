@@ -1,7 +1,7 @@
 import { handleIpc } from './access'
 import { randomUUID } from 'crypto'
 import type { LinkedLaunch } from '@shared/types'
-import { AppStore } from '../services/appStore'
+import { AppStore, requireApp } from '../services/appStore'
 import { log } from '../services/logger'
 import { notifyAppsChanged } from './context'
 
@@ -12,7 +12,6 @@ export function registerLinkedLaunchIpc(): void {
   handleIpc(
     'linked:add',
     async (_e, input: Omit<LinkedLaunch, 'id'> & { id?: string; showInGamesRow?: boolean }) => {
-      const list = await AppStore.linkedLaunches()
       const entry: LinkedLaunch = {
         id: randomUUID(),
         name: input.name?.trim() || '未命名关联启动',
@@ -22,8 +21,7 @@ export function registerLinkedLaunchIpc(): void {
         runAsAdmin: input.runAsAdmin ?? true,
         showInGamesRow: input.showInGamesRow ?? true
       }
-      list.push(entry)
-      await AppStore.setLinkedLaunches(list)
+      await AppStore.mutate((config) => { (config.linkedLaunches ??= []).push(entry) })
       log(`linked: added "${entry.name}" (${entry.targetPath})`)
       notifyAppsChanged()
       return entry
@@ -31,35 +29,31 @@ export function registerLinkedLaunchIpc(): void {
   )
 
   handleIpc('linked:update', async (_e, input: LinkedLaunch) => {
-    const list = await AppStore.linkedLaunches()
-    const index = list.findIndex((item) => item.id === input.id)
-    if (index < 0) throw new Error('关联启动不存在')
-    list[index] = {
-      ...list[index],
-      name: input.name?.trim() || list[index].name,
-      targetPath: input.targetPath ?? '',
-      arguments: input.arguments ?? '',
-      workingDirectory: input.workingDirectory ?? '',
-      runAsAdmin: !!input.runAsAdmin,
-      showInGamesRow: input.showInGamesRow ?? true
-    }
-    await AppStore.setLinkedLaunches(list)
+    const entry = await AppStore.mutate((config) => {
+      const current = config.linkedLaunches?.find((item) => item.id === input.id)
+      if (!current) throw new Error('关联启动不存在，可能已被删除')
+      Object.assign(current, {
+        name: input.name?.trim() || current.name,
+        targetPath: input.targetPath ?? '',
+        arguments: input.arguments ?? '',
+        workingDirectory: input.workingDirectory ?? '',
+        runAsAdmin: input.runAsAdmin ?? true,
+        showInGamesRow: input.showInGamesRow ?? true
+      })
+      return current
+    })
     notifyAppsChanged()
-    return list[index]
+    return entry
   })
 
   handleIpc('linked:remove', async (_e, id: string) => {
-    const list = await AppStore.linkedLaunches()
-    await AppStore.setLinkedLaunches(list.filter((item) => item.id !== id))
-    // Drop the association from every app and fix the defaults it may hold.
-    const store = await AppStore.load()
-    for (const app of store.apps) {
-      app.linkedLaunchIds = (app.linkedLaunchIds ?? []).filter((x) => x !== id)
-      if (app.defaultLinkedLaunchId === id) {
-        app.defaultLinkedLaunchId = app.linkedLaunchIds[0] ?? null
+    await AppStore.mutate((store) => {
+      store.linkedLaunches = (store.linkedLaunches ?? []).filter((item) => item.id !== id)
+      for (const app of store.apps) {
+        app.linkedLaunchIds = app.linkedLaunchIds.filter((key) => key !== id)
+        if (app.defaultLinkedLaunchId === id) app.defaultLinkedLaunchId = app.linkedLaunchIds[0] ?? null
       }
-    }
-    await AppStore.save()
+    })
     notifyAppsChanged()
   })
 
@@ -72,17 +66,16 @@ export function registerLinkedLaunchIpc(): void {
   handleIpc(
     'linked:setApp',
     async (_e, appId: string, ids: string[], defaultId: string | null) => {
-      const store = await AppStore.load()
-      const app = store.apps.find((a) => a.id === appId)
-      if (!app) throw new Error('应用不存在')
-      const known = new Set((await AppStore.linkedLaunches()).map((item) => item.id))
-      const ordered: string[] = []
-      for (const id of ids) if (known.has(id) && !ordered.includes(id)) ordered.push(id)
-      app.linkedLaunchIds = ordered
-      app.defaultLinkedLaunchId =
-        defaultId && ordered.includes(defaultId) ? defaultId : (ordered[0] ?? null)
-      app.updatedAt = new Date().toISOString()
-      await AppStore.save()
+      const app = await AppStore.mutate((store) => {
+        const entry = requireApp(store, appId)
+        const known = new Set((store.linkedLaunches ?? []).map((item) => item.id))
+        const ordered = [...new Set(ids.filter((id) => known.has(id)))]
+        entry.linkedLaunchIds = ordered
+        entry.defaultLinkedLaunchId =
+          defaultId && ordered.includes(defaultId) ? defaultId : (ordered[0] ?? null)
+        entry.updatedAt = new Date().toISOString()
+        return entry
+      })
       notifyAppsChanged()
       return app
     }

@@ -1,6 +1,8 @@
 import {
+  Fragment,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type CSSProperties,
@@ -11,26 +13,33 @@ import type {
   AddonDescriptor,
   AfterLaunchAction,
   AppEntry,
+  AppSettingsPatch,
+  CacheKind,
   AutoStartMode,
   CloseAction,
-  UpdateChannel,
   GlassAppearance,
   GlassMaterial,
   GlassPatch,
   LauncherSettings,
+  LauncherBehaviorPatch,
+  LauncherFontScript,
   SpecialThemeId,
   UsageReport
 } from '@shared/types'
 import { DEFAULT_GLASS_APPEARANCE, MATERIAL_DEFAULTS } from '@shared/types'
 import { currentWallpaper, isVideoFile } from '@shared/appEntry'
+import { dataErrorDetails } from '@shared/dataErrors'
 import { formatBytes } from '../format'
+import { trialBuild } from '@shared/buildIdentity'
 import { brandUrl, defaultIconUrl, iconUrl } from '../media'
 import { applyGlass } from '../theme'
+import { useDebouncedEntitySave } from '../useDebouncedEntitySave'
+import { showToast } from './toast'
+import AppearancePresetsSection from './AppearancePresetsSection'
 import ColorPicker from './ColorPicker'
 import Collapse from './Collapse'
 import IconPicker from './IconPicker'
 import InlineEdit from './InlineEdit'
-import GlassPopup from './GlassPopup'
 import Icon from './Icon'
 import Segmented from './Segmented'
 import Select from './Select'
@@ -43,11 +52,11 @@ const REPO_URL = 'https://github.com/KevinYuHere/KevinLauncher'
 
 /** Third-party libraries this launcher actually uses at runtime / build time. */
 const USED_LIBRARIES: { name: string; note: string }[] = [
-  { name: 'Electron 44', note: 'MIT · 应用运行时（主进程 / 渲染进程 / 预加载）' },
-  { name: 'React 18 + ReactDOM', note: 'MIT · 界面渲染' },
-  { name: 'fzstd', note: 'MIT · zstd 解压（Sophon 清单与资源块）' },
-  { name: '@electron-toolkit/preload、@electron-toolkit/utils', note: 'MIT · 预加载桥与工具函数' },
-  { name: 'HDiffPatch（hpatchz.exe）', note: 'MIT · 差分补丁应用（增量更新）' },
+  { name: 'Electron 44', note: 'MIT · 应用运行环境（窗口、界面与安全桥接）' },
+  { name: 'React 18 + ReactDOM', note: 'MIT · 界面构建与渲染' },
+  { name: 'fzstd', note: 'MIT · 解压游戏更新数据（zstd）' },
+  { name: '@electron-toolkit/preload、@electron-toolkit/utils', note: 'MIT · 窗口与后台通信工具' },
+  { name: 'HDiffPatch（hpatchz.exe）', note: 'MIT · 应用游戏更新补丁（增量更新）' },
   { name: 'electron-vite、Vite、electron-builder', note: 'MIT · 开发、构建与打包' },
   { name: 'TypeScript、Vitest', note: 'Apache-2.0 / MIT · 类型检查与测试' }
 ]
@@ -61,7 +70,7 @@ const REFERENCED_PROJECTS: { name: string; note: string; url: string }[] = [
   },
   {
     name: 'HDiffPatch',
-    note: 'MIT · 增量更新思路与 hpatchz 可执行文件来源',
+    note: 'MIT · 增量更新思路与补丁工具来源',
     url: 'https://github.com/sisong/HDiffPatch'
   }
 ]
@@ -79,21 +88,21 @@ const GLASS_MATERIAL_LABEL: Record<GlassMaterial, string> = {
 const GLASS_MATERIAL_DESC: Record<GlassMaterial, string> = {
   blur: '毛玻璃：经典磨砂质感',
   mica: '云母：更致密的磨砂质感',
-  liquid: '液态玻璃：外轮廓膨胀折射',
-  shine: '高光：液态玻璃 + 随环境着色的边缘高光',
-  starfrost: '星霜：碎晶三角 + 星屑微光 + 紫青虹彩',
-  astral: '星轨：分子式纹理 + 金色描边 + 深紫底'
+  liquid: '液态玻璃：边缘像透镜一样放大背景',
+  shine: '高光：液态玻璃边缘随周围颜色泛出高光',
+  starfrost: '星霜：碎晶三角、星屑微光与紫青虹彩',
+  astral: '星轨：分子纹理、金色描边与深紫底色'
 }
 
 // Settings page with two tabs that slide on the card itself (so the frosted
 // glass behind stays put): per-app appearance/background, and launcher-wide
 // icon/font/behavior/backup. All values are controlled by App.tsx.
 interface SettingsViewProps {
-  entry: AppEntry
+  entry: AppEntry | null
   addons: AddonDescriptor[]
   onBack: () => void
   /** Merge a partial change into the app (name / addon / dirs / monitors …). */
-  onPatchEntry: (patch: Partial<AppEntry>) => void
+  onPatchEntry: (patch: AppSettingsPatch) => void
   onPickIcon: () => void
   onResetIcon: () => void
   onRemove: () => void
@@ -104,16 +113,8 @@ interface SettingsViewProps {
   version: string
   onPickLauncherIcon: () => void
   onClearLauncherIcon: () => void
-  onSetFont: (family: string | null) => void
-  onSetBehavior: (patch: {
-    closeAction?: CloseAction
-    afterLaunch?: AfterLaunchAction
-    autoStart?: AutoStartMode
-    sidebarMaterial?: boolean
-    updateChannel?: UpdateChannel
-    downloadLimitMbps?: number
-    themeAreas?: LauncherSettings['themeAreas']
-  }) => void
+  onSetLauncherFont: (script: LauncherFontScript, family: string | null) => void
+  onSetBehavior: (patch: LauncherBehaviorPatch) => void
   onExportData: () => void
   onImportData: () => void
   /** Current data directory (config, playtime, gacha, icons …). */
@@ -121,7 +122,8 @@ interface SettingsViewProps {
   onChangeDataDir: () => void
   /** Disk usage of the cleanable caches. */
   usage: UsageReport | null
-  onCleanUsage: (kinds: ('staging' | 'thumbs' | 'logs')[]) => void
+  cleaningUsage: boolean
+  onCleanUsage: (kinds: CacheKind[]) => void
   /** Manually check GitHub Releases for a newer launcher version. */
   onCheckUpdate: () => void
   checkingUpdate: boolean
@@ -248,21 +250,25 @@ export default function SettingsView({
   version,
   onPickLauncherIcon,
   onClearLauncherIcon,
-  onSetFont,
+  onSetLauncherFont,
   onSetBehavior,
   onExportData,
   onImportData,
   dataDir,
   onChangeDataDir,
   usage,
+  cleaningUsage,
   onCleanUsage,
   onCheckUpdate,
   checkingUpdate,
   updateCheckText,
   onExportLogs
 }: SettingsViewProps): ReactElement {
-  const [tab, setTab] = useState<'game' | 'launcher'>('game')
+  const [selectedTab, setTab] = useState<'game' | 'launcher'>(entry ? 'game' : 'launcher')
+  const tab = entry ? selectedTab : 'launcher'
+  const entryId = entry?.id
   const [dir, setDir] = useState(1)
+  const [fontTarget, setFontTarget] = useState<LauncherFontScript | null>(null)
   const [showColor, setShowColor] = useState(false)
   const [glassOpen, setGlassOpen] = useState(false)
   const [advancedOpen, setAdvancedOpen] = useState(false)
@@ -271,9 +277,9 @@ export default function SettingsView({
   const [draftTheme, setBulkTheme] = useState<SpecialThemeId | null>(null)
   const bulkTheme = draftTheme ?? appliedTheme
   useEffect(() => setBulkTheme(null), [appliedTheme])
-  const autoTheme = entry.autoTheme ?? true
-  const currentIcon = iconUrl(entry.iconFile)
-  const wallpaper = currentWallpaper(entry)
+  const autoTheme = entry?.autoTheme ?? true
+  const currentIcon = iconUrl(entry?.iconFile ?? null)
+  const wallpaper = entry ? currentWallpaper(entry) : null
   const canExtractTheme = !!wallpaper && !isVideoFile(wallpaper.file)
   const themedCount = themedAreaCount(launcher.themeAreas)
   const themedNames = [
@@ -286,7 +292,7 @@ export default function SettingsView({
   const themeSummary =
     themedCount === 0
       ? '默认（未套用主题）'
-      : `${themedNames.join(' + ')} · ${themedCount}/${SPECIAL_AREAS.length} 个区域`
+      : `${themedNames.join(' + ')} · ${themedCount}/${SPECIAL_AREAS.length} 个界面区域`
 
   const pickDir = async (kind: 'game' | 'shot'): Promise<void> => {
     const path = await window.api.pickDirectory()
@@ -295,25 +301,50 @@ export default function SettingsView({
   }
   // Live glass editing: apply immediately (so dragging feels instant) and
   // persist once the user stops (debounced), without re-rendering the whole app.
-  const [glass, setGlass] = useState<GlassAppearance>(entry.glass ?? DEFAULT_GLASS_APPEARANCE)
-  const glassRef = useRef<GlassAppearance>(entry.glass ?? DEFAULT_GLASS_APPEARANCE)
-  const glassTimer = useRef<number | undefined>(undefined)
+  const [glass, setGlass] = useState<GlassAppearance>(entry?.glass ?? DEFAULT_GLASS_APPEARANCE)
+  const glassRef = useRef<GlassAppearance>(entry?.glass ?? DEFAULT_GLASS_APPEARANCE)
   const glassRaf = useRef(0)
+  const glassSaving = useRef(false)
+  const glassSaveRevision = useRef(0)
+  const [savingGlass, setSavingGlass] = useState(false)
+  const scheduleSave = useDebouncedEntitySave()
 
-  useEffect(() => {
-    const next = entry.glass ?? DEFAULT_GLASS_APPEARANCE
+  useLayoutEffect(() => {
+    const next = entry?.glass ?? DEFAULT_GLASS_APPEARANCE
     glassRef.current = next
     setGlass(next)
-  }, [entry.id])
+    return () => {
+      cancelAnimationFrame(glassRaf.current)
+      glassRaf.current = 0
+    }
+  }, [entryId])
+
+  // Applying an appearance preset changes the persisted glass while the same
+  // app stays selected. Resync only when no slider save is in flight, so a
+  // background app refresh cannot clobber an unsaved drag.
+  useEffect(() => {
+    if (!entryId || glassSaving.current) return
+    const next = entry?.glass ?? DEFAULT_GLASS_APPEARANCE
+    if (JSON.stringify(next) === JSON.stringify(glassRef.current)) return
+    glassRef.current = next
+    setGlass(next)
+    applyGlass(next)
+  }, [entry?.glass, entryId])
 
   const updateGlass = useCallback(
     (patch: GlassPatch): void => {
+      if (!entryId) return
       // Switching material loads that material's recommended parameters.
       const next =
         patch.material && patch.material !== glassRef.current.material
           ? { ...MATERIAL_DEFAULTS[patch.material] }
           : { ...DEFAULT_GLASS_APPEARANCE, ...glassRef.current, ...patch }
+      const revision = ++glassSaveRevision.current
       glassRef.current = next
+      if (!glassSaving.current) {
+        glassSaving.current = true
+        setSavingGlass(true)
+      }
       setGlass(next)
       // Coalesce the (heavier) live preview to one per frame so dragging the
       // sliders stays smooth.
@@ -323,18 +354,28 @@ export default function SettingsView({
           applyGlass(glassRef.current)
         })
       }
-      if (glassTimer.current) window.clearTimeout(glassTimer.current)
-      const id = entry.id
-      glassTimer.current = window.setTimeout(() => {
-        void window.api.setGlass(id, glassRef.current)
-      }, 200)
+      scheduleSave(entryId, 200, () => {
+        void window.api
+          .setGlass(entryId, next)
+          .catch((error) => {
+            const detail = dataErrorDetails(error)?.message ??
+              (error instanceof Error ? error.message : String(error))
+            showToast(`玻璃材质保存失败：${detail}`)
+          })
+          .finally(() => {
+            // A newer drag may have queued another save while this one was in
+            // flight; only the newest save may clear the pending state.
+            if (glassSaveRevision.current !== revision) return
+            glassSaving.current = false
+            setSavingGlass(false)
+          })
+      })
     },
-    [entry.id]
+    [entryId, scheduleSave]
   )
 
   const tabPanelRef = useRef<HTMLDivElement>(null)
   const pageRef = useRef<HTMLDivElement>(null)
-  const colorBtnRef = useRef<HTMLButtonElement>(null)
   const tabAnimMounted = useRef(false)
 
   const switchTab = (next: 'game' | 'launcher'): void => {
@@ -360,16 +401,16 @@ export default function SettingsView({
   }, [tab])
 
   const afterLaunchDesc: Record<AfterLaunchAction, string> = {
-    none: '无操作（启动器保持现状）',
-    minimize: '最小化启动器',
-    tray: '隐藏启动器到托盘',
-    close: '关闭启动器'
+    none: '应用打开后，启动器保持现状',
+    minimize: '启动器最小化到任务栏，应用继续运行',
+    tray: '启动器收进系统托盘，点击托盘图标可恢复',
+    close: '关闭启动器窗口（按上方关闭按钮的设置处理）'
   }
 
   const autoStartDesc: Record<AutoStartMode, string> = {
     off: '不随 Windows 启动',
     window: '登录 Windows 后自动打开启动器窗口',
-    tray: '登录后静默启动到托盘（不显示窗口）'
+    tray: '登录后静默启动到系统托盘，不显示窗口'
   }
 
   return (
@@ -377,7 +418,7 @@ export default function SettingsView({
       <div className="page-header">
         <div>
           <h1 className="page-title">设置</h1>
-          <p className="page-subtitle">{tab === 'game' ? `应用 · ${entry.name}` : '启动器本体'}</p>
+          <p className="page-subtitle">{tab === 'game' && entry ? `应用 · ${entry.name}` : '启动器本体'}</p>
         </div>
         <div className="page-actions">
           <button className="btn ghost" onClick={onBack}>
@@ -387,7 +428,7 @@ export default function SettingsView({
       </div>
 
       <div className="page-body">
-        <Segmented
+        {entry && <Segmented
           variant="tab"
           value={tab}
           onChange={(value) => switchTab(value as 'game' | 'launcher')}
@@ -395,21 +436,21 @@ export default function SettingsView({
             { value: 'game', label: '应用设置' },
             { value: 'launcher', label: '启动器设置' }
           ]}
-        />
+        />}
 
         <div
           ref={tabPanelRef}
           className="tab-panel"
           style={{ '--tab-x': `${dir * 26}px` } as CSSProperties}
         >
-          {tab === 'game' ? (
+          {tab === 'game' && entry ? (
             <div className="settings">
               <div className="settings-group-title">基本信息</div>
               <IconPicker
                 small
                 src={currentIcon}
                 label="应用图标"
-                desc="可选图片，或选择 exe / bat / lnk 提取其图标；选后可框选正方形并缩放。"
+                desc="可选图片，或从 exe / bat / lnk 提取图标；选好后可拖动、缩放并截取方形区域。"
                 onPick={onPickIcon}
                 onClear={onResetIcon}
               />
@@ -445,53 +486,58 @@ export default function SettingsView({
               />
               <Row
                 name="启动方式"
-                desc="启动文件、参数、工作目录、管理员运行与默认方式（在模块管理中设置）"
+                desc="设置启动文件、参数和默认启动方式，也可让程序以管理员身份运行（在「模块管理」中设置）"
                 action={
                   <button className="btn sm" onClick={() => onOpenModuleSettings('launch')}>
-                    去设置
+                    设置启动方式
                   </button>
                 }
               />
               <Row
                 name="壁纸设置"
-                desc="壁纸列表与轮换、模糊 / 压暗"
+                desc="管理壁纸与轮换，调整模糊和压暗效果"
                 action={
                   <button className="btn sm" onClick={() => onOpenModuleSettings('wallpaper')}>
-                    去设置
+                    设置壁纸
                   </button>
                 }
               />
 
-              <Row
-                name="高级设置"
-                desc={advancedOpen ? '收起高级选项' : '游戏目录、截图目录、监视进程名'}
-                action={
-                  <button
-                    className={`btn sm ghost module-caret${advancedOpen ? ' open' : ''}`}
-                    title="展开 / 收起"
-                    aria-expanded={advancedOpen}
-                    onClick={() => setAdvancedOpen((v) => !v)}
-                  >
-                    <Icon name="chevronDown" size={16} />
-                  </button>
+              <Collapse
+                open={advancedOpen}
+                header={
+                  <Row
+                    name="高级设置"
+                    desc={advancedOpen ? '收起高级选项' : '游戏目录、截图目录与进程跟踪'}
+                    action={
+                      <button
+                        className={`btn sm ghost module-caret${advancedOpen ? ' open' : ''}`}
+                        title={advancedOpen ? '收起高级设置' : '展开高级设置'}
+                        aria-label={advancedOpen ? '收起高级设置' : '展开高级设置'}
+                        aria-expanded={advancedOpen}
+                        onClick={() => setAdvancedOpen((v) => !v)}
+                      >
+                        <Icon name="chevronDown" size={16} />
+                      </button>
+                    }
+                  />
                 }
-              />
-              <Collapse open={advancedOpen}>
+              >
                   {entry.addonId != null && (
                     <Row
                       name="游戏目录"
-                      desc={entry.gameDirectory ?? '未设置（版本检测 / 更新 / 抽卡缓存需要）'}
+                      desc={entry.gameDirectory ?? '未设置（更新检测、预下载等游戏功能需要）'}
                       action={
                         <div className="media-row" style={{ gap: 8 }}>
                           <button className="btn sm" onClick={() => void pickDir('game')}>
-                            选择…
+                            选择目录…
                           </button>
                           {entry.gameDirectory && (
                             <button
                               className="btn sm ghost"
                               onClick={() => onPatchEntry({ gameDirectory: null })}
                             >
-                              清除
+                              清除目录
                             </button>
                           )}
                         </div>
@@ -500,26 +546,26 @@ export default function SettingsView({
                   )}
                   <Row
                     name="截图目录"
-                    desc={entry.screenshotDirectory ?? '未设置（用于图库）'}
+                    desc={entry.screenshotDirectory ?? '未设置（图库会读取这里的截图）'}
                     action={
                       <div className="media-row" style={{ gap: 8 }}>
                         <button className="btn sm" onClick={() => void pickDir('shot')}>
-                          选择…
+                          选择目录…
                         </button>
                         {entry.screenshotDirectory && (
                           <button
                             className="btn sm ghost"
                             onClick={() => onPatchEntry({ screenshotDirectory: null })}
                           >
-                            清除
+                            清除目录
                           </button>
                         )}
                       </div>
                     }
                   />
                   <Row
-                    name="监视进程名"
-                    desc="快捷方式 / 提权启动等无法按 PID 追踪时的运行检测与时长统计"
+                    name="跟踪进程名"
+                    desc="一般不用填写。用脚本或快捷方式启动时，填写游戏目录内实际运行的进程名，启动器才能确认游戏已运行；多个用英文逗号分隔"
                     action={
                       <InlineEdit
                         className="wide"
@@ -539,108 +585,117 @@ export default function SettingsView({
               </Collapse>
 
               <div className="settings-group-title">外观</div>
-              <Row
-                name="主题色"
-                desc={autoTheme ? '自动从当前壁纸提取' : (entry.themeColor ?? '默认（品牌蓝）')}
-                action={
-                  <div className="media-row" style={{ gap: 8 }}>
-                    <Switch
-                      checked={autoTheme}
-                      label="自动"
-                      title="自动从当前壁纸提取主题色"
-                      onChange={(value) => void window.api.setAutoTheme(entry.id, value)}
-                    />
-                    {!autoTheme && (
-                      <>
-                        <button
-                          ref={colorBtnRef}
-                          type="button"
-                          className="color-trigger"
-                          title="自定义主题色"
-                          onClick={() => setShowColor((v) => !v)}
-                        >
-                          <span
-                            className="color-trigger-fill"
-                            style={{ background: entry.themeColor ?? '#3778e5' }}
-                          />
-                        </button>
-                        <button
-                          className="btn sm"
-                          disabled={!canExtractTheme}
-                          onClick={() => void window.api.extractThemeColor(entry.id)}
-                          title={canExtractTheme ? '从当前壁纸提取主题色' : '当前壁纸无法提取（视频或未设置）'}
-                        >
-                          从当前壁纸提取
-                        </button>
-                        <button
-                          className="btn sm ghost"
-                          onClick={() => void window.api.setThemeColor(entry.id, null)}
-                        >
-                          重置
-                        </button>
-                      </>
-                    )}
-                  </div>
+              <Collapse
+                open={!autoTheme && showColor}
+                header={
+                  <Row
+                    name="主题色"
+                    desc={autoTheme
+                      ? '自动从当前壁纸提取'
+                      : `自定义主题色${entry.themeColor ? `（${entry.themeColor}）` : '（默认品牌蓝）'}`}
+                    action={
+                      <div className="media-row" style={{ gap: 8 }}>
+                        <Switch
+                          checked={autoTheme}
+                          label="自动"
+                          title="自动从当前壁纸提取主题色"
+                          onChange={(value) => void window.api.setAutoTheme(entry.id, value)}
+                        />
+                        {!autoTheme && (
+                          <>
+                            <button
+                              type="button"
+                              className="color-trigger"
+                              title={showColor ? '收起主题色选择' : '自定义主题色'}
+                              aria-label={showColor ? '收起主题色选择' : '自定义主题色'}
+                              aria-expanded={showColor}
+                              aria-controls="theme-color-editor"
+                              onClick={() => setShowColor((v) => !v)}
+                            >
+                              <span
+                                className="color-trigger-fill"
+                                style={{ background: entry.themeColor ?? '#3778e5' }}
+                              />
+                            </button>
+                            <button
+                              className="btn sm"
+                              disabled={!canExtractTheme}
+                              onClick={() => void window.api.extractThemeColor(entry.id)}
+                              title={canExtractTheme ? '从当前壁纸提取主题色' : '视频壁纸或未设置壁纸时无法提取'}
+                            >
+                              {canExtractTheme ? '从当前壁纸提取' : '当前壁纸不可提取'}
+                            </button>
+                            <button
+                              className="btn sm ghost"
+                              onClick={() => void window.api.setThemeColor(entry.id, null)}
+                            >
+                              恢复默认色
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    }
+                  />
                 }
-              />
-              {!autoTheme && (
-                <GlassPopup
-                  anchorRef={colorBtnRef}
-                  boundsRef={pageRef}
-                  visible={showColor}
-                  className="color-popup"
-                  onDismiss={() => setShowColor(false)}
-                >
+              >
+                <div className="settings-color-panel" id="theme-color-editor" role="group"
+                  aria-label="自定义主题色">
                   <ColorPicker
                     value={entry.themeColor}
                     onChange={(hex) => void window.api.setThemeColor(entry.id, hex)}
                   />
-                </GlassPopup>
-              )}
-              <Row
-                name="玻璃材质"
-                desc={GLASS_MATERIAL_DESC[glass.material]}
-                action={
-                  <div className="media-row" style={{ gap: 8 }}>
-                    <Segmented
-                      value={glass.material}
-                      onChange={(value) => updateGlass({ material: value as GlassMaterial })}
-                      options={(['blur', 'mica', 'liquid', 'shine', 'starfrost', 'astral'] as GlassMaterial[]).map(
-                        (material) => ({ value: material, label: GLASS_MATERIAL_LABEL[material] })
-                      )}
-                    />
-                    <button
-                      className={`btn sm ghost module-caret${glassOpen ? ' open' : ''}`}
-                      title="材质细节参数"
-                      aria-expanded={glassOpen}
-                      onClick={() => setGlassOpen((v) => !v)}
-                    >
-                      <Icon name="chevronDown" size={16} />
-                    </button>
-                    <button
-                      className="btn sm ghost"
-                      title="把当前材质的各项参数恢复为推荐默认值"
-                      onClick={() => updateGlass({ ...MATERIAL_DEFAULTS[glass.material] })}
-                    >
-                      重置
-                    </button>
-                  </div>
+                </div>
+              </Collapse>
+              <Collapse
+                open={glassOpen}
+                header={
+                  <Row
+                    name="玻璃材质"
+                    desc={GLASS_MATERIAL_DESC[glass.material]}
+                    action={
+                      <div className="media-row" style={{ gap: 8 }}>
+                        <Segmented
+                          value={glass.material}
+                          onChange={(value) => updateGlass({ material: value as GlassMaterial })}
+                          options={(['blur', 'mica', 'liquid', 'shine', 'starfrost', 'astral'] as GlassMaterial[]).map(
+                            (material) => ({ value: material, label: GLASS_MATERIAL_LABEL[material] })
+                          )}
+                        />
+                        <button
+                          className={`btn sm ghost module-caret${glassOpen ? ' open' : ''}`}
+                          title="调整玻璃细节"
+                          aria-label="调整玻璃细节"
+                          aria-expanded={glassOpen}
+                          onClick={() => setGlassOpen((v) => !v)}
+                        >
+                          <Icon name="chevronDown" size={16} />
+                        </button>
+                        <button
+                          className="btn sm ghost"
+                          title="恢复当前材质的推荐参数"
+                          aria-label="恢复当前材质的推荐参数"
+                          onClick={() => updateGlass({ ...MATERIAL_DEFAULTS[glass.material] })}
+                        >
+                          重置参数
+                        </button>
+                      </div>
+                    }
+                  />
                 }
-              />
-              <Collapse open={glassOpen}>
+              >
               <RangeRow
                 name="玻璃亮度"
                 value={glass.brightness}
-                hint="玻璃底色：0 偏黑，100 偏白"
+                hint="调整玻璃底色明暗：0 偏黑，100 偏白"
                 min={0}
                 max={100}
                 suffix=""
                 onChange={(brightness) => updateGlass({ brightness })}
               />
               <RangeRow
-                name="玻璃透明度"
+                name="玻璃通透度"
                 value={glass.opacity}
-                hint="底色的透明程度：100 完全不叠加底色（清透）"
+                hint="数值越大越能透出后面的壁纸；100 时只保留模糊等背景效果"
                 min={0}
                 max={100}
                 suffix=" %"
@@ -649,7 +704,7 @@ export default function SettingsView({
               <RangeRow
                 name="玻璃模糊"
                 value={glass.blur}
-                hint="玻璃磨砂的模糊半径"
+                hint="数值越大，玻璃后面的壁纸越朦胧"
                 min={0}
                 max={60}
                 suffix=" px"
@@ -657,9 +712,9 @@ export default function SettingsView({
               />
               {(glass.material === 'blur' || glass.material === 'mica') && (
                 <RangeRow
-                  name="背景饱和度"
+                  name="背景色彩浓度"
                   value={glass.saturation}
-                  hint="背景色彩的浓淡（毛玻璃 / 云母）"
+                  hint="让透出的壁纸颜色更淡或更鲜艳（毛玻璃 / 云母）"
                   min={50}
                   max={200}
                   suffix=" %"
@@ -688,18 +743,18 @@ export default function SettingsView({
               {(glass.material === 'liquid' || glass.material === 'shine') && (
                 <>
                   <RangeRow
-                    name="折射强度（控件）"
+                    name="按钮与开关折射"
                     value={glass.refraction}
-                    hint="按钮/小控件的边缘折射强度"
+                    hint="小按钮、开关边缘像透镜一样扭曲背景的程度；0 为关闭"
                     min={0}
                     max={200}
                     suffix=" %"
                     onChange={(refraction) => updateGlass({ refraction })}
                   />
                   <RangeRow
-                    name="折射强度（面板）"
+                    name="卡片与弹窗折射"
                     value={glass.panelRefraction}
-                    hint="卡片/弹窗的边缘折射强度"
+                    hint="卡片、弹窗等大面板边缘像透镜一样扭曲背景的程度；0 为关闭"
                     min={0}
                     max={200}
                     suffix=" %"
@@ -708,14 +763,14 @@ export default function SettingsView({
                   <RangeRow
                     name="边缘宽度"
                     value={glass.edgeWidth}
-                    hint="边缘折射扭曲的影响范围"
+                    hint="折射从边缘向内延伸的宽度"
                     min={4}
                     max={100}
                     suffix=" px"
                     onChange={(edgeWidth) => updateGlass({ edgeWidth })}
                   />
                   <RangeRow
-                    name="色散"
+                    name="边缘彩光"
                     value={glass.dispersion}
                     min={0}
                     max={100}
@@ -733,7 +788,7 @@ export default function SettingsView({
                     min={0}
                     max={100}
                     suffix=" %"
-                    hint="边缘镜面高光的亮度"
+                    hint="边缘反光的明显程度"
                     onChange={(highlight) => updateGlass({ highlight })}
                   />
                   <RangeRow
@@ -742,7 +797,7 @@ export default function SettingsView({
                     min={0}
                     max={360}
                     suffix="°"
-                    hint="高光来自的方向"
+                    hint="光源方向，决定高光出现在哪一侧"
                     onChange={(highlightAngle) => updateGlass({ highlightAngle })}
                   />
                 </>
@@ -751,10 +806,10 @@ export default function SettingsView({
               <div className="settings-group-title">危险操作</div>
               <Row
                 name="移除应用"
-                desc="仅从启动器中移除，不会删除磁盘上的任何文件"
+                desc="仅从启动器中移除，磁盘上的文件和游戏数据不会被删除"
                 action={
                   <button className="btn sm danger" onClick={onRemove}>
-                    移除
+                    从启动器移除
                   </button>
                 }
               />
@@ -765,25 +820,30 @@ export default function SettingsView({
               <IconPicker
                 src={launcher.iconFile ? (brandUrl(launcher.iconFile) ?? '') : defaultIconUrl()}
                 label="启动器图标"
-                desc="支持图片，或选择 exe / bat / lnk 提取其图标；选后可框选正方形并缩放。"
+                desc="支持图片，或从 exe / bat / lnk 提取图标；选好后可拖动、缩放并截取方形区域。"
                 onPick={onPickLauncherIcon}
                 onClear={launcher.iconFile ? onClearLauncherIcon : undefined}
               />
-              <Row
-                name="主题"
-                desc={themeSummary}
-                action={
-                  <button
-                    className={`btn sm ghost module-caret${themeOpen ? ' open' : ''}`}
-                    title="逐项主题设置"
-                    aria-expanded={themeOpen}
-                    onClick={() => setThemeOpen((value) => !value)}
-                  >
-                    <Icon name="chevronDown" size={16} />
-                  </button>
+              <Collapse
+                open={themeOpen}
+                header={
+                  <Row
+                    name="主题"
+                    desc={themeSummary}
+                    action={
+                      <button
+                        className={`btn sm ghost module-caret${themeOpen ? ' open' : ''}`}
+                        title="逐项主题设置"
+                        aria-label="逐项主题设置"
+                        aria-expanded={themeOpen}
+                        onClick={() => setThemeOpen((value) => !value)}
+                      >
+                        <Icon name="chevronDown" size={16} />
+                      </button>
+                    }
+                  />
                 }
-              />
-              <Collapse open={themeOpen}>
+              >
                 <Row
                   name="批量设置"
                   desc="把所选主题应用到全部区域"
@@ -849,44 +909,89 @@ export default function SettingsView({
                 ))}
               </Collapse>
 
-              <Row
-                name="字体"
-                desc={launcher.fontFamily ?? '默认（跟随系统）'}
-                action={
-                  launcher.fontFamily ? (
-                    <button className="btn sm ghost" onClick={() => onSetFont(null)}>
-                      恢复默认
-                    </button>
-                  ) : undefined
+              <AppearancePresetsSection disabled={savingGlass} />
+
+              {([
+                {
+                  script: 'en' as const,
+                  name: '英文字体',
+                  hint: '英文、数字与半角符号',
+                  value: launcher.fontFamilyEn
+                },
+                {
+                  script: 'zh' as const,
+                  name: '中文字体',
+                  hint: '中文与全角标点',
+                  value: launcher.fontFamilyZh
                 }
-              />
-              <div className="font-list">
-                {fonts.length === 0 ? (
-                  <div className="font-empty">正在读取本机字体…</div>
-                ) : (
-                  fonts.map((font) => (
-                    <FontItem
-                      key={font}
-                      name={font}
-                      active={launcher.fontFamily === font}
-                      onPick={() => onSetFont(font)}
-                    />
-                  ))
-                )}
-              </div>
+              ]).map(({ script, name, hint, value }) => (
+                <Fragment key={script}>
+                  <Collapse
+                    open={fontTarget === script}
+                    header={
+                      <Row
+                        name={name}
+                        desc={`${hint} · ${value ?? '默认（跟随系统）'}`}
+                        action={
+                          <div className="media-row" style={{ gap: 8 }}>
+                            {value !== null && (
+                              <button
+                                className="btn sm ghost"
+                                onClick={() => onSetLauncherFont(script, null)}
+                              >
+                                恢复默认
+                              </button>
+                            )}
+                            <button
+                              className="btn sm"
+                              aria-expanded={fontTarget === script}
+                              onClick={() =>
+                                setFontTarget((current) => current === script ? null : script)
+                              }
+                            >
+                              {fontTarget === script ? '收起' : '选择字体'}
+                            </button>
+                          </div>
+                        }
+                      />
+                    }
+                  >
+                    {/* Mount the large list only for the one open picker. */}
+                    {fontTarget === script && (
+                      <div className="font-list">
+                        {fonts.length === 0 ? (
+                          <div className="font-empty">正在读取本机字体…</div>
+                        ) : (
+                          fonts.map((font) => (
+                            <FontItem
+                              key={font}
+                              name={font}
+                              active={value === font}
+                              onPick={() => {
+                                onSetLauncherFont(script, font)
+                                setFontTarget(null)
+                              }}
+                            />
+                          ))
+                        )}
+                      </div>
+                    )}
+                  </Collapse>
+                </Fragment>
+              ))}
 
               <Row
-                name="侧边栏应用材质"
+                name="侧边栏材质"
                 desc={
                   launcher.sidebarMaterial
-                    ? '侧边栏使用当前应用的玻璃材质'
-                    : '侧边栏使用主题色'
+                    ? '侧边栏使用当前应用的玻璃材质与亮度'
+                    : '侧边栏使用主题色纯色背景'
                 }
                 action={
                   <Switch
                     checked={launcher.sidebarMaterial}
-                    label="应用"
-                    title="侧边栏是否应用当前应用的玻璃材质"
+                    label="启用"
+                    title="侧边栏是否使用当前应用的玻璃材质"
                     onChange={(value) => onSetBehavior({ sidebarMaterial: value })}
                   />
                 }
@@ -894,16 +999,18 @@ export default function SettingsView({
 
               <div className="settings-group-title">启动行为</div>
               <Row
-                name="点击关闭按钮（×）"
+                name="点击窗口关闭按钮（×）"
                 desc={
-                  launcher.closeAction === 'tray' ? '隐藏到托盘（点托盘图标可重新打开）' : '关闭启动器'
+                  launcher.closeAction === 'tray'
+                    ? '隐藏到系统托盘，点击托盘图标可重新打开'
+                    : '退出启动器'
                 }
                 action={
                   <Segmented
                     value={launcher.closeAction}
                     onChange={(value) => onSetBehavior({ closeAction: value as CloseAction })}
                     options={[
-                      { value: 'close', label: '关闭启动器' },
+                      { value: 'close', label: '退出启动器' },
                       { value: 'tray', label: '隐藏到托盘' }
                     ]}
                   />
@@ -921,7 +1028,7 @@ export default function SettingsView({
                       { value: 'none', label: '无操作' },
                       { value: 'minimize', label: '最小化' },
                       { value: 'tray', label: '隐藏到托盘' },
-                      { value: 'close', label: '关闭启动器' }
+                      { value: 'close', label: '关闭窗口' }
                     ]}
                   />
                 }
@@ -937,7 +1044,7 @@ export default function SettingsView({
                     options={[
                       { value: 'off', label: '关闭' },
                       { value: 'window', label: '打开窗口' },
-                      { value: 'tray', label: '静默托盘' }
+                      { value: 'tray', label: '托盘启动' }
                     ]}
                   />
                 }
@@ -946,14 +1053,14 @@ export default function SettingsView({
               <div className="settings-group-title">数据</div>
               <Row
                 name="备份与恢复"
-                desc="导出 / 导入全部设置（应用、使用时长、抽卡记录、图标、壁纸）"
+                desc="备份或恢复应用、启动器设置、使用时长、抽卡记录、图标与壁纸；不含游戏本体、缓存和日志"
                 action={
                   <div className="media-row" style={{ gap: 8 }}>
                     <button className="btn sm" onClick={onExportData}>
-                      导出设置
+                      导出备份
                     </button>
                     <button className="btn sm" onClick={onImportData}>
-                      导入设置
+                      导入备份
                     </button>
                   </div>
                 }
@@ -961,41 +1068,53 @@ export default function SettingsView({
 
               <Row
                 name="数据目录"
-                desc={dataDir || '…'}
+                desc={dataDir ? `当前位置：${dataDir}` : '正在读取…'}
                 action={
                   <button className="btn sm" onClick={onChangeDataDir}>
-                    更改…
+                    迁移…
                   </button>
                 }
               />
 
               <div className="settings-section">
-                <div className="settings-section-title">清理与占用</div>
-                <div className="about-line">
-                  <span className="about-key">升级暂存</span>
-                  <span className="usage-value">{formatBytes(usage?.staging ?? 0)}</span>
-                </div>
-                <div className="about-line">
-                  <span className="about-key">缩略图缓存</span>
-                  <span className="usage-value">{formatBytes(usage?.thumbs ?? 0)}</span>
-                </div>
-                <div className="about-line">
-                  <span className="about-key">日志</span>
-                  <span className="usage-value">{formatBytes(usage?.logs ?? 0)}</span>
-                </div>
+                <div className="settings-section-title">存储与清理</div>
+                {([
+                  ['旧版本更新残留', 'staleStaging'],
+                  ['未完成更新（保留续传）', 'retainedStaging'],
+                  ['图库缩略图（内存）', 'thumbnailMemory'],
+                  ['图库缩略图（磁盘）', 'legacyThumbs'],
+                  ['壁纸处理缓存（内存）', 'wallpaperMemory'],
+                  ['壁纸处理缓存（磁盘）', 'wallpaperDisk'],
+                  ['启动器日志', 'logs'],
+                  ['游戏更新缓存', 'gameCache'],
+                  ['壁纸与图标文件', 'media'],
+                  ['更新备份与恢复文件', 'recovery']
+                ] as const).map(([label, field]) => (
+                  <div className="about-line" key={field}>
+                    <span className="about-key">{label}</span>
+                    <span className="usage-value">{usage?.[field] == null ? '—' : formatBytes(usage[field])}</span>
+                  </div>
+                ))}
+                <p className="hint">
+                  全部清理会删除旧版本更新残留、图库缩略图、壁纸处理缓存和日志；正在使用的壁纸与图标不会删除。
+                </p>
                 <div className="media-row" style={{ gap: 8, marginTop: 12 }}>
-                  <button className="btn sm" onClick={() => onCleanUsage(['staging'])}>
-                    清理暂存
+                  <button className="btn sm" disabled={cleaningUsage} onClick={() => onCleanUsage(['staging'])}>
+                    清理更新残留
                   </button>
-                  <button className="btn sm" onClick={() => onCleanUsage(['thumbs'])}>
+                  <button className="btn sm" disabled={cleaningUsage} onClick={() => onCleanUsage(['thumbs'])}>
                     清理缩略图
                   </button>
-                  <button className="btn sm" onClick={() => onCleanUsage(['logs'])}>
+                  <button className="btn sm" disabled={cleaningUsage} onClick={() => onCleanUsage(['wallpaper'])}>
+                    清理壁纸缓存
+                  </button>
+                  <button className="btn sm" disabled={cleaningUsage} onClick={() => onCleanUsage(['logs'])}>
                     清理日志
                   </button>
                   <button
                     className="btn sm ghost"
-                    onClick={() => onCleanUsage(['staging', 'thumbs', 'logs'])}
+                    disabled={cleaningUsage}
+                    onClick={() => onCleanUsage(['staging', 'thumbs', 'wallpaper', 'logs'])}
                   >
                     全部清理
                   </button>
@@ -1005,7 +1124,7 @@ export default function SettingsView({
               <div className="settings-group-title">更新与帮助</div>
               <Row
                 name="检查更新"
-                desc={updateCheckText || '检查 GitHub Releases 上是否有新版本'}
+                desc={updateCheckText || (trialBuild ? '检查本地测试版更新' : '检查是否有新的启动器版本')}
                 action={
                   <button className="btn sm" disabled={checkingUpdate} onClick={onCheckUpdate}>
                     {checkingUpdate ? '检查中…' : '检查更新'}
@@ -1014,37 +1133,20 @@ export default function SettingsView({
               />
 
               <Row name="当前版本" desc={version} />
-              <Row
-                name="更新通道"
-                desc={
-                  launcher.updateChannel === 'beta'
-                    ? '测试版：优先接收预发布版本'
-                    : '正式版：仅接收稳定版本'
-                }
-                action={
-                  <Segmented
-                    value={launcher.updateChannel}
-                    onChange={(value) => onSetBehavior({ updateChannel: value as UpdateChannel })}
-                    options={[
-                      { value: 'stable', label: '正式版' },
-                      { value: 'beta', label: '测试版' }
-                    ]}
-                  />
-                }
-              />
+              <Row name="更新通道" desc={trialBuild ? '本地试用' : '正式版'} />
 
               <Row
                 name="下载限速"
                 desc={
                   launcher.downloadLimitMbps > 0
-                    ? `限制所有下载（游戏预下载 / 更新与启动器更新）为 ${launcher.downloadLimitMbps} MB/s`
-                    : '限制所有下载（游戏预下载 / 更新与启动器更新）的速度；0 表示不限速（MB/s）'
+                    ? `游戏更新、预下载和启动器更新共用 ${launcher.downloadLimitMbps} MB/s 的上限`
+                    : '设置游戏更新、预下载和启动器更新的下载速度上限（MB/s）；填 0 表示不限速'
                 }
                 action={
                   <InlineEdit
                     className="wide"
                     value={String(launcher.downloadLimitMbps)}
-                    placeholder="0"
+                    placeholder="0（不限速）"
                     onCommit={(v) =>
                       onSetBehavior({
                         downloadLimitMbps: Math.max(0, Math.min(10240, parseInt(v, 10) || 0))

@@ -78,7 +78,8 @@ export default function ColorPicker({ value, onChange }: ColorPickerProps): Reac
         <input
           className="input color-text"
           value={text}
-          placeholder="#rrggbb 或 rgb(r, g, b)"
+          placeholder="#FFFFFF"
+          aria-label="颜色代码"
           spellCheck={false}
           onChange={(e) => setText(e.target.value)}
           onBlur={commitText}
@@ -94,11 +95,12 @@ export default function ColorPicker({ value, onChange }: ColorPickerProps): Reac
             type="button"
             className="color-swatch"
             style={{ background: preset }}
-            title={preset}
+            aria-label={`颜色代码 ${preset}`}
             onClick={() => emit(preset)}
           />
         ))}
       </div>
+      <span className="hint">颜色代码，例如 #FFFFFF</span>
     </div>
   )
 }

@@ -1,4 +1,25 @@
+import { dataErrorDetails } from '@shared/dataErrors'
 import type { GachaGame } from '@shared/types'
+
+/**
+ * Readable reason behind a renderer rejection. Data errors keep their upstream
+ * message; Electron's IPC wrapper and leading `Error:` labels are removed.
+ */
+export function errorReason(error: unknown): string {
+  if (error == null) return ''
+  const dataError = dataErrorDetails(error)
+  if (dataError) return dataError.message.trim()
+  return (error instanceof Error ? error.message : String(error))
+    .replace(/^(?:Error:\s*)?Error invoking remote method '[^']*':\s*(?:Error:\s*)?/i, '')
+    .replace(/^Error:\s*/i, '')
+    .trim()
+}
+
+/** Page-specific hint plus the readable reason, without printing an empty detail. */
+export function failureText(error: unknown, hint: string): string {
+  const reason = errorReason(error)
+  return reason ? `${hint} 详情：${reason}` : hint
+}
 
 /** Human-readable rarity label (differs per game). */
 export function displayRank(game: GachaGame | null, rank: number): string {

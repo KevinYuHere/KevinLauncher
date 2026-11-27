@@ -1,9 +1,11 @@
 import { BrowserWindow } from 'electron'
 import { handleIpc } from './access'
 import { ensureTray } from '../services/behavior'
+import { windowVisualActivity } from '../services/windowActivity'
 
 /** Frameless-window controls used by the custom title bar. */
 export function registerWindowIpc(): void {
+  handleIpc('window:activity', (e) => windowVisualActivity(BrowserWindow.fromWebContents(e.sender)))
   handleIpc('window:minimize', (e) => {
     BrowserWindow.fromWebContents(e.sender)?.minimize()
   })

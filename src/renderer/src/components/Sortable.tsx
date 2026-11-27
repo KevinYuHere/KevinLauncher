@@ -262,6 +262,18 @@ export default function Sortable<T>({
           }}
           onDrag={onDrag}
           onDrop={onDrop}
+          onCancel={() => {
+            if (sourceRef.current === null) return
+            centers.current = null
+            sourceRef.current = null
+            setSource(null)
+            setTarget(null)
+            onDragEnd?.()
+          }}
+          onKeyboardMove={(delta) => {
+            const target = index + delta
+            if (target >= 0 && target < ordered.length) commit(index, target)
+          }}
           index={index}
         >
           {(handle) => renderItem(item, index, handle)}
@@ -283,6 +295,8 @@ interface SortableRowProps {
   register: (el: HTMLDivElement | null) => void
   onDrag: (index: number, clientX: number, clientY: number) => void
   onDrop: (index: number) => void
+  onCancel: () => void
+  onKeyboardMove: (delta: number) => void
   children: (handle: SortableHandle) => ReactNode
 }
 
@@ -298,6 +312,8 @@ function SortableRow({
   register,
   onDrag,
   onDrop,
+  onCancel,
+  onKeyboardMove,
   children
 }: SortableRowProps): ReactElement {
   const ref = useRef<HTMLDivElement | null>(null)
@@ -311,7 +327,8 @@ function SortableRow({
     snapOnRelease: true,
     scrollRef,
     onDrag: (_dx, _dy, cx, cy) => onDrag(index, cx, cy),
-    onDrop: () => onDrop(index)
+    onDrop: () => onDrop(index),
+    onCancel
   })
 
   const style: CSSProperties | undefined =
@@ -329,6 +346,14 @@ function SortableRow({
       }}
       className={`sortable-row${dragging ? ' dragging' : ''}`}
       style={style}
+      onKeyDown={(event) => {
+        if (!(event.target instanceof HTMLElement)) return
+        if (!event.altKey && !event.target.closest('.ll-grip')) return
+        const [back, next] = orientation === 'horizontal' ? ['ArrowLeft', 'ArrowRight'] : ['ArrowUp', 'ArrowDown']
+        if (event.key !== back && event.key !== next) return
+        event.preventDefault()
+        onKeyboardMove(event.key === back ? -1 : 1)
+      }}
     >
       {children({ onPointerDown, dragging })}
     </div>

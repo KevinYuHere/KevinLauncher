@@ -1,12 +1,8 @@
-# Installs project dependencies using the npmmirror registry / Electron mirror.
-# Intended to be launched in its own window (non-blocking).
-$ErrorActionPreference = 'Continue'
+# Installs the checked-in npm lockfile and its matching Electron runtime.
+$ErrorActionPreference = 'Stop'
 Set-Location (Join-Path $PSScriptRoot '..')
 
-$env:ELECTRON_MIRROR = 'https://npmmirror.com/mirrors/electron/'
-
-Write-Host '== npm install (npmmirror) ==' -ForegroundColor Cyan
-Write-Host "registry : $((npm config get registry))"
-Write-Host "electron : $env:ELECTRON_MIRROR"
-npm install --no-audit --no-fund
-Write-Host "== npm install exited with code $LASTEXITCODE ==" -ForegroundColor Cyan
+& npm.cmd ci --registry=https://registry.npmjs.org/ --no-audit --no-fund
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& node node_modules/electron/install.js
+exit $LASTEXITCODE

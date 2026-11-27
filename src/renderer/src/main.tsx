@@ -1,9 +1,5 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
-import App from './App'
-import Viewer from './Viewer'
-import Installer from './components/Installer'
-import Uninstaller from './components/Uninstaller'
 import './assets/main.css'
 
 // One HTML entry point, several roles (the main process loads it with a hash):
@@ -12,18 +8,30 @@ import './assets/main.css'
 //   #viewer=...  image viewer window      (gallery)
 //   (none)       the launcher itself
 const hash = window.location.hash
-const viewerMatch = /viewer=([^&]+)/.exec(hash)
+const viewerMatch = /^#viewer=([^&]+)$/.exec(hash)
 
-const root = viewerMatch ? (
-  <Viewer path={decodeURIComponent(viewerMatch[1])} />
-) : hash.includes('uninstall') ? (
-  <Uninstaller />
-) : hash.includes('install') ? (
-  <Installer />
-) : (
-  <App />
-)
+async function loadRole(): Promise<React.ReactElement> {
+  if (viewerMatch) {
+    const { default: Viewer } = await import('./Viewer')
+    return <Viewer path={decodeURIComponent(viewerMatch[1])} />
+  }
+  if (hash === '#uninstall') {
+    const { default: Uninstaller } = await import('./components/Uninstaller')
+    return <Uninstaller />
+  }
+  if (hash === '#install') {
+    const { default: Installer } = await import('./components/Installer')
+    return <Installer />
+  }
+  const { default: App } = await import('./App')
+  return <App />
+}
 
-ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
-  <React.StrictMode>{root}</React.StrictMode>
-)
+const root = ReactDOM.createRoot(document.getElementById('root') as HTMLElement)
+void loadRole().then((view) => root.render(<React.StrictMode>{view}</React.StrictMode>), (error) => {
+  console.error(error)
+  root.render(<div className="welcome glass" role="alert">
+    <p>页面加载失败</p>
+    <button className="btn" onClick={() => location.reload()}>重新加载</button>
+  </div>)
+})

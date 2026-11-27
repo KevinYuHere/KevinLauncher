@@ -11,6 +11,11 @@ import {
   type LinkedLaunch,
   type WallpaperSettings
 } from '@shared/types'
+import {
+  DEFAULT_KEVIN_HUD,
+  normalizeKevinHudConfig,
+  type KevinHudConfig
+} from '@shared/kevinHud'
 import { isVideoFile } from '@shared/appEntry'
 import { usePreparedWallpaper } from '../usePreparedWallpaper'
 import { backgroundUrl } from '../media'
@@ -18,11 +23,13 @@ import Switch from './Switch'
 import Segmented from './Segmented'
 import Icon from './Icon'
 import Sortable, { type SortableHandle } from './Sortable'
+import SortableGrip from './SortableGrip'
 import Checkbox from './Checkbox'
 import Collapse from './Collapse'
 import Select from './Select'
 import InlineEdit from './InlineEdit'
 import LaunchMethodsEditor from './LaunchMethodsEditor'
+import KevinHudSettings from './KevinHudSettings'
 
 interface ModuleManagerViewProps {
   entry: AppEntry
@@ -32,7 +39,7 @@ interface ModuleManagerViewProps {
   onResetModulePosition: (moduleId: HomeModuleId) => void
   onSetModuleLabel: (label: string | null) => void
   onSetLaunchEffect: (effect: LaunchEffect) => void
-  onSetLaunchMethods: (methods: LaunchMethod[], defaultId: string) => void
+  onSetLaunchMethods: (methods: LaunchMethod[], defaultId: string) => Promise<void>
   onWallpaperAdd: () => void
   onWallpaperRemove: (id: string) => void
   onWallpaperReorder: (ids: string[]) => void
@@ -50,11 +57,25 @@ interface ModuleManagerViewProps {
 const HAS_SETTINGS: HomeModuleId[] = ['info', 'launch', 'wallpaper', 'linkedLaunch']
 
 const TRIGGER_LABELS: { value: WallpaperSettings['trigger']; label: string }[] = [
-  { value: 'launcherStart', label: '启动启动器' },
+  { value: 'launcherStart', label: '启动器打开时' },
   { value: 'appSwitch', label: '切换应用时' },
   { value: 'appLaunch', label: '启动应用后' },
   { value: 'interval', label: '定时' }
 ]
+
+/** Read this app's HUD config; historical entries simply get the defaults. */
+function readKevinHud(entry: AppEntry): KevinHudConfig {
+  return normalizeKevinHudConfig(entry.kevinHud ?? DEFAULT_KEVIN_HUD)
+}
+
+/**
+ * Persist through the normal app-config patch path. The main-process app store
+ * already serializes these writes and re-normalizes the HUD config, so the
+ * editor only has to capture the app id with each change.
+ */
+async function saveKevinHud(appId: string, config: KevinHudConfig): Promise<unknown> {
+  return window.api.updateApp(appId, { kevinHud: config })
+}
 
 function Row({
   name,
@@ -116,13 +137,13 @@ function WallpaperPanel({
   }
   return (
     <div className="settings">
-      <Row name="壁纸列表" desc={`共 ${entry.wallpapers.length} 张 · 拖动排序；点缩略图看大图，点名称切换到该张`}>
+      <Row name="壁纸列表" desc={`共 ${entry.wallpapers.length} 张 · 拖动排序；点缩略图看大图，点名称切换为这张`}>
         <button className="btn sm" onClick={onAdd}>
-          添加图片 / 视频
+          添加图片或视频
         </button>
       </Row>
       {entry.wallpapers.length === 0 ? (
-        <div className="settings-empty">还没有壁纸，当前使用系统桌面壁纸。</div>
+        <div className="settings-empty">还没有壁纸，主页会使用默认背景。添加图片或视频后可直接选用。</div>
       ) : (
         <Sortable
           items={entry.wallpapers}
@@ -132,13 +153,7 @@ function WallpaperPanel({
             <div
               className={`wl-row${wallpaper.id === entry.wallpapers[entry.wallpaperIndex]?.id ? ' current' : ''}`}
             >
-              <button
-                className={`ll-grip${handle.dragging ? ' dragging' : ''}`}
-                title="拖动排序"
-                onPointerDown={handle.onPointerDown}
-              >
-                <Icon name="grip" size={16} />
-              </button>
+              <SortableGrip handle={handle} />
               <button className="wl-thumb-btn" title="查看大图" onClick={() => onView(index)}>
                 {isVideoFile(wallpaper.file) ? (
                   <video
@@ -158,14 +173,19 @@ function WallpaperPanel({
               >
                 {wallpaper.name}
               </button>
-              <button className="btn sm ghost" onClick={() => onRemove(wallpaper.id)}>
-                删除
+              <button
+                className="btn sm ghost"
+                title="从壁纸列表移除，不会删除原文件"
+                aria-label={`从列表移除「${wallpaper.name}」`}
+                onClick={() => onRemove(wallpaper.id)}
+              >
+                从列表移除
               </button>
             </div>
           )}
         />
       )}
-      <Row name="轮换方式" desc="随机：每次换一张随机的；循环：按列表顺序">
+      <Row name="轮换方式" desc="随机：每次随机选一张；循环：按列表顺序依次切换">
         <Segmented
           value={settings.strategy}
           onChange={(value) => onSettings({ strategy: value as WallpaperSettings['strategy'] })}
@@ -175,7 +195,7 @@ function WallpaperPanel({
           ]}
         />
       </Row>
-      <Row name="轮换时机" desc="到达设定时机时自动切换到下一张壁纸">
+      <Row name="轮换时机" desc="按设定时机自动切换到下一张壁纸">
         <Segmented
           value={settings.trigger}
           onChange={(value) => onSettings({ trigger: value as WallpaperSettings['trigger'] })}
@@ -193,7 +213,7 @@ function WallpaperPanel({
           />
         </Row>
       )}
-      <Row name="背景模糊" desc="对该应用的所有壁纸统一生效">
+      <Row name="背景模糊" desc="让壁纸更柔和，数值越大越模糊；0 为关闭，统一作用于该应用的全部壁纸">
         <div className="range-row">
           <span className="range-value">{tuning.blur} px</span>
           <input
@@ -206,7 +226,7 @@ function WallpaperPanel({
           />
         </div>
       </Row>
-      <Row name="背景压暗" desc="对该应用的所有壁纸统一生效">
+      <Row name="背景压暗" desc="调暗壁纸，让上方文字更清晰；0 为关闭，统一作用于该应用的全部壁纸">
         <div className="range-row">
           <span className="range-value">{tuning.dim} %</span>
           <input
@@ -262,17 +282,11 @@ function LinkedPanel({
   ): ReactElement => (
     <div className="wl-row">
       {handle ? (
-        <button
-          className={`ll-grip${handle.dragging ? ' dragging' : ''}`}
-          title="拖动排序"
-          onPointerDown={handle.onPointerDown}
-        >
-          <Icon name="grip" size={16} />
-        </button>
+        <SortableGrip handle={handle} />
       ) : (
         <span className="method-index">默认</span>
       )}
-      <button className="wl-name" title="打开关联启动设置" onClick={() => onEdit(item.id)}>
+      <button className="wl-name" title="编辑这个关联启动" onClick={() => onEdit(item.id)}>
         {item.name}
       </button>
       <button
@@ -280,21 +294,21 @@ function LinkedPanel({
         disabled={items.length <= 1}
         onClick={() => toggle(item.id, false)}
       >
-        移除
+        取消关联
       </button>
     </div>
   )
 
   return (
     <div className="settings">
-      <Row name="关联启动项" desc="勾选要在这个应用上显示的关联启动">
+      <Row name="关联启动项" desc="选择要显示在这个应用上的关联启动，并可调整顺序">
         <span className="hint">{selected.length > 0 ? `已选 ${selected.length} 项` : '未选择'}</span>
       </Row>
       {linkedLaunches.length === 0 ? (
-        <div className="settings-empty">还没有关联启动项，请到左侧「关联启动」页面添加。</div>
+        <div className="settings-empty">还没有关联启动项，请先到「关联启动」页面添加。</div>
       ) : (
         <>
-          <Row name="默认关联启动" desc="点击关联启动按钮时使用的方式">
+          <Row name="默认关联启动" desc="点击主页关联启动按钮时默认启动的项">
             <Select
               value={defaultId ?? ''}
               options={items.map((l) => ({ value: l.id, label: l.name }))}
@@ -311,7 +325,7 @@ function LinkedPanel({
             }}
             renderItem={(item, _index, handle) => row(item, handle, false)}
           />
-          <div className="check-group-title">可添加</div>
+          <div className="check-group-title">可添加的关联启动</div>
           <div className="ll-apps">
             {linkedLaunches
               .filter((l) => !selected.includes(l.id))
@@ -380,7 +394,7 @@ export default function ModuleManagerView({
       <div className="page-header">
         <div>
           <h1 className="page-title">模块管理</h1>
-          <p className="page-subtitle">主页模块 · {entry.name}</p>
+          <p className="page-subtitle">主页模块与 KEVIN HUD · {entry.name}</p>
         </div>
         <div className="page-actions">
           <button className="btn ghost" onClick={onBack}>
@@ -390,57 +404,74 @@ export default function ModuleManagerView({
       </div>
 
       <div className="page-body">
-        <div className="settings">
-          {HOME_MODULES.map((module) => {
-            const state: HomeModuleState = {
-              ...DEFAULT_HOME_MODULE,
-              ...(entry.homeModules?.[module.id] ?? {})
-            }
-            const hasSettings = HAS_SETTINGS.includes(module.id)
-            const open = expanded === module.id
-            const note =
-              module.id === 'linkedLaunch' && !hasLinked ? '（该应用尚未关联任何关联启动）' : ''
-            return (
-              <div className="module-row" key={module.id} data-module-id={module.id}>
-                <Row name={module.name} desc={module.desc + note}>
-                  <div className="module-controls">
-                    <Switch
-                      checked={state.visible}
-                      disabled={!module.hideable}
-                      label="显示"
-                      title={module.hideable ? '是否在主页显示' : '启动按钮不可隐藏'}
-                      onChange={(visible) => onSetModule(module.id, { visible })}
-                    />
-                    <Switch
-                      checked={state.draggable}
-                      label="可拖动"
-                      title="是否允许在主页拖动"
-                      onChange={(draggable) => onSetModule(module.id, { draggable })}
-                    />
-                    <button
-                      className="btn sm ghost"
-                      disabled={state.x === null && state.y === null}
-                      onClick={() => onResetModulePosition(module.id)}
-                    >
-                      重置位置
-                    </button>
-                    {hasSettings && (
-                      <button
-                        className={`btn sm ghost module-caret${open ? ' open' : ''}`}
-                        title="模块设置"
-                        aria-expanded={open}
-                        onClick={() => setExpanded(open ? null : module.id)}
-                      >
-                        <Icon name="chevronDown" size={16} />
-                      </button>
-                    )}
-                  </div>
-                </Row>
-
-                {hasSettings && (
-                  <Collapse open={open}>
+        <KevinHudSettings
+          key={entry.id}
+          appId={entry.id}
+          appName={entry.name}
+          config={readKevinHud(entry)}
+          onSave={saveKevinHud}
+          onPreview={(appId, config) => window.api.kevinHudPreview(appId, config)}
+          onDismissPreview={() => window.api.kevinHudDismissPreview()}
+          onUpdateLive={(appId, config) =>
+            window.api.kevinHudUpdateLive(appId, config)
+          }
+        />
+        <div className="kh-modules-section">
+          <div className="kh-section-label">主页模块</div>
+          <div className="settings">
+            {HOME_MODULES.map((module) => {
+              const state: HomeModuleState = {
+                ...DEFAULT_HOME_MODULE,
+                ...(entry.homeModules?.[module.id] ?? {})
+              }
+              const hasSettings = HAS_SETTINGS.includes(module.id)
+              const open = expanded === module.id
+              const note =
+                module.id === 'linkedLaunch' && !hasLinked ? '（还没有为这个应用添加关联启动）' : ''
+              return (
+                <div className="module-row" key={module.id} data-module-id={module.id}>
+                  <Collapse
+                    open={hasSettings && open}
+                    header={
+                      <Row name={module.name} desc={module.desc + note}>
+                        <div className="module-controls">
+                          <Switch
+                            checked={state.visible}
+                            disabled={!module.hideable}
+                            label="显示"
+                            title={module.hideable ? '是否在主页显示' : '启动按钮不可隐藏'}
+                            onChange={(visible) => onSetModule(module.id, { visible })}
+                          />
+                          <Switch
+                            checked={state.draggable}
+                            label="可拖动"
+                            title="是否允许在主页拖动"
+                            onChange={(draggable) => onSetModule(module.id, { draggable })}
+                          />
+                          <button
+                            className="btn sm ghost"
+                            disabled={state.x === null && state.y === null}
+                            onClick={() => onResetModulePosition(module.id)}
+                          >
+                            重置位置
+                          </button>
+                          {hasSettings && (
+                            <button
+                              className={`btn sm ghost module-caret${open ? ' open' : ''}`}
+                              title="模块设置"
+                              aria-label="模块设置"
+                              aria-expanded={open}
+                              onClick={() => setExpanded(open ? null : module.id)}
+                            >
+                              <Icon name="chevronDown" size={16} />
+                            </button>
+                          )}
+                        </div>
+                      </Row>
+                    }
+                  >
                     {module.id === 'info' && (
-                      <Row name="模块文字" desc="信息卡片中显示的名称，留空则用绑定的游戏模块名">
+                      <Row name="模块文字" desc="信息卡片中显示的名称；留空则使用绑定的游戏模块名">
                         <InlineEdit
                           value={entry.moduleLabel ?? ''}
                           placeholder="例如：原神"
@@ -479,10 +510,10 @@ export default function ModuleManagerView({
                       />
                     )}
                   </Collapse>
-                )}
-              </div>
-            )
-          })}
+                </div>
+              )
+            })}
+          </div>
         </div>
       </div>
     </div>

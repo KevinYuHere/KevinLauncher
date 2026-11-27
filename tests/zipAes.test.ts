@@ -151,4 +151,26 @@ describe('extractZip (WinZip AES)', () => {
     ).rejects.toThrow()
     await fs.rm(dir, { recursive: true, force: true })
   })
+
+  it('verifies the password and authentication code for a stored empty entry', async () => {
+    const dir = await fs.mkdtemp(join(tmpdir(), 'kl-zipaes-'))
+    const zipPath = join(dir, 'patch.zip')
+    const outDir = join(dir, 'out')
+    const password = 'empty-fixture'
+    const name = 'empty.bin'
+    const bytes = buildAesZip([{ name, content: Buffer.alloc(0), stored: true }], password)
+    try {
+      await fs.writeFile(zipPath, bytes)
+      await extractZip({ zipPath, destDir: outDir, password })
+      expect(await fs.readFile(join(outDir, name))).toEqual(Buffer.alloc(0))
+      await expect(extractZip({ zipPath, destDir: outDir, password: 'wrong' })).rejects.toThrow('口令不匹配')
+
+      const macStart = 30 + bytes.readUInt16LE(26) + bytes.readUInt16LE(28) + 16 + 2
+      bytes[macStart] ^= 1
+      await fs.writeFile(zipPath, bytes)
+      await expect(extractZip({ zipPath, destDir: outDir, password })).rejects.toThrow(`补丁校验失败：${name}`)
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  })
 })

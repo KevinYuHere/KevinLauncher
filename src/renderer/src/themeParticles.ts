@@ -36,6 +36,11 @@ function readVar(name: string, fallback: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback
 }
 
+/** Transient click/trail effects add no value while the visual scene is paused. */
+function visualsPaused(): boolean {
+  return document.documentElement.hasAttribute('data-visual-paused')
+}
+
 export interface TriangleBurstOptions {
   count?: number
   size?: number
@@ -53,6 +58,7 @@ export function burstThemeTriangles(
   y: number,
   options: TriangleBurstOptions = {}
 ): void {
+  if (visualsPaused()) return
   const brand = parseColor(readVar('--brand', '#8b7cf6'))
   const [baseH, baseS, baseL] = toHsl(brand)
   const count = options.count ?? 12
@@ -156,6 +162,7 @@ const MOLECULE_SVGS = [
 
 /** A short gold streak left behind while the hold star follows the pointer. */
 export function burstMitiaGoldTrail(x: number, y: number): void {
+  if (visualsPaused()) return
   const layer = mitiaLayer()
   const el = document.createElement('span')
   el.className = 'mitia-gold-trail'
@@ -176,6 +183,7 @@ export function startMitiaGoldTrail(): {
   push: (x: number, y: number) => void
   stop: () => void
 } {
+  if (visualsPaused()) return { push: () => undefined, stop: () => undefined }
   const ns = 'http://www.w3.org/2000/svg'
   const svg = document.createElementNS(ns, 'svg')
   svg.setAttribute('class', 'mitia-gold-trail-svg')
@@ -245,6 +253,7 @@ export function burstMitiaMolecules(
   y: number,
   options: { count?: number; distance?: number } = {}
 ): void {
+  if (visualsPaused()) return
   const layer = mitiaLayer()
   const count = options.count ?? 5
   const distance = options.distance ?? 96
@@ -273,6 +282,7 @@ export function startMitiaHoldStar(
   x: number,
   y: number
 ): { move: (x: number, y: number) => void; stop: () => void } {
+  if (visualsPaused()) return { move: () => undefined, stop: () => undefined }
   const layer = mitiaLayer()
   const star = document.createElement('span')
   star.className = 'mitia-hold-star'

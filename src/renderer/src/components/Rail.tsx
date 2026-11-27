@@ -55,6 +55,8 @@ export default function Rail({
   const barRef = useRef<HTMLSpanElement>(null)
   const [geom, setGeom] = useState<{ top: number; h: number } | null>(null)
   const [pressed, setPressed] = useState(false)
+  const cancelGesture = useRef<(() => void) | undefined>()
+  useEffect(() => () => cancelGesture.current?.(), [])
   const viewRef = useRef(view)
   viewRef.current = view
   // The selected item's theme mark replaces the moving highlight: 霆骇列律 draws
@@ -80,6 +82,8 @@ export default function Rail({
   // Drag-to-select (same feel as the segmented control): pick the item under the
   // pointer while dragging, live.
   const onPointerDown = (event: ReactPointerEvent<HTMLElement>): void => {
+    if (event.button !== 0 || cancelGesture.current) return
+    const pointerId = event.pointerId
     // Only start a drag-select when the press lands on one of the nav items;
     // pressing the launcher-update indicator (which also carries `.rail-item`)
     // or the spacer must not snap the selection to 设置.
@@ -92,7 +96,7 @@ export default function Rail({
     } catch {
       /* ignore */
     }
-    const pick = (y: number): void => {
+    const pick = (y: number): ViewId | null => {
       let best: ViewId | null = null
       let bestDist = Infinity
       for (const id of Object.keys(itemRefs.current) as ViewId[]) {
@@ -105,19 +109,26 @@ export default function Rail({
           best = id
         }
       }
-      if (best && best !== viewRef.current) onNavigate(best)
+      return best
     }
-    pick(event.clientY)
-    const move = (e: PointerEvent): void => pick(e.clientY)
-    const up = (): void => {
-      window.removeEventListener('pointermove', move)
+    const close = (): void => {
       window.removeEventListener('pointerup', up)
-      window.removeEventListener('pointercancel', up)
+      window.removeEventListener('pointercancel', cancel)
+      window.removeEventListener('blur', close)
+      cancelGesture.current = undefined
       setPressed(false)
     }
-    window.addEventListener('pointermove', move)
+    const up = (next: PointerEvent): void => {
+      if (next.pointerId !== pointerId) return
+      const best = pick(next.clientY)
+      close()
+      if (best && best !== viewRef.current) onNavigate(best)
+    }
+    const cancel = (next: PointerEvent): void => { if (next.pointerId === pointerId) close() }
+    cancelGesture.current = close
     window.addEventListener('pointerup', up)
-    window.addEventListener('pointercancel', up)
+    window.addEventListener('pointercancel', cancel)
+    window.addEventListener('blur', close)
   }
 
   useEffect(() => {
@@ -144,6 +155,7 @@ export default function Rail({
     <nav
       className="rail"
       ref={navRef}
+      aria-label="主导航"
       onPointerDown={onPointerDown}
       onPointerCancel={() => setPressed(false)}
     >
@@ -168,6 +180,8 @@ export default function Rail({
             ref={ref(e.id)}
             className={`rail-item${view === e.id ? ' active' : ''}`}
             title={e.label}
+            aria-label={e.label}
+            aria-current={view === e.id ? 'page' : undefined}
             onClick={() => onNavigate(e.id)}
           >
             <Icon name={e.icon} />
@@ -183,6 +197,8 @@ export default function Rail({
         ref={ref('linkedLaunch')}
         className={`rail-item${view === 'linkedLaunch' ? ' active' : ''}`}
         title="关联启动"
+        aria-label="关联启动"
+        aria-current={view === 'linkedLaunch' ? 'page' : undefined}
         onClick={() => onNavigate('linkedLaunch')}
       >
         <Icon name="link" />
@@ -193,6 +209,8 @@ export default function Rail({
         ref={ref('settings')}
         className={`rail-item${view === 'settings' ? ' active' : ''}`}
         title="设置"
+        aria-label="设置"
+        aria-current={view === 'settings' ? 'page' : undefined}
         onClick={() => onNavigate('settings')}
       >
         <Icon name="settings" />

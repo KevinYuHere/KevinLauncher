@@ -1,0 +1,383 @@
+/* =========================================================================
+   KEVIN HUD — default memory readout.
+
+   An independent, presentation-only composition measured from the reference
+   448 x 48 capsule: the used/total cluster starts after a 22 DIP leading
+   inset, the value text begins around 51.2 DIP, an intentionally empty centre
+   separates it from the percentage + round progress badge at the trailing
+   edge. The badge is a 36.8 DIP dark disc (#262425) whose only ring is the
+   3.6 DIP lime arc (#C6CA4C); the arc starts at twelve o'clock and grows
+   clockwise. There is no full grey track or extra inset shadow. No screenshot,
+   icon pack, font asset or third-party artwork is used.
+
+   The host normally stretches the readout across the HUD and paints no second
+   pill. Type is based on the fixed 448 x 48 reference and scaled by the app-wide
+   value/description sizes plus the existing font scale; the settled plate height
+   only reserves room and never feeds back into the fonts. Typography weight and
+   the per-item label/value colour and gap override still come from the shared
+   item contract.
+   ========================================================================= */
+
+.kevin-hud-memory-readout {
+  --_khmr-width: var(--kevin-hud-memory-width, var(--khud-width, 448px));
+  --_khmr-height: var(--kevin-hud-memory-height, var(--khud-height, 48px));
+  --_khmr-scale: var(--khud-font-scale, 1);
+  --_khmr-value-scale: var(--khmr-value-scale, 1);
+  --_khmr-description-scale: var(--khmr-description-scale, 1);
+  --_khmr-accent: var(--kevin-hud-memory-accent, #c6ca4c);
+  --_khmr-badge: var(--kevin-hud-memory-badge, #262425);
+  --_khmr-description-color: var(
+    --khmr-description-color,
+    color-mix(in srgb, var(--khud-text, #ffffff) 82%, transparent)
+  );
+  --_khmr-value-color: var(--khmr-value-color, var(--khud-text, #ffffff));
+  --_khmr-gap: var(--khmr-copy-gap, 5px);
+
+  /* Fixed reference proportions at 48 DIP:
+     used 20.8, total 11.2, percent 17.6, percent sign 10.4, badge 36.8,
+     ring 3.6, leading inset 22, text left 51.2, trailing inset 4,
+     percent/badge gap 11.2. `valueScale` is valueSize / 14; the description
+     scale is descriptionSize / 8.5. Defaults are exactly 1. */
+  --_khmr-used-size: calc(
+    20.8px * var(--_khmr-value-scale) * var(--_khmr-scale)
+  );
+  --_khmr-total-size: calc(
+    11.2px * var(--_khmr-value-scale) * var(--_khmr-scale)
+  );
+  --_khmr-percent-size: calc(
+    17.6px * var(--_khmr-value-scale) * var(--_khmr-scale)
+  );
+  --_khmr-percent-sign-size: calc(
+    10.4px * var(--_khmr-value-scale) * var(--_khmr-scale)
+  );
+  --_khmr-description-text-size: calc(
+    11.2px * var(--_khmr-description-scale) * var(--_khmr-scale)
+  );
+  --_khmr-badge-size: 36.8px;
+  --_khmr-ring: 3.6px;
+  --_khmr-icon-size: calc(16.8px * var(--_khmr-description-scale));
+  /* Kept inside the fixed disc even at the largest description setting. */
+  --_khmr-badge-glyph-size: min(
+    calc(36.8px * 0.42 * var(--_khmr-description-scale)),
+    calc(36.8px * 0.62)
+  );
+  --_khmr-leading-inset: 22px;
+  --_khmr-trailing-inset: 4px;
+  --_khmr-icon-gap: clamp(
+    6px,
+    calc(12.4px + (var(--_khmr-gap, 5px) - 5px)),
+    40px
+  );
+  --_khmr-group-gap: clamp(
+    4px,
+    calc(11.2px + (var(--_khmr-gap, 5px) - 5px)),
+    40px
+  );
+
+  box-sizing: border-box;
+  display: flex;
+  flex: 0 1 auto;
+  align-items: center;
+  justify-content: space-between;
+  inline-size: var(--_khmr-width);
+  block-size: var(--_khmr-height);
+  max-inline-size: 100%;
+  max-block-size: 100%;
+  min-inline-size: 0;
+  padding-inline: var(--_khmr-leading-inset) var(--_khmr-trailing-inset);
+  overflow: visible;
+
+  color: var(--_khmr-value-color);
+  font: inherit;
+  line-height: 1;
+  letter-spacing: normal;
+  text-align: initial;
+  white-space: nowrap;
+
+  background: var(--kevin-hud-memory-background, transparent);
+  border: 1px solid var(--kevin-hud-memory-edge, transparent);
+  border-radius: 999px;
+
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.kevin-hud-memory-readout *,
+.kevin-hud-memory-readout *::before,
+.kevin-hud-memory-readout *::after {
+  box-sizing: border-box;
+}
+
+/* ---- leading cluster ---------------------------------------------------- */
+
+.kevin-hud-memory-readout__left {
+  display: flex;
+  flex: 0 1 auto;
+  align-items: center;
+  min-inline-size: 0;
+  gap: var(--_khmr-icon-gap);
+}
+
+.kevin-hud-memory-readout__description {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-start;
+  min-inline-size: 0;
+  color: var(--_khmr-description-color);
+  opacity: 1;
+}
+
+.kevin-hud-memory-readout__description-text {
+  font-size: var(--_khmr-description-text-size);
+  font-weight: var(--khmr-description-weight, 700);
+  line-height: 1;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.kevin-hud-memory-readout__amounts {
+  display: flex;
+  align-items: baseline;
+  min-inline-size: 0;
+  gap: 0.16em;
+  white-space: nowrap;
+}
+
+.kevin-hud-memory-readout__used {
+  /* Tabular digits plus a stable reserve keep the leading amount from moving
+     as the sample changes; the reference composition starts this text at the
+     51.2 DIP optical mark. */
+  min-inline-size: 4ch;
+  color: var(--_khmr-value-color);
+  font-size: var(--_khmr-used-size);
+  font-weight: var(--khmr-value-weight, 650);
+  line-height: 0.94;
+  letter-spacing: -0.015em;
+  font-variant-numeric: tabular-nums slashed-zero;
+  font-feature-settings: 'tnum' 1, 'zero' 1;
+}
+
+.kevin-hud-memory-readout__total {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.24em;
+  min-inline-size: 0;
+  color: var(--_khmr-value-color);
+  font-size: var(--_khmr-total-size);
+  font-weight: var(--khmr-value-weight, 650);
+  line-height: 1;
+  letter-spacing: 0.012em;
+  opacity: 0.55;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
+}
+
+.kevin-hud-memory-readout__divider {
+  opacity: 0.75;
+}
+
+.kevin-hud-memory-readout__total-value {
+  min-inline-size: 5ch;
+}
+
+.kevin-hud-memory-readout__unit {
+  font-size: 1em;
+  letter-spacing: 0.035em;
+  opacity: 0.8;
+}
+
+/* ---- empty centre ------------------------------------------------------- */
+
+.kevin-hud-memory-readout__center {
+  flex: 1 1 22px;
+  min-inline-size: 0;
+  align-self: stretch;
+}
+
+/* ---- trailing percentage and badge ------------------------------------- */
+
+.kevin-hud-memory-readout__right {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--_khmr-group-gap);
+}
+
+.kevin-hud-memory-readout__percent {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 0.14em;
+  min-inline-size: 4ch;
+  color: var(--_khmr-value-color);
+  font-size: var(--_khmr-percent-size);
+  font-weight: var(--khmr-value-weight, 650);
+  line-height: 1;
+  text-align: right;
+  letter-spacing: 0.008em;
+  font-variant-numeric: tabular-nums slashed-zero;
+  font-feature-settings: 'tnum' 1, 'zero' 1;
+}
+
+.kevin-hud-memory-readout__percent-value {
+  font-variant-numeric: tabular-nums slashed-zero;
+  font-feature-settings: 'tnum' 1, 'zero' 1;
+}
+
+.kevin-hud-memory-readout__percent-sign {
+  color: var(--_khmr-value-color);
+  font-size: var(--_khmr-percent-sign-size);
+  opacity: 0.55;
+}
+
+.kevin-hud-memory-readout[data-percent-known='false'] .kevin-hud-memory-readout__percent {
+  opacity: 0.52;
+  letter-spacing: 0.04em;
+}
+
+.kevin-hud-memory-readout__arc {
+  position: relative;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  inline-size: var(--_khmr-badge-size);
+  block-size: var(--_khmr-badge-size);
+  color: var(--_khmr-value-color);
+  background: var(--_khmr-badge);
+  border-radius: 50%;
+  isolation: isolate;
+}
+
+/* The clamped percentage paints a conic arc from twelve o'clock, clockwise,
+   masked into the same 3.6 DIP thin ring. The unfilled remainder stays plain
+   badge, with no full grey track beneath it. */
+.kevin-hud-memory-readout__arc::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: conic-gradient(
+    from 0deg,
+    var(--_khmr-accent) 0 var(--kevin-hud-memory-progress, 0%),
+    transparent var(--kevin-hud-memory-progress, 0%)
+  );
+  -webkit-mask: radial-gradient(
+    farthest-side,
+    transparent calc(100% - var(--_khmr-ring) - 0.5px),
+    #000 calc(100% - var(--_khmr-ring))
+  );
+  mask: radial-gradient(
+    farthest-side,
+    transparent calc(100% - var(--_khmr-ring) - 0.5px),
+    #000 calc(100% - var(--_khmr-ring))
+  );
+  pointer-events: none;
+}
+
+.kevin-hud-memory-readout__arc[data-known='false']::after {
+  background: none;
+}
+
+/* ---- original CSS memory glyph ----------------------------------------- */
+
+.kevin-hud-memory-readout__glyph {
+  position: relative;
+  display: inline-block;
+  flex: 0 0 auto;
+  inline-size: var(--_khmr-icon-size);
+  block-size: calc(var(--_khmr-icon-size) * 0.82);
+  color: var(--_khmr-description-color);
+  border: max(1px, 0.07em) solid currentColor;
+  border-radius: 0.18em;
+  opacity: 0.92;
+}
+
+/* Three short circuit bars. */
+.kevin-hud-memory-readout__glyph::before {
+  content: '';
+  position: absolute;
+  inset: 0.2em 0.22em;
+  background:
+    linear-gradient(currentColor, currentColor) left 12% / 100% 1px no-repeat,
+    linear-gradient(currentColor, currentColor) left 50% / 76% 1px no-repeat,
+    linear-gradient(currentColor, currentColor) left 88% / 52% 1px no-repeat;
+  opacity: 0.8;
+  pointer-events: none;
+}
+
+/* Tiny edge contacts, kept simple enough to read at HUD size. */
+.kevin-hud-memory-readout__glyph::after {
+  content: '';
+  position: absolute;
+  inset: -0.18em 0.2em;
+  background:
+    repeating-linear-gradient(
+        90deg,
+        currentColor 0 0.08em,
+        transparent 0.08em 0.28em
+      )
+      left top / auto 0.18em no-repeat,
+    repeating-linear-gradient(
+        90deg,
+        currentColor 0 0.08em,
+        transparent 0.08em 0.28em
+      )
+      left bottom / auto 0.18em no-repeat;
+  opacity: 0.58;
+  pointer-events: none;
+}
+
+.kevin-hud-memory-readout__glyph--arc {
+  inline-size: var(--_khmr-badge-glyph-size);
+  block-size: calc(var(--_khmr-badge-glyph-size) * 0.8214);
+  color: var(--_khmr-value-color);
+  border-width: 1px;
+  border-radius: 0.2em;
+  opacity: 0.9;
+}
+
+/* ---- vertical item descriptor ----------------------------------------- */
+
+/* The value and percentage keep their leading/trailing meaning; only the
+   description moves above the used amount. The right cluster spans both rows
+   so the percent stays adjacent to its lime badge. Values remain visible: a
+   host that is genuinely too short is handled by the HUD's content-height
+   reserve, not by hiding or ellipsizing a value. */
+.kevin-hud-memory-readout[data-orientation='vertical'] {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: auto auto;
+  align-content: center;
+  align-items: center;
+  column-gap: var(--_khmr-group-gap);
+  row-gap: var(--_khmr-gap);
+}
+
+.kevin-hud-memory-readout[data-orientation='vertical'] .kevin-hud-memory-readout__left {
+  display: contents;
+}
+
+.kevin-hud-memory-readout[data-orientation='vertical'] .kevin-hud-memory-readout__description {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.kevin-hud-memory-readout[data-orientation='vertical'] .kevin-hud-memory-readout__amounts {
+  grid-column: 1;
+  grid-row: 2;
+}
+
+.kevin-hud-memory-readout[data-orientation='vertical'] .kevin-hud-memory-readout__center {
+  display: none;
+}
+
+.kevin-hud-memory-readout[data-orientation='vertical'] .kevin-hud-memory-readout__right {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: center;
+}

@@ -1,6 +1,8 @@
 import { createReadStream, promises as fs } from 'fs'
 import { extname } from 'path'
 import { Readable } from 'stream'
+import { isAllowedMediaRead } from './mediaAccess'
+import { managedMediaRoots } from './mediaRoots'
 
 const MIME: Record<string, string> = {
   '.mp4': 'video/mp4',
@@ -12,6 +14,8 @@ const MIME: Record<string, string> = {
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
+  '.jpe': 'image/jpeg',
+  '.jfif': 'image/jpeg',
   '.webp': 'image/webp',
   '.gif': 'image/gif',
   '.bmp': 'image/bmp',
@@ -28,8 +32,19 @@ const MIME: Record<string, string> = {
  * responses Chromium's demuxer intermittently fails to open large MP4s
  * (`DEMUXER_ERROR_COULD_NOT_OPEN` → a black background). CORS is added so the
  * renderer can also draw these files to a canvas (untainted).
+ *
+ * Only launcher-owned assets, current gallery files and trusted picker
+ * selections are served; a renderer cannot turn this protocol into a general
+ * local file reader. The authorization check is in-memory and deliberately
+ * avoids disk/WMI work on every range request.
  */
 export async function serveMediaFile(filePath: string, request: Request): Promise<Response> {
+  if (!isAllowedMediaRead(filePath, managedMediaRoots())) {
+    return new Response('forbidden', {
+      status: 403,
+      headers: { 'Cache-Control': 'no-store' }
+    })
+  }
   let size: number
   try {
     size = (await fs.stat(filePath)).size

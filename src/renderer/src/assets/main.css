@@ -657,22 +657,54 @@ textarea {
 .module-caret.open {
   transform: rotate(180deg);
 }
-/* Animated reveal (see components/Collapse.tsx): the panel stays mounted and
-   animates its height (0fr → 1fr). No inner padding while closed so it fully
-   collapses (nothing leaks out). */
+/* Animated reveal (see components/Collapse.tsx): only the content animates its
+   height (0fr → 1fr). An optional trigger row stays in flow when closed so it
+   can reopen the drawer; while open it sticks to the real scroll viewport.
+   Nested drawers receive the accumulated ancestor header height through the
+   component and offset their own `top` by it. */
 .collapse {
+  position: relative;
+}
+.collapse-head {
+  position: relative;
+  z-index: 3;
+}
+.collapse.open > .collapse-head {
+  position: sticky;
+  top: var(--collapse-sticky-top, 0px);
+  z-index: 3;
+  background-color: var(--glass-2);
+  /* An always-on veil keeps the sticky row readable even when the glass is set
+     to its clearest setting (where --glass-2 has no alpha). */
+  background-image: linear-gradient(
+    180deg,
+    rgba(var(--scrim-rgb), 0.32),
+    rgba(var(--scrim-rgb), 0.24)
+  );
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  box-shadow: 0 12px 24px -20px rgba(0, 0, 0, 0.85);
+}
+/* The wrapper is the row's parent, so the global `:last-child` rule would
+   remove the separator an ordinary settings row has. */
+.collapse-head .settings-row:last-child {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.collapse-reveal {
   display: grid;
   grid-template-rows: 0fr;
   transition: grid-template-rows 0.26s var(--ease);
 }
-.collapse.open {
+.collapse.open > .collapse-reveal {
   grid-template-rows: 1fr;
 }
 /* One 3px vertical line down the whole drawer, inset from the left, coloured
-   with the current text colour; rows keep a gap to its right. */
+   with the current text colour; rows keep a gap to its right. `clip` (rather
+   than `hidden`) clips the reveal without creating a scroll container, so a
+   nested header can still stick against the page scroller. */
 .collapse-inner {
   position: relative;
-  overflow: hidden;
+  overflow: clip;
   min-height: 0;
 }
 .collapse-inner::before {
@@ -1017,7 +1049,9 @@ textarea {
 .settings {
   border: 1px solid var(--line);
   border-radius: 14px;
-  overflow: hidden;
+  /* `clip` keeps the rounded corners while allowing sticky drawer headers to
+     reach the page scroll container (`hidden` would become their scrollport). */
+  overflow: clip;
   background: var(--glass);
   backdrop-filter: var(--glass-backdrop);
   -webkit-backdrop-filter: var(--glass-backdrop);
@@ -1726,6 +1760,17 @@ textarea {
   margin: 0 0 8px;
   color: var(--fg-2);
 }
+/* Empty state + first-run scan: centred on the stage, scrolls inside the
+   glass card when the candidate list is taller than the window. */
+.welcome-discovery {
+  width: min(860px, calc(100% - 40px));
+  max-height: calc(100% - 36px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.welcome-discovery .game-discovery {
+  width: 100%;
+}
 
 /* --------------------------------------------------------------- buttons */
 .btn {
@@ -2219,7 +2264,8 @@ textarea {
   white-space: nowrap;
   min-width: 0;
 }
-.select-option:hover {
+.select-option:hover,
+.select-option.highlighted {
   background: var(--glass-hover);
 }
 .select-option.active {
@@ -2461,32 +2507,22 @@ textarea {
   font-size: 12px;
 }
 
-/* Content slides; the rail / topbar stay visually still via a counter-animation
-   so backdrop-filter keeps working without a flicker. The wallpaper layers sit
-   outside `.app-anim` (see App.tsx) so the full-window background is not
-   re-composited on every frame of the slide. */
+/* Only the page stage slides. Animating `.app-anim` (the whole-window ancestor
+   of the fixed rail, top bar and every backdrop-filter surface) promoted the
+   full window and made Chromium re-composite the glass over a grey backing for
+   the first frames of each page switch; counter-animating the rail/topbar did
+   not prevent it. The wallpaper stays outside `.app-anim` (see App.tsx), and
+   the rail, top bar and their materials are never part of the transition. */
 .app-anim {
   position: absolute;
   inset: 0;
 }
-.app-anim-run {
+.app-anim-run .stage {
   animation: appIn 0.32s cubic-bezier(0.22, 1, 0.36, 1);
-}
-.app-anim-run .rail,
-.app-anim-run .topbar {
-  animation: appCounter 0.32s cubic-bezier(0.22, 1, 0.36, 1);
 }
 @keyframes appIn {
   from {
     transform: translateX(var(--anim-x, 26px));
-  }
-  to {
-    transform: none;
-  }
-}
-@keyframes appCounter {
-  from {
-    transform: translateX(calc(var(--anim-x, 26px) * -1));
   }
   to {
     transform: none;
@@ -2556,7 +2592,7 @@ textarea {
 
 /* -------------------------------------------------------- color picker */
 /* In-app, glass-aware picker (the OS <input type="color"> dialog cannot be
-   themed). Trigger swatch + a floating popup of sliders and presets. */
+   themed). Trigger swatch + an inline editor row of sliders and presets. */
 .color-trigger {
   width: 42px;
   height: 28px;
@@ -2572,9 +2608,12 @@ textarea {
   height: 100%;
   border-radius: 5px;
 }
-/* Colour editor — react-colorful inside a glass popup (follows the material). */
-.color-popup {
-  width: 240px;
+/* Colour editor — react-colorful expanded in place inside the settings row. */
+.settings-color-panel {
+  padding: 10px 18px 18px 22px;
+}
+.settings-color-panel .color-editor {
+  width: min(340px, 100%);
 }
 .color-editor {
   display: flex;
@@ -2658,6 +2697,36 @@ textarea {
 }
 .gallery-thumb:hover {
   border-color: var(--brand-line);
+}
+.thumb-placeholder {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+/* Pause continuous decoration in the launcher and in the click-particle layers
+   that live outside `.app` (portal popups keep their short entrance animation so
+   static controls stay visible while a game is running). */
+[data-visual-paused] .app *,
+[data-visual-paused] .app *::before,
+[data-visual-paused] .app *::after,
+[data-visual-paused] .theme-click-burst *,
+[data-visual-paused] .mitia-burst-layer * {
+  animation-play-state: paused !important;
+}
+/* Interactive overlays are static UI: they must still fade/pop in while paused. */
+[data-visual-paused] :is(.modal, .modal-mask, .launch-drawer, .toast, .gacha-toast) {
+  animation-play-state: running !important;
+}
+/* A page switch is one-shot feedback, not decoration: let it finish while the
+   rest is paused, otherwise the stage stays offset and a themed wipe can freeze
+   over the page until the window/game state changes. */
+[data-visual-paused] .app-anim-run,
+[data-visual-paused] .app-anim-run .stage,
+[data-visual-paused] .app-anim-run::before,
+[data-visual-paused] .app-anim-run::after,
+[data-visual-paused] .app-anim-run .page-curve,
+[data-visual-paused] .app-anim-run .page-header::after {
+  animation-play-state: running !important;
 }
 .thumb-skeleton {
   display: block;
@@ -3207,6 +3276,178 @@ textarea:focus-visible {
   /* The gap to the card's top edge must match the gap a later title has to the
      previous row's border (which equals the title's own top padding). */
   padding-top: 20px;
+}
+
+/* ------------------------------------------------- appearance presets */
+.preset-list {
+  display: grid;
+  gap: 8px;
+  padding: 2px 18px 16px;
+}
+.preset-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--glass);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+}
+.preset-item-main {
+  min-width: 0;
+}
+.preset-item-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.preset-item-meta {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--fg-3);
+}
+.preset-item-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+.preset-empty,
+.preset-error {
+  padding: 0 18px 16px;
+  font-size: 12px;
+  color: var(--fg-3);
+}
+.preset-error {
+  color: var(--error);
+}
+
+/* ---------------------------------------------------- game discovery */
+.game-discovery {
+  width: min(760px, 100%);
+  margin: 0 auto;
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--glass);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+}
+.game-discovery-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--line);
+}
+.game-discovery-copy {
+  min-width: 0;
+}
+.game-discovery-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.game-discovery-desc {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--fg-3);
+  line-height: 1.5;
+}
+.game-discovery-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+.game-discovery-hint,
+.game-discovery-empty {
+  padding: 16px 18px;
+  font-size: 12px;
+  color: var(--fg-3);
+  line-height: 1.6;
+}
+.game-discovery-error,
+.game-discovery-warning {
+  padding: 10px 18px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--error);
+}
+.game-discovery-warning {
+  color: var(--fg-2);
+  background: var(--glass-hover);
+}
+.game-discovery-list {
+  display: grid;
+  gap: 8px;
+  padding: 12px 18px;
+}
+.game-discovery-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--glass);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+}
+.game-discovery-item.added {
+  opacity: 0.66;
+}
+.game-discovery-item-main {
+  min-width: 0;
+  flex: 1;
+}
+.game-discovery-item-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.game-discovery-badge {
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--fg-3);
+}
+.game-discovery-badge.added {
+  border-color: var(--brand);
+  color: var(--brand);
+}
+.game-discovery-path {
+  margin-top: 4px;
+  overflow: hidden;
+  color: var(--fg-2);
+  font-family: ui-monospace, Consolas, 'Courier New', monospace;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.game-discovery-meta {
+  margin-top: 3px;
+  color: var(--fg-3);
+  font-size: 11px;
+}
+.game-discovery-confirm {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--line);
 }
 .about-line {
   display: flex;
@@ -7256,13 +7497,22 @@ textarea:focus-visible {
   }
 }
 
-/* Themed page switch should not animate while the user asked for less motion. */
+/* Page-switch motion stops while the user asked for less motion. */
 @media (prefers-reduced-motion: reduce) {
-  [data-special-transition='starsnow'] .app-anim-run,
-  [data-special-transition='starsnow'] .app-anim-run .bg-layer,
-  [data-special-transition='starsnow'] .app-anim-run .bg-scrim,
-  [data-special-transition='starsnow'] .app-anim-run .rail,
-  [data-special-transition='starsnow'] .app-anim-run .topbar {
+  .app-anim-run .stage,
+  [data-special-transition='starsnow'] .app-anim-run .stage,
+  [data-special-transition='mitia'] .app-anim-run .stage {
+    animation: none;
+  }
+  /* Leaving a wipe's `both` fill in place would freeze it over the page, so
+     remove the decorative layers entirely while motion is reduced. */
+  [data-special-transition='starsnow'] .app-anim-run::before,
+  [data-special-transition='starsnow'] .app-anim-run::after {
+    animation: none;
+    display: none;
+  }
+  [data-special-theme~='mitia'] .page-curve,
+  [data-special-transition='mitia'] .app-anim-run .page-header::after {
     animation: none;
   }
   .atom-orbit,

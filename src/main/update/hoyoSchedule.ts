@@ -51,7 +51,9 @@ export type HoYoStep = (context: HoYoStepContext) => Promise<void>
 /** Retain completed steps throughout pause/retry; only the active step is re-entered. */
 export class HoYoSteps {
   private next = 0
-  constructor(private readonly steps: HoYoStep[], private readonly dispose: () => Promise<void>) {}
+  constructor(private readonly steps: HoYoStep[], private readonly dispose: () => Promise<void>,
+    private readonly suspend?: () => Promise<void>
+  ) {}
   async run(context: HoYoStepContext): Promise<void> {
     while (this.next < this.steps.length) {
       context.signal.throwIfAborted()
@@ -60,4 +62,5 @@ export class HoYoSteps {
     }
   }
   close(): Promise<void> { return this.dispose() }
+  park(): Promise<void> { return this.suspend?.() ?? Promise.resolve() }
 }

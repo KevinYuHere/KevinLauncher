@@ -1,6 +1,8 @@
 import { useRef, useState, type ReactElement } from 'react'
 import { useOpenOrigin } from './useOpenOrigin'
+import { useDialogFocus } from './useDialogFocus'
 import type { AddonDescriptor, AddonId, LaunchMethod, NewAppEntry } from '@shared/types'
+import { dataErrorDetails } from '@shared/dataErrors'
 import Select from './Select'
 import IconPicker from './IconPicker'
 import LaunchMethodsEditor from './LaunchMethodsEditor'
@@ -49,6 +51,7 @@ export default function NewAppDialog({
     setClosing(true)
     window.setTimeout(onClose, 180)
   }
+  useDialogFocus(modalRef, true, busy ? undefined : requestClose)
 
   const pickIcon = async (): Promise<void> => {
     const picked = await pickIconCropped()
@@ -79,7 +82,9 @@ export default function NewAppDialog({
         iconDataUrl
       )
     } catch (err) {
-      setError((err as Error).message)
+      const detail = dataErrorDetails(err)?.message ??
+        (err instanceof Error ? err.message : String(err))
+      setError(`添加应用失败：${detail}`)
       setBusy(false)
     }
   }
@@ -88,13 +93,17 @@ export default function NewAppDialog({
     <div className={`modal-mask${closing ? ' closing' : ''}`}>
       <div
         ref={modalRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="添加应用"
+        tabIndex={-1}
         className={`modal wallpaper-region${closing ? ' closing' : ''}`}
         onClick={(e) => e.stopPropagation()}
       >
         <span className="wp-region-layer" aria-hidden="true" />
         <div className="modal-header">
           <h2>添加应用</h2>
-          <button className="modal-close" onClick={requestClose}>
+          <button className="modal-close" aria-label="关闭添加应用" onClick={requestClose}>
             ✕
           </button>
         </div>
@@ -106,7 +115,7 @@ export default function NewAppDialog({
               small
               src={iconDataUrl}
               label="应用图标"
-              desc="可选图片，或选择 exe / bat / lnk 提取其图标；选后可框选正方形并缩放。"
+              desc="可选图片，或从 exe / bat / lnk 提取图标；选好后可拖动、缩放并截取方形区域。"
               onPick={() => void pickIcon()}
               onClear={iconDataUrl ? () => setIconDataUrl(null) : undefined}
             />
@@ -122,7 +131,7 @@ export default function NewAppDialog({
             <div className="settings-row">
               <div className="settings-main">
                 <div className="settings-name">绑定游戏模块</div>
-                <div className="settings-desc">可选，绑定后启用更新 / 抽卡等模块功能</div>
+                <div className="settings-desc">可选。绑定后可查看对应游戏的更新、抽卡记录等模块功能</div>
               </div>
               <div className="settings-action">
                 <Select
@@ -140,7 +149,7 @@ export default function NewAppDialog({
 
           <LaunchMethodsEditor
             variant="card"
-            title="启动方式（可留空，稍后在模块管理中配置）"
+            title="启动方式（可留空，之后在「模块管理」中设置）"
             methods={methods}
             defaultId={defaultId}
             onChange={(next, nextDefault) => {
@@ -157,7 +166,7 @@ export default function NewAppDialog({
             取消
           </button>
           <button className="btn primary" onClick={() => void submit()} disabled={busy}>
-            {busy ? '添加中…' : '添加'}
+            {busy ? '添加中…' : '添加应用'}
           </button>
         </div>
       </div>

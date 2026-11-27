@@ -128,17 +128,28 @@ export default function Viewer({ path }: ViewerProps): ReactElement {
           {name} · {Math.round(scale * 100)}%
         </span>
         <div className="viewer-actions">
-          <button className="win-btn" title="重置缩放" onClick={reset}>
+          <button
+            className="win-btn"
+            title="适应窗口（双击画面也可以）"
+            aria-label="适应窗口（双击画面也可以）"
+            onClick={reset}
+          >
             ⟲
           </button>
           <button
             className="win-btn"
-            title="在文件资源管理器中打开 / 复制"
+            title="更多操作：在文件夹中显示；图片还可以复制"
+            aria-label="更多操作：在文件夹中显示；图片还可以复制"
             onClick={() => void window.api.galleryContextMenu(shown)}
           >
             ⋯
           </button>
-          <button className="win-btn close" title="关闭" onClick={() => void window.api.windowClose()}>
+          <button
+            className="win-btn close"
+            title="关闭"
+            aria-label="关闭查看器"
+            onClick={() => void window.api.windowClose()}
+          >
             &#x2715;
           </button>
         </div>
@@ -146,6 +157,8 @@ export default function Viewer({ path }: ViewerProps): ReactElement {
       <div
         ref={stageRef}
         className="viewer-stage"
+        role="group"
+        aria-label={isVideo ? '视频播放区' : '图片查看区：滚轮缩放，拖动平移，双击适应窗口'}
         onMouseDown={(e) => {
           if (e.button !== 0) return
           dragRef.current = { x: e.clientX, y: e.clientY, ox: offset.x, oy: offset.y }
@@ -161,6 +174,7 @@ export default function Viewer({ path }: ViewerProps): ReactElement {
         <button
           className={`viewer-nav prev${controls ? '' : ' hidden'}`}
           title="上一张（←）"
+          aria-label="上一张（左方向键）"
           onMouseEnter={poke}
           onClick={() => navigate(-1)}
         >
@@ -169,6 +183,7 @@ export default function Viewer({ path }: ViewerProps): ReactElement {
         <button
           className={`viewer-nav next${controls ? '' : ' hidden'}`}
           title="下一张（→）"
+          aria-label="下一张（右方向键）"
           onMouseEnter={poke}
           onClick={() => navigate(1)}
         >
@@ -179,6 +194,7 @@ export default function Viewer({ path }: ViewerProps): ReactElement {
             key={shown}
             className="viewer-img"
             src={fileUrl(shown)}
+            aria-label={`视频 ${name}`}
             controls
             autoPlay
             loop

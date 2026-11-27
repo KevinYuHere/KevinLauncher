@@ -2,8 +2,9 @@ import { promises as fs } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { fetchMiHoYoGacha, toApiPrefix } from '../src/main/gacha/mihoyo'
+import { fetchMiHoYoGacha, syncMiHoYoGacha, toApiPrefix } from '../src/main/gacha/mihoyo'
 import { scanWebCache } from '../src/main/gacha/urlSource'
+import type { GachaRecord } from '../src/shared/types'
 
 const rawAuth = 'demonstration%2btoken%3D%25~'
 const genshin = 'https://webstatic.mihoyo.com/hk4e/event/e20190909gacha-v3/index.html'
@@ -128,6 +129,169 @@ describe('MiHoYo history sync', () => {
       retcode: 0, data: { list: [{ ...draw('1'), id: Number(largeId) }] }
     }))
     await expect(fetchMiHoYoGacha('genshin', `${genshin}?authkey=${rawAuth}`, 'fixture')).rejects.toThrow('无效记录')
+  })
+})
+
+type DrawRow = ReturnType<typeof draw>
+interface ApiLogEntry {
+  type: string
+  page: number
+  endId: string
+}
+
+const history = (count: number, top: number): DrawRow[] =>
+  Array.from({ length: count }, (_, index) => draw(String(top - index)))
+
+function stubGenshinApi(
+  rows: DrawRow[],
+  options: {
+    overlap?: boolean
+    transform?: (type: string, page: number, rows: DrawRow[]) => DrawRow[]
+    fail?: (type: string, page: number) => Response | undefined
+  } = {}
+): ApiLogEntry[] {
+  const log: ApiLogEntry[] = []
+  let previous: DrawRow[] = []
+  vi.stubGlobal('fetch', async (raw: string) => {
+    const url = new URL(raw)
+    const type = url.searchParams.get('gacha_type') ?? url.searchParams.get('real_gacha_type') ?? ''
+    const page = Number(url.searchParams.get('page'))
+    const endId = url.searchParams.get('end_id') ?? '0'
+    const all = type === '301' ? rows : []
+    const start = endId === '0' ? 0 : all.findIndex((row) => row.id === endId) + 1
+    let pageRows = all.slice(start, start + 20)
+    if (options.overlap && type === '301' && page > 1 && previous.length) {
+      // Real world overlap: repeat the previous page's oldest pull, then
+      // continue after its cursor so nothing is omitted.
+      pageRows = [previous[previous.length - 1], ...pageRows.slice(0, 19)]
+    }
+    pageRows = options.transform?.(type, page, pageRows) ?? pageRows
+    previous = pageRows
+    log.push({ type, page, endId })
+    const failure = options.fail?.(type, page)
+    return failure ?? reply(pageRows)
+  })
+  return log
+}
+
+const pagesFor = (log: ApiLogEntry[], type = '301'): number =>
+  log.filter((entry) => entry.type === type).length
+
+const checkpointFor = (result: Awaited<ReturnType<typeof syncMiHoYoGacha>>, pool = '301') =>
+  result.checkpoints.find((checkpoint) => checkpoint.pool === pool)
+
+function merged(previous: GachaRecord[], incoming: GachaRecord[]): GachaRecord[] {
+  const map = new Map(previous.map((record) => [record.id, record]))
+  for (const record of incoming) map.set(record.id, record)
+  return [...map.values()]
+}
+
+const source = `${genshin}?authkey=${rawAuth}`
+
+describe('MiHoYo incremental history sync', () => {
+  it('stops at the trusted boundary and merges to the same records as a full traversal', async () => {
+    stubGenshinApi(history(50, 1050))
+    const initial = await syncMiHoYoGacha('genshin', source, 'fixture')
+    const checkpoint = checkpointFor(initial)!
+    expect(checkpoint).toMatchObject({ game: 'genshin', uid: '100000001', pool: '301', boundaryId: '1050' })
+
+    const incrementalLog = stubGenshinApi(history(53, 1053))
+    const incremental = await syncMiHoYoGacha('genshin', source, 'fixture', {
+      checkpoints: initial.checkpoints
+    })
+    expect(incremental.earlyStopped).toBe(true)
+    expect(pagesFor(incrementalLog)).toBe(1)
+    expect(incremental.records).toHaveLength(20)
+    expect(checkpointFor(incremental)).toMatchObject({ boundaryId: '1053' })
+
+    const fullLog = stubGenshinApi(history(53, 1053))
+    const full = await syncMiHoYoGacha('genshin', source, 'fixture', { mode: 'full' })
+    expect(full.earlyStopped).toBe(false)
+    expect(pagesFor(fullLog)).toBe(3)
+    expect(merged(initial.records, incremental.records).map((record) => record.id).sort())
+      .toEqual(full.records.map((record) => record.id).sort())
+  })
+
+  it('does not treat locally known or imported IDs as a checkpoint', async () => {
+    const log = stubGenshinApi(history(80, 1080))
+    const result = await syncMiHoYoGacha('genshin', source, 'fixture', { checkpoints: [] })
+    expect(result.earlyStopped).toBe(false)
+    expect(pagesFor(log)).toBe(5)
+    expect(result.records).toHaveLength(80)
+  })
+
+  it('keeps paging when a page repeats the previous page and never moves the boundary', async () => {
+    stubGenshinApi(history(50, 1050))
+    const initial = await syncMiHoYoGacha('genshin', source, 'fixture')
+    const incrementalLog = stubGenshinApi(history(80, 1080), { overlap: true })
+    const result = await syncMiHoYoGacha('genshin', source, 'fixture', {
+      checkpoints: initial.checkpoints
+    })
+    expect(result.earlyStopped).toBe(false)
+    expect(pagesFor(incrementalLog)).toBeGreaterThan(4)
+    expect(result.records).toHaveLength(80)
+    expect(result.checkpoints).toEqual([])
+  })
+
+  it('continues to the oldest page when a page is out of order', async () => {
+    stubGenshinApi(history(50, 1050))
+    const initial = await syncMiHoYoGacha('genshin', source, 'fixture')
+    const log = stubGenshinApi(history(80, 1080), {
+      transform: (type, page, rows) => {
+        if (type !== '301' || page !== 2) return rows
+        const swapped = rows.slice()
+        ;[swapped[0], swapped[1]] = [swapped[1], swapped[0]]
+        return swapped
+      }
+    })
+    const result = await syncMiHoYoGacha('genshin', source, 'fixture', {
+      checkpoints: initial.checkpoints
+    })
+    expect(result.earlyStopped).toBe(false)
+    expect(pagesFor(log)).toBe(5)
+    expect(result.records).toHaveLength(80)
+    expect(result.checkpoints).toEqual([])
+  })
+
+  it('keeps paging past a missing boundary and establishes a new one after a clean full traversal', async () => {
+    stubGenshinApi(history(50, 1050))
+    const initial = await syncMiHoYoGacha('genshin', source, 'fixture')
+    const gapped = [...history(20, 1080), ...history(40, 1040)]
+    const log = stubGenshinApi(gapped)
+    const result = await syncMiHoYoGacha('genshin', source, 'fixture', {
+      checkpoints: initial.checkpoints
+    })
+    expect(result.earlyStopped).toBe(false)
+    expect(pagesFor(log)).toBe(4)
+    expect(result.records).toHaveLength(60)
+    expect(checkpointFor(result)).toMatchObject({ boundaryId: '1080' })
+  })
+
+  it('does not return checkpoints or partial records when a page is rate limited', async () => {
+    stubGenshinApi(history(50, 1050))
+    const initial = await syncMiHoYoGacha('genshin', source, 'fixture')
+    const log = stubGenshinApi(history(80, 1080), {
+      fail: (type, page) => type === '301' && page === 2
+        ? Response.json({ retcode: -110, message: 'busy' })
+        : undefined
+    })
+    await expect(syncMiHoYoGacha('genshin', source, 'fixture', {
+      checkpoints: initial.checkpoints
+    })).rejects.toThrow('请求过快')
+    expect(pagesFor(log)).toBe(2)
+  })
+
+  it('ignores incremental boundaries in full mode and traverses to the oldest page', async () => {
+    stubGenshinApi(history(50, 1050))
+    const initial = await syncMiHoYoGacha('genshin', source, 'fixture')
+    const log = stubGenshinApi(history(80, 1080))
+    const result = await syncMiHoYoGacha('genshin', source, 'fixture', {
+      mode: 'full', checkpoints: initial.checkpoints
+    })
+    expect(result.earlyStopped).toBe(false)
+    expect(pagesFor(log)).toBe(5)
+    expect(result.records).toHaveLength(80)
+    expect(checkpointFor(result)).toMatchObject({ boundaryId: '1080' })
   })
 })
 

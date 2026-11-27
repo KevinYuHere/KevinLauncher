@@ -24,27 +24,29 @@ function manifests(resources, file) {
   })
 }
 
-function assertElevated(file) {
+function assertExecutionLevel(file, expected = requiredLevel) {
   const exe = NtExecutable.from(fs.readFileSync(file), { ignoreCert: true })
   for (const { entry, level } of manifests(NtExecutableResource.from(exe), file)) {
-    if (level !== requiredLevel) throw new Error(`${file}: manifest language ${entry.lang} is ${level}, expected ${requiredLevel}`)
+    if (level !== expected) throw new Error(`${file}: manifest language ${entry.lang} is ${level}, expected ${expected}`)
   }
 }
 
-function prepareWindowsExecutable(file, iconFile) {
+function prepareWindowsExecutable(file, iconFile, level = requiredLevel) {
   const exe = NtExecutable.from(fs.readFileSync(file), { ignoreCert: true })
   const resources = NtExecutableResource.from(exe)
   for (const { entry, xml } of manifests(resources, file)) {
     const revised = xml.replace(executionTag, tag => tag.replace(levelAttribute,
-      (_original, key, quote) => `${key}${quote}${requiredLevel}${quote}`))
+      (_original, key, quote) => `${key}${quote}${level}${quote}`))
     entry.bin = Buffer.from(revised, 'utf8')
   }
 
-  const icons = Data.IconFile.from(fs.readFileSync(iconFile)).icons.map(icon => icon.data)
-  const groups = Resource.IconGroupEntry.fromEntries(resources.entries).filter(group => group.id === electronIconGroup)
-  if (icons.length === 0 || groups.length === 0) throw new Error(`${file}: app icon or Electron icon group is missing`)
-  for (const group of groups) {
-    Resource.IconGroupEntry.replaceIconsForResource(resources.entries, group.id, group.lang, icons)
+  if (iconFile) {
+    const icons = Data.IconFile.from(fs.readFileSync(iconFile)).icons.map(icon => icon.data)
+    const groups = Resource.IconGroupEntry.fromEntries(resources.entries).filter(group => group.id === electronIconGroup)
+    if (icons.length === 0 || groups.length === 0) throw new Error(`${file}: app icon or Electron icon group is missing`)
+    for (const group of groups) {
+      Resource.IconGroupEntry.replaceIconsForResource(resources.entries, group.id, group.lang, icons)
+    }
   }
 
   resources.outputResource(exe)
@@ -57,13 +59,14 @@ function prepareWindowsExecutable(file, iconFile) {
   }
 }
 
-module.exports = { assertElevated, prepareWindowsExecutable }
+module.exports = { assertElevated: assertExecutionLevel, assertExecutionLevel, prepareWindowsExecutable }
 
 if (require.main === module) {
   const files = process.argv.slice(2)
-  if (files.length === 0) throw new Error('Usage: node scripts/windows-executable.js <exe> [other.exe ...]')
+  const level = files[0] === '--as-invoker' ? (files.shift(), 'asInvoker') : requiredLevel
+  if (files.length === 0) throw new Error('Usage: node scripts/windows-executable.js [--as-invoker] <exe> [other.exe ...]')
   for (const file of files) {
-    assertElevated(file)
-    console.log(`Verified ${requiredLevel} in ${file}`)
+    assertExecutionLevel(file, level)
+    console.log(`Verified ${level} in ${file}`)
   }
 }

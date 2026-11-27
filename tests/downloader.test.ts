@@ -17,9 +17,27 @@ beforeAll(async () => {
   server = createServer((req, res) => {
     requests.push(req.headers.range ?? '')
     const range = /bytes=(\d+)-/.exec(req.headers.range ?? '')
-    if (range) {
+    if (req.url === '/redirect') {
+      res.writeHead(302, { location: '/plain' })
+      res.end()
+      return
+    }
+    if (req.url === '/stall') {
+      res.writeHead(200, { 'content-length': CONTENT.length })
+      res.write(CONTENT.subarray(0, 50))
+      return
+    }
+    if (req.url === '/range-unavailable' && range) {
+      res.writeHead(416, { 'content-range': 'bytes */1000' })
+      res.end()
+      return
+    }
+    if (range && req.url !== '/ignored-range') {
       const body = CONTENT.subarray(Number(range[1]))
-      res.writeHead(206, { 'content-length': body.length })
+      res.writeHead(206, {
+        'content-length': body.length,
+        'content-range': `bytes ${req.url === '/wrong-range' ? Number(range[1]) - 1 : range[1]}-999/1000`
+      })
       res.end(body)
       return
     }
@@ -96,5 +114,30 @@ describe('downloadFile', () => {
     await expect(
       downloadFile({ url: `${baseUrl}/e.bin`, dest, expectedSize: CONTENT.length, expectedMd5: 'deadbeef' })
     ).rejects.toThrow(/校验失败/)
+    await expect(fs.access(dest)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it.each(['/ignored-range', '/range-unavailable', '/redirect'])('handles %s on an existing partial file', async (route) => {
+    const dest = join(await tmp(), 'partial.bin')
+    await fs.writeFile(dest + '.part', CONTENT.subarray(0, 400))
+    await downloadFile({ url: baseUrl + route, dest, expectedSize: CONTENT.length, expectedMd5: MD5 })
+    expect(await fs.readFile(dest)).toEqual(CONTENT)
+  })
+
+  it('keeps a valid partial file if the service supplies an invalid Content-Range', async () => {
+    const dest = join(await tmp(), 'range.bin')
+    await fs.writeFile(dest + '.part', CONTENT.subarray(0, 400))
+    await expect(downloadFile({ url: baseUrl + '/wrong-range', dest, expectedSize: CONTENT.length, expectedMd5: MD5 }))
+      .rejects.toThrow(/范围无效/)
+    expect((await fs.stat(dest + '.part')).size).toBe(400)
+    await expect(fs.access(dest)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('times out a stalled body and preserves a resumable partial without publishing it', async () => {
+    const dest = join(await tmp(), 'timeout.bin')
+    await expect(downloadFile({ url: baseUrl + '/stall', dest, expectedSize: CONTENT.length, expectedMd5: MD5, timeoutMs: 200 }))
+      .rejects.toThrow()
+    expect((await fs.stat(dest + '.part')).size).toBe(50)
+    await expect(fs.access(dest)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 })
