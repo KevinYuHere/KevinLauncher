@@ -121,10 +121,64 @@ jobs:
             }
           }
           $batchPath = $batch[0].FullName
+          # Beta update notes come from the exact matching CHANGELOG section body.
+          # Betas without a section keep the previous empty-notes behavior.
+          $beta = Get-Content -LiteralPath (Join-Path $batchPath 'beta-verification.json') -Raw | ConvertFrom-Json
+          $notesFile = Join-Path $batchPath 'RELEASE_NOTES.md'
+          $lines = [System.IO.File]::ReadAllLines((Join-Path (Get-Location) 'CHANGELOG.md'))
+          $headingPattern = '^##\s+\[?v?' + [regex]::Escape([string]$beta.version) + '\]?(\s|$)'
+          $headingIndex = -1
+          for ($i = 0; $i -lt $lines.Length; $i++) {
+            if ($lines[$i] -match $headingPattern) { $headingIndex = $i; break }
+          }
+          if ($headingIndex -ge 0) {
+            $sectionEnd = $lines.Length
+            for ($i = $headingIndex + 1; $i -lt $lines.Length; $i++) {
+              if ($lines[$i] -match '^##\s') { $sectionEnd = $i; break }
+            }
+            $bodyStart = $headingIndex + 1
+            while ($bodyStart -lt $sectionEnd -and -not $lines[$bodyStart].Trim()) { $bodyStart++ }
+            $bodyEnd = $sectionEnd
+            while ($bodyEnd -gt $bodyStart -and -not $lines[$bodyEnd - 1].Trim()) { $bodyEnd-- }
+            if ($bodyStart -lt $bodyEnd) {
+              $body = ($lines[$bodyStart..($bodyEnd - 1)] -join "`n") + "`n"
+              [System.IO.File]::WriteAllText($notesFile, $body, (New-Object System.Text.UTF8Encoding($false)))
+              Write-Host "Beta notes: CHANGELOG.md -> $($beta.version)"
+            }
+          }
           & node scripts/build-beta-update.mjs $batchPath @inventoryArgs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $manifest = [System.IO.File]::ReadAllText((Join-Path $batchPath 'update-manifest.json')) | ConvertFrom-Json
+          if ($beta.version -eq '3.0.0-beta.13' -and -not (Test-Path -LiteralPath $notesFile)) {
+            throw '3.0.0-beta.13 缺少 CHANGELOG.md 对应小节，无法生成更新说明'
+          }
+          if (Test-Path -LiteralPath $notesFile) {
+            $expectedNotes = ([System.IO.File]::ReadAllText($notesFile)).Trim()
+            if ($manifest.notes -ne $expectedNotes) {
+              throw "update-manifest.json 的 notes 与 CHANGELOG.md 的 $($beta.version) 小节正文不一致"
+            }
+            if ($manifest.notes -match '(?m)^##\s') {
+              throw 'update-manifest.json 的 notes 不能包含小节标题'
+            }
+            if ($beta.version -eq '3.0.0-beta.13') {
+              $paragraphs = @($manifest.notes -split "\r?\n\s*\r?\n" | Where-Object { $_.Trim() })
+              if ($paragraphs.Count -ne 6) { throw '3.0.0-beta.13 的更新说明必须包含六个段落' }
+            }
+          }
+          $policySource = Join-Path (Get-Location) ('resources/release-policies/' + $beta.version + '.json')
+          if ($beta.version -eq '3.0.0-beta.13' -and -not (Test-Path -LiteralPath $policySource)) {
+            throw '3.0.0-beta.13 缺少 resources/release-policies/3.0.0-beta.13.json'
+          }
+          if (Test-Path -LiteralPath $policySource) {
+            $policyTarget = Join-Path $batchPath ('win-unpacked/resources/app-' + $beta.version + '/theme-policy.json')
+            if (-not (Test-Path -LiteralPath $policyTarget)) {
+              throw "成品缺少 app-$($beta.version)/theme-policy.json（版本策略未打包）"
+            }
+            if ([System.IO.File]::ReadAllText($policySource) -ne [System.IO.File]::ReadAllText($policyTarget)) {
+              throw "成品 theme-policy.json 与 resources/release-policies/$($beta.version).json 不一致"
+            }
+          }
           if ($baseline) {
-            $manifest = Get-Content -LiteralPath (Join-Path $batchPath 'update-manifest.json') -Raw | ConvertFrom-Json
             $targetCompatibility = Join-Path $batchPath ('win-unpacked\resources\app-' + $manifest.version + '\release-compatibility.json')
             $baselineCompatibility = @($baseline.files | Where-Object { $_.path -eq 'release-compatibility.json' })
             if ($baselineCompatibility.Count -ne 1) {

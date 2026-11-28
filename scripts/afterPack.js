@@ -14,6 +14,9 @@ const windowsLayout = require('../src/shared/windowsLayout.json')
  * 3. Validates that the versioned application directory shipped correctly
  *    (`resources/app-<version>/`, provided through `extraResources`), including
  *    the archive/HUD native helpers and the standalone HUD document/preload.
+ * 4. Embeds the release policy for the exact packaged version, preferring
+ *    `resources/release-policies/<version>.json` over the legacy root
+ *    `theme-policy.json`, as `resources/app-<version>/theme-policy.json`.
  */
 module.exports = async function afterPack(context) {
   const projectDir = context.packager.info.projectDir
@@ -99,19 +102,36 @@ module.exports = async function afterPack(context) {
   fs.writeFileSync(path.join(resources, `app-${version}`, 'release-compatibility.json'), compatibility, 'utf8')
   fs.writeFileSync(path.join(resources, 'app-activation.json'), '{"schema":1}', 'utf8')
 
-  // Release theme policy: the file only travels with **its own** version, so a
-  // later build can never inherit (or re-apply) an older release's settings.
-  const policySource = path.join(projectDir, 'theme-policy.json')
-  if (fs.existsSync(policySource)) {
+  // Release policy: the preferred file is `resources/release-policies/<version>.json`.
+  // It is keyed by the exact complete version, so a later build can never inherit
+  // (or re-apply) another release's settings. The legacy root `theme-policy.json`
+  // remains supported when no exact-version policy exists.
+  const versionedPolicySource = path.join(
+    projectDir, 'resources', 'release-policies', `${version}.json`
+  )
+  const legacyPolicySource = path.join(projectDir, 'theme-policy.json')
+  const policySource = fs.existsSync(versionedPolicySource)
+    ? versionedPolicySource
+    : fs.existsSync(legacyPolicySource)
+      ? legacyPolicySource
+      : null
+  if (policySource) {
+    const policyLabel = policySource === versionedPolicySource
+      ? `resources/release-policies/${version}.json`
+      : 'theme-policy.json'
     let policy
     try {
       policy = JSON.parse(fs.readFileSync(policySource, 'utf8'))
     } catch (error) {
-      throw new Error(`afterPack: theme-policy.json 无法解析（${error.message}）`)
+      throw new Error(`afterPack: ${policyLabel} 无法解析（${error.message}）`)
     }
     if (policy && policy.version === version) {
       fs.copyFileSync(policySource, path.join(resources, `app-${version}`, 'theme-policy.json'))
-      console.log('afterPack: 内嵌 theme-policy.json')
+      console.log(`afterPack: 内嵌 ${policyLabel}`)
+    } else if (policySource === versionedPolicySource) {
+      throw new Error(
+        `afterPack: ${policyLabel} 属于 ${policy?.version ?? '未知版本'}，与本次 ${version} 不符 - 已拒绝打包`
+      )
     } else {
       console.log(
         `afterPack: theme-policy.json 属于 ${policy?.version ?? '未知版本'}，与本次 ${version} 不符 - 未内嵌`
