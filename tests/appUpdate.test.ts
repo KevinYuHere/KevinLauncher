@@ -4,7 +4,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AppUpdateChecker } from '../src/main/services/appUpdate'
-import { parseBetaVerification, parseUpdateManifest } from '../src/main/services/appUpdateManifest'
+import {
+  deltaAssetName, parseBetaVerification, parseUpdateManifest
+} from '../src/main/services/appUpdateManifest'
 import { pendingDataTransfer, runWithDataAccess, withShutdownDataAccess } from '../src/main/ipc/dataAccess'
 
 const mocks = vi.hoisted(() => ({
@@ -16,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   relaunch: vi.fn(),
   exit: vi.fn(),
   extract: vi.fn(),
+  applyDelta: vi.fn(),
   backup: vi.fn(),
   flush: vi.fn()
 }))
@@ -43,6 +46,7 @@ vi.mock('../src/main/services/updateDownload', async importOriginal => ({
   ...await importOriginal<typeof import('../src/main/services/updateDownload')>(),
   extractPayload: mocks.extract
 }))
+vi.mock('../src/main/services/appUpdateDelta', () => ({ applyAppDelta: mocks.applyDelta }))
 vi.mock('../src/main/services/dataBackup', async importOriginal => ({
   ...await importOriginal<typeof import('../src/main/services/dataBackup')>(),
   backupUserData: mocks.backup
@@ -78,6 +82,93 @@ const betaVerification = {
   installerMode: 'requireAdministrator',
   entryMode: 'requireAdministrator',
   runtimeMode: 'asInvoker'
+}
+
+const beta11 = '3.0.0-beta.11'
+const beta12 = '3.0.0-beta.12'
+const beta12Delta = 'delta'
+const beta12DeltaSha = createHash('sha256').update(beta12Delta).digest('hex')
+const beta12DeltaName = deltaAssetName(beta11, beta12)
+
+function conventionalBetaManifest(
+  target: string,
+  electron: string,
+  options: { installer?: boolean; deltaFrom?: string } = {}
+): Record<string, unknown> {
+  const fromVersion = options.deltaFrom
+  return {
+    version: target,
+    electron,
+    appSize: 16384,
+    payloadSize: Buffer.byteLength(asset),
+    payloadSha256: sha256,
+    compatibility,
+    ...(options.installer
+      ? {
+          installerName: `KevinLauncher-Installer-${target}.exe`,
+          installerSize: Buffer.byteLength(betaInstaller),
+          installerSha256: betaInstallerSha
+        }
+      : {}),
+    ...(fromVersion
+      ? {
+          delta: {
+            fromVersion,
+            name: deltaAssetName(fromVersion, target),
+            size: Buffer.byteLength(beta12Delta),
+            sha256: beta12DeltaSha
+          }
+        }
+      : {})
+  }
+}
+
+function conventionalBetaRelease(
+  manifestBody: Record<string, unknown>,
+  options: { installer?: boolean; deltaFrom?: string } = {}
+): Record<string, unknown> {
+  const target = String(manifestBody.version)
+  const assets: Record<string, unknown>[] = [
+    { name: 'update-manifest.json' },
+    { name: `KevinLauncher-${target}-app.zip`, size: Buffer.byteLength(asset) }
+  ]
+  if (options.installer) {
+    assets.push({ name: `KevinLauncher-Installer-${target}.exe`, size: Buffer.byteLength(betaInstaller) })
+  }
+  if (options.deltaFrom) {
+    assets.push({ name: deltaAssetName(options.deltaFrom, target), size: Buffer.byteLength(beta12Delta) })
+  }
+  return {
+    tag_name: `v${target}`,
+    name: `KevinLauncher ${target}`,
+    body: `Beta ${target} notes`,
+    prerelease: true,
+    assets
+  }
+}
+
+function stubConventionalBeta(
+  manifestBody: Record<string, unknown>,
+  release: Record<string, unknown>
+): ReturnType<typeof vi.fn> {
+  const target = String(manifestBody.version)
+  const appZipName = `KevinLauncher-${target}-app.zip`
+  const installerName = `KevinLauncher-Installer-${target}.exe`
+  const deltaName = String(
+    (manifestBody.delta as { name?: string } | undefined)?.name ?? beta12DeltaName
+  )
+  const fetchMock = vi.fn(async (input: string) => {
+    if (input.endsWith('/releases')) return Response.json([release])
+    if (input.endsWith('/update-manifest.json')) return Response.json(manifestBody)
+    if (input.endsWith(`/${appZipName}`)) return new Response(asset, { status: 200 })
+    if (input.endsWith(`/${installerName}`)) return new Response(betaInstaller, { status: 200 })
+    if (input.endsWith(`/${deltaName}`) && manifestBody.delta) {
+      return new Response(beta12Delta, { status: 200 })
+    }
+    throw new Error(`Unexpected URL in test: ${input}`)
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  return fetchMock
 }
 
 function stableManifest(releaseVersion: string): Record<string, unknown> {
@@ -149,7 +240,8 @@ beforeEach(async () => {
   Object.defineProperty(process, 'resourcesPath', { configurable: true, value: join(dir, 'resources') })
   await fs.mkdir(process.resourcesPath)
   await fs.writeFile(join(process.resourcesPath, 'release-compatibility.json'), JSON.stringify(compatibility))
-  mocks.extract.mockImplementation(async (_archive: string, target: string) => {
+  const writePrepared = async (target: string): Promise<void> => {
+    await fs.mkdir(target, { recursive: true })
     for (const file of ['out/main/index.js', 'out/preload/index.js', 'out/renderer/index.html']) {
       const path = join(target, file)
       await fs.mkdir(join(path, '..'), { recursive: true })
@@ -157,7 +249,11 @@ beforeEach(async () => {
     }
     await fs.writeFile(join(target, 'package.json'), JSON.stringify({ version: extractedVersion }))
     await fs.writeFile(join(target, 'release-compatibility.json'), JSON.stringify(compatibility))
-  })
+  }
+  mocks.extract.mockImplementation(async (_archive: string, target: string) => writePrepared(target))
+  mocks.applyDelta.mockImplementation(
+    async (_archive: string, _base: string, target: string) => writePrepared(target)
+  )
 })
 
 afterEach(async () => {
@@ -224,6 +320,39 @@ describe('update manifest integrity', () => {
       ...manifest('44.7.0', true), installerSha256: null
     }))).toThrow()
     expect(parseUpdateManifest(JSON.stringify(manifest('44.7.0')), version).payloadSha256).toBe(sha256)
+  })
+
+  it('accepts only a canonical delta for one exact source version', () => {
+    const delta = {
+      fromVersion: beta11,
+      name: beta12DeltaName,
+      size: Buffer.byteLength(beta12Delta),
+      sha256: beta12DeltaSha.toUpperCase()
+    }
+    expect(parseUpdateManifest(
+      JSON.stringify({ ...conventionalBetaManifest(beta12, '44.7.0'), delta }),
+      beta12
+    ).delta).toEqual({ ...delta, sha256: beta12DeltaSha })
+    expect(deltaAssetName(beta11, beta12)).toBe(
+      `KevinLauncher-${beta11}-to-${beta12}-delta.json.gz`
+    )
+
+    for (const broken of [
+      { ...delta, fromVersion: '3.0.0-beta.10' },
+      { ...delta, name: `KevinLauncher-${beta11}-to-${beta12}-delta.zip` },
+      { ...delta, size: 0 },
+      { ...delta, sha256: 'not-a-hash' },
+      { ...delta, fromVersion: beta12 }
+    ]) {
+      expect(() => parseUpdateManifest(
+        JSON.stringify({ ...conventionalBetaManifest(beta12, '44.7.0'), delta: broken }),
+        beta12
+      )).toThrow()
+    }
+    expect(() => parseUpdateManifest(
+      JSON.stringify({ ...conventionalBetaManifest(beta12, '44.7.0'), delta: 'range' }),
+      beta12
+    )).toThrow()
   })
 
   it('rejects a same-size corrupt hot-update payload before extraction and re-downloads on retry', async () => {
@@ -385,6 +514,165 @@ describe('update channels', () => {
     expect(mocks.backup).not.toHaveBeenCalled()
     expect(mocks.quit).toHaveBeenCalledOnce()
     expect(checker.stateSnapshot().critical).toBe(false)
+  })
+
+  it('discovers a conventional Beta manifest and hot-updates 2.0.5 from the app ZIP', async () => {
+    mocks.currentVersion = '2.0.5'
+    mocks.channel = 'beta'
+    extractedVersion = beta12
+    const body = conventionalBetaManifest(beta12, '44.7.0', { installer: true })
+    const release = conventionalBetaRelease(body, { installer: true })
+    const fetchMock = stubConventionalBeta(body, release)
+    const checker = new AppUpdateChecker()
+    const status = await checker.check('manual')
+    expect(status).toMatchObject({
+      hasUpdate: true,
+      info: {
+        version: beta12,
+        critical: false,
+        electronVersion: '44.7.0',
+        payloadSize: Buffer.byteLength(asset),
+        installerName: `KevinLauncher-Installer-${beta12}.exe`
+      }
+    })
+    const urls = fetchMock.mock.calls.map(([url]) => String(url))
+    expect(urls.some(url => url.endsWith('/update-manifest.json'))).toBe(true)
+    expect(urls.some(url => url.includes('beta-verification.json'))).toBe(false)
+
+    checker.begin()
+    await vi.waitFor(() => expect(checker.isRunning()).toBe(false))
+    expect(mocks.extract).toHaveBeenCalledOnce()
+    expect(mocks.openPath).not.toHaveBeenCalled()
+    expect(mocks.applyDelta).not.toHaveBeenCalled()
+    expect(await fs.readFile(join(process.resourcesPath, 'app-version.txt'), 'utf8')).toBe(beta12)
+  })
+
+  it('downloads the smaller delta for the exact installed Beta and applies it off the active tree', async () => {
+    mocks.currentVersion = beta11
+    mocks.channel = 'beta'
+    extractedVersion = beta12
+    await fs.mkdir(join(process.resourcesPath, `app-${beta11}`))
+    const body = conventionalBetaManifest(beta12, '44.7.0', { installer: true, deltaFrom: beta11 })
+    const release = conventionalBetaRelease(body, { installer: true, deltaFrom: beta11 })
+    const fetchMock = stubConventionalBeta(body, release)
+    const checker = new AppUpdateChecker()
+    const info = (await checker.check('manual')).info
+    expect(info?.delta).toMatchObject({
+      fromVersion: beta11,
+      name: beta12DeltaName,
+      size: Buffer.byteLength(beta12Delta),
+      sha256: beta12DeltaSha
+    })
+    expect(info?.deltaUrls?.length).toBeGreaterThan(0)
+
+    checker.begin()
+    await vi.waitFor(() => expect(checker.isRunning()).toBe(false))
+    const urls = fetchMock.mock.calls.map(([url]) => String(url))
+    expect(urls.some(url => url.endsWith(`/${beta12DeltaName}`))).toBe(true)
+    expect(urls.some(url => url.endsWith(`/KevinLauncher-${beta12}-app.zip`))).toBe(false)
+    expect(mocks.extract).not.toHaveBeenCalled()
+    expect(mocks.applyDelta).toHaveBeenCalledOnce()
+    const [archive, base, prepared, from, to, size] = mocks.applyDelta.mock.calls[0] as string[]
+    expect(archive).toContain(beta12DeltaName)
+    expect(base).toBe(join(process.resourcesPath, `app-${beta11}`))
+    expect(prepared).toContain('.kevin-payload-')
+    expect(from).toBe(beta11)
+    expect(to).toBe(beta12)
+    expect(size).toBe(16384)
+    expect(mocks.openPath).not.toHaveBeenCalled()
+    expect(await fs.readFile(join(process.resourcesPath, 'app-version.txt'), 'utf8')).toBe(beta12)
+  })
+
+  it('falls back to the verified application ZIP when a delta cannot be applied', async () => {
+    mocks.currentVersion = beta11
+    mocks.channel = 'beta'
+    extractedVersion = beta12
+    const body = conventionalBetaManifest(beta12, '44.7.0', { installer: true, deltaFrom: beta11 })
+    const release = conventionalBetaRelease(body, { installer: true, deltaFrom: beta11 })
+    const fetchMock = stubConventionalBeta(body, release)
+    mocks.applyDelta.mockRejectedValueOnce(new Error('本地旧版本文件已损坏'))
+    const checker = new AppUpdateChecker()
+    expect((await checker.check('manual')).hasUpdate).toBe(true)
+
+    checker.begin()
+    await vi.waitFor(() => expect(checker.isRunning()).toBe(false))
+    const urls = fetchMock.mock.calls.map(([url]) => String(url))
+    expect(mocks.applyDelta).toHaveBeenCalledOnce()
+    expect(mocks.extract).toHaveBeenCalledOnce()
+    expect(urls.some(url => url.endsWith(`/KevinLauncher-${beta12}-app.zip`))).toBe(true)
+    expect(mocks.openPath).not.toHaveBeenCalled()
+    expect(mocks.backup).toHaveBeenCalledOnce()
+    expect(checker.stateSnapshot().phase).toBe('done')
+    expect(checker.status().info?.version).toBe(beta12)
+    expect(await fs.readFile(join(process.resourcesPath, 'app-version.txt'), 'utf8')).toBe(beta12)
+  })
+
+  it('ignores a delta that targets a different installed version and uses the app ZIP', async () => {
+    mocks.currentVersion = beta11
+    mocks.channel = 'beta'
+    extractedVersion = beta12
+    const body = conventionalBetaManifest(beta12, '44.7.0', {
+      installer: true, deltaFrom: '3.0.0-beta.10'
+    })
+    const release = conventionalBetaRelease(body, { installer: true, deltaFrom: '3.0.0-beta.10' })
+    const fetchMock = stubConventionalBeta(body, release)
+    const checker = new AppUpdateChecker()
+    expect((await checker.check('manual')).info?.delta?.fromVersion).toBe('3.0.0-beta.10')
+
+    checker.begin()
+    await vi.waitFor(() => expect(checker.isRunning()).toBe(false))
+    const urls = fetchMock.mock.calls.map(([url]) => String(url))
+    expect(urls.some(url => url.endsWith('/KevinLauncher-3.0.0-beta.10-to-3.0.0-beta.12-delta.json.gz'))).toBe(false)
+    expect(urls.some(url => url.endsWith(`/KevinLauncher-${beta12}-app.zip`))).toBe(true)
+    expect(mocks.applyDelta).not.toHaveBeenCalled()
+    expect(mocks.extract).toHaveBeenCalledOnce()
+    expect(await fs.readFile(join(process.resourcesPath, 'app-version.txt'), 'utf8')).toBe(beta12)
+  })
+
+  it('does not download a delta that is not smaller than the full app ZIP', async () => {
+    mocks.currentVersion = beta11
+    mocks.channel = 'beta'
+    extractedVersion = beta12
+    const body = conventionalBetaManifest(beta12, '44.7.0', { installer: true, deltaFrom: beta11 })
+    body.delta = {
+      ...(body.delta as Record<string, unknown>),
+      size: Buffer.byteLength(asset) + 1
+    }
+    const release = conventionalBetaRelease(body, { installer: true, deltaFrom: beta11 })
+    const fetchMock = stubConventionalBeta(body, release)
+    const checker = new AppUpdateChecker()
+    expect((await checker.check('manual')).info?.delta?.fromVersion).toBe(beta11)
+
+    checker.begin()
+    await vi.waitFor(() => expect(checker.isRunning()).toBe(false))
+    const urls = fetchMock.mock.calls.map(([url]) => String(url))
+    expect(urls.some(url => url.endsWith(`/${beta12DeltaName}`))).toBe(false)
+    expect(urls.some(url => url.endsWith(`/KevinLauncher-${beta12}-app.zip`))).toBe(true)
+    expect(mocks.applyDelta).not.toHaveBeenCalled()
+    expect(mocks.extract).toHaveBeenCalledOnce()
+  })
+
+  it('uses the full installer for a conventional Beta when the runtime is incompatible', async () => {
+    mocks.currentVersion = beta11
+    mocks.channel = 'beta'
+    const body = conventionalBetaManifest(beta12, '45.0.0', { installer: true, deltaFrom: beta11 })
+    const release = conventionalBetaRelease(body, { installer: true, deltaFrom: beta11 })
+    const fetchMock = stubConventionalBeta(body, release)
+    const checker = new AppUpdateChecker()
+    expect((await checker.check('manual')).info?.electronVersion).toBe('45.0.0')
+
+    checker.begin()
+    await vi.waitFor(() => expect(checker.isRunning()).toBe(false))
+    const installer = join(
+      mocks.data, 'update-staging', beta12, `KevinLauncher-Installer-${beta12}.exe`
+    )
+    expect(await fs.readFile(installer, 'utf8')).toBe(betaInstaller)
+    expect(mocks.openPath).toHaveBeenCalledWith(installer)
+    expect(mocks.quit).toHaveBeenCalledOnce()
+    expect(mocks.applyDelta).not.toHaveBeenCalled()
+    expect(mocks.extract).not.toHaveBeenCalled()
+    const urls = fetchMock.mock.calls.map(([url]) => String(url))
+    expect(urls.some(url => url.endsWith(`/KevinLauncher-${beta12}-app.zip`))).toBe(false)
   })
 
   it('keeps Beta releases out of the stable channel', async () => {

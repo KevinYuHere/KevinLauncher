@@ -1,0 +1,49 @@
+name: Verify published Beta channel upgrade
+
+on:
+  workflow_dispatch:
+    inputs:
+      beta_version:
+        description: 已公开发布的 Beta 版本号（x.y.z-beta.n）
+        required: true
+        default: 3.0.0-beta.12
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Published v2.0.5 -> Beta self-update
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    timeout-minutes: 35
+    env:
+      npm_config_registry: https://registry.npmjs.org/
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - name: Restore the locked tools
+        run: |
+          # The published launcher, not a local Electron build, is under test.
+          npm ci --ignore-scripts --no-audit --no-fund
+          exit $LASTEXITCODE
+      - name: Verify the published stable to Beta self-update
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BETA_VERSION: ${{ inputs.beta_version }}
+        run: |
+          $canonicalTemp = node -p "require('node:fs').realpathSync.native(require('node:os').tmpdir())"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:TEMP = $env:TMP = $canonicalTemp
+          $version = "$env:BETA_VERSION".Trim()
+          if ($version -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-beta\.[1-9]\d*$') {
+            throw 'beta_version must be a canonical Beta version, for example 3.0.0-beta.12'
+          }
+          node scripts/verify-windows-release.mjs --live-beta-channel $version
+          exit $LASTEXITCODE

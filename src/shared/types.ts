@@ -723,6 +723,17 @@ export interface AppUpdateCompatibility {
   hostSha256: string
 }
 
+/** Optional smaller delta that can only patch one exact installed version. */
+export interface AppUpdateDelta {
+  /** Baseline version; no other installed version may apply this delta. */
+  fromVersion: string
+  /** Canonical release asset name. */
+  name: string
+  size: number
+  /** Hex SHA-256 of the delta asset. */
+  sha256: string
+}
+
 /** A newer release found on GitHub (self-update). */
 export interface AppUpdateInfo {
   /** Version parsed from the release tag (leading `v` stripped). */
@@ -742,6 +753,10 @@ export interface AppUpdateInfo {
   payloadSize: number
   /** Hex SHA-256 of the payload, from the release manifest. */
   payloadSha256: string | null
+  /** Optional transfer for exactly this installed version; the payload is the fallback. */
+  delta?: AppUpdateDelta
+  /** Download URLs of the delta, best first. */
+  deltaUrls?: string[]
   /** Total bytes of the unpacked application — denominator of install progress. */
   installSize: number
   /** Electron version the release was built with ('' when unknown). */

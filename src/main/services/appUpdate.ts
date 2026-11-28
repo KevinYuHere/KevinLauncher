@@ -1,11 +1,13 @@
 import { app, shell } from 'electron'
 import { dirname, join } from 'path'
 import { promises as fs } from 'fs'
-import type { AppUpdateInfo, AppUpdateState, AppUpdateStatus } from '@shared/types'
+import type { AppUpdateDelta, AppUpdateInfo, AppUpdateState, AppUpdateStatus } from '@shared/types'
 import { compareVersions, isNewerVersion, pickNewestVersion } from '@shared/version'
 import { downloadPayload, extractPayload, verifyPayloadDownload } from './updateDownload'
+import { applyAppDelta } from './appUpdateDelta'
 import { backupUserData, estimateBackupBytes, requireBackup } from './dataBackup'
 import {
+  deltaAssetName,
   installerAssetName,
   isBetaVersion,
   isHotUpdateCompatible,
@@ -80,26 +82,61 @@ function isVersionForChannel(version: string, channel: Channel): boolean {
   return channel === 'stable' ? STABLE_VERSION.test(version) : STABLE_VERSION.test(version) || isBetaVersion(version)
 }
 
-/**
- * A Beta artifact is always the verified full installer. Never accept a cached
- * Beta entry that still advertises a hot payload: old caches predate the
- * installer-only Beta release format.
- */
-function isVerifiedBetaInstaller(info: AppUpdateInfo): boolean {
-  return isBetaVersion(info.version) &&
-    isPositiveFileSize(info.installerSize) && isSha256(info.installerSha256) &&
-    info.installerName === installerAssetName(info.version) && info.installerUrls.length > 0 &&
-    info.payloadUrls.length === 0
+function hasVerifiedInstaller(info: AppUpdateInfo): boolean {
+  return isPositiveFileSize(info.installerSize) && isSha256(info.installerSha256) &&
+    info.installerName === installerAssetName(info.version) && info.installerUrls.length > 0
 }
 
-/** Cached / marker data is user-writable: never trust its version string. */
+function hasVerifiedPayload(info: AppUpdateInfo): boolean {
+  return isRuntimeVersion(info.electronVersion) && isPositiveFileSize(info.payloadSize) &&
+    isSha256(info.payloadSha256) && isPositiveFileSize(info.installSize) &&
+    info.payloadUrls.length > 0 && info.compatibility !== undefined
+}
+
+/**
+ * A cached delta is usable only when it names this target and one exact
+ * baseline. An invalid cached descriptor is dropped (the full payload remains
+ * the fallback) instead of rejecting an otherwise valid offer.
+ */
+function safeDelta(value: unknown, version: string): AppUpdateDelta | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const { fromVersion, name, size, sha256 } = value as Partial<AppUpdateDelta>
+  if (typeof fromVersion !== 'string' || !SAFE_VERSION.test(fromVersion) || fromVersion === version ||
+      name !== deltaAssetName(fromVersion, version) || !isPositiveFileSize(size) || !isSha256(sha256)) {
+    return undefined
+  }
+  return value as AppUpdateDelta
+}
+
+function safeUrls(value: unknown): string[] | undefined {
+  if (!Array.isArray(value) || value.length === 0 ||
+      value.some(url => typeof url !== 'string' || url.length === 0)) return undefined
+  return value as string[]
+}
+
+/**
+ * Cached / marker data is user-writable: never trust its version string.
+ * Beta entries may be legacy installer-only metadata or the conventional
+ * manifest + application ZIP; either verified form is accepted.
+ */
 function safeInfo(info: AppUpdateInfo | null | undefined, channel: Channel): AppUpdateInfo | null {
   if (!info || typeof info.version !== 'string' ||
       !Array.isArray(info.payloadUrls) || !Array.isArray(info.installerUrls) ||
       !isVersionForChannel(info.version, channel)) return null
-  if (!isBetaVersion(info.version)) return info
-  if (!isVerifiedBetaInstaller(info)) return null
-  return info.critical === true ? { ...info, critical: false } : info
+  const delta = safeDelta(info.delta, info.version)
+  const deltaUrls = delta ? safeUrls(info.deltaUrls) : undefined
+  let clean = info
+  if (delta && deltaUrls) {
+    clean = delta === info.delta && deltaUrls === info.deltaUrls
+      ? info : { ...info, delta, deltaUrls }
+  } else if (info.delta !== undefined || info.deltaUrls !== undefined) {
+    clean = { ...info, delta: undefined, deltaUrls: undefined }
+  }
+  if (isBetaVersion(clean.version)) {
+    if (!hasVerifiedInstaller(clean) && !hasVerifiedPayload(clean)) return null
+    if (clean.critical === true) clean = { ...clean, critical: false }
+  }
+  return clean
 }
 
 interface GitHubRelease {
@@ -186,8 +223,12 @@ function releaseVersion(release: GitHubRelease): string {
   return String(release.tag_name ?? '').trim().replace(/^v/i, '')
 }
 
-function infoFromManifest(manifest: UpdateManifest, release?: GitHubRelease): AppUpdateInfo {
-  const { version, installerName } = manifest
+function infoFromManifest(
+  manifest: UpdateManifest,
+  release?: GitHubRelease,
+  beta = false
+): AppUpdateInfo {
+  const { version, installerName, delta } = manifest
   const payloadName = payloadAssetName(version)
   return {
     version,
@@ -197,6 +238,9 @@ function infoFromManifest(manifest: UpdateManifest, release?: GitHubRelease): Ap
     payloadUrls: releaseAssetUrls(release, version, payloadName),
     payloadSize: manifest.payloadSize,
     payloadSha256: manifest.payloadSha256,
+    ...(delta
+      ? { delta, deltaUrls: releaseAssetUrls(release, version, delta.name) }
+      : {}),
     installSize: manifest.appSize,
     electronVersion: manifest.electron,
     compatibility: manifest.compatibility,
@@ -206,7 +250,7 @@ function infoFromManifest(manifest: UpdateManifest, release?: GitHubRelease): Ap
     installerUnpackedSize: manifest.installerUnpackedSize,
     installerSha256: manifest.installerSha256,
     publishedAt: release?.published_at ?? '',
-    critical: manifest.critical
+    critical: beta ? false : manifest.critical
   }
 }
 
@@ -287,14 +331,32 @@ async function infoFromRelease(release: GitHubRelease): Promise<AppUpdateInfo | 
 }
 
 /**
- * Verified public Beta: the release must carry exactly the fixed installer and
- * its `beta-verification.json`. Legacy pre-releases without that pair return
- * null so the list can fall through to a newer supported release.
+ * Verified public Beta.
+ *
+ * New Betas publish the same conventional `update-manifest.json` and
+ * `KevinLauncher-<version>-app.zip` as stable releases (plus the installer and
+ * `beta-verification.json` for runtimes that cannot hot-update, and so that
+ * older clients can still consume the release). The conventional pair is
+ * preferred; only releases that have no app ZIP fall back to the legacy
+ * installer-only format. Betas are never critical.
  */
 async function betaInfoFromRelease(release: GitHubRelease): Promise<AppUpdateInfo | null> {
   const version = releaseVersion(release)
   if (!isBetaVersion(version) || release.draft === true || release.prerelease !== true) return null
   const assets = release.assets ?? []
+  const manifestAsset = assets.find(item => item.name === 'update-manifest.json')
+  const payloadAsset = assets.find(item => item.name === payloadAssetName(version))
+  if (manifestAsset && payloadAsset) {
+    const manifest = await fetchManifest(
+      releaseAssetUrls(release, version, 'update-manifest.json'),
+      version
+    )
+    if (payloadAsset.size !== undefined &&
+        (!isPositiveFileSize(payloadAsset.size) || payloadAsset.size !== manifest.payloadSize)) {
+      throw new Error('Beta 应用包大小与 GitHub 资产不一致')
+    }
+    return infoFromManifest(manifest, release, true)
+  }
   const verificationAsset = assets.find(item => item.name === 'beta-verification.json')
   const installerAsset = assets.find(item => item.name === installerAssetName(version))
   if (!verificationAsset || !installerAsset) return null
@@ -321,8 +383,19 @@ async function refreshManifest(version: string): Promise<AppUpdateInfo> {
     }
     if (release) {
       const info = await betaInfoFromRelease(release)
-      if (!info) throw new Error('Beta 更新发布缺少已校验的安装包')
+      if (!info) throw new Error('Beta 更新发布缺少已校验的应用包或安装包')
       return info
+    }
+    // The tag lookup can fail while asset downloads still work. Prefer the
+    // conventional manifest, then fall back to the legacy verification file.
+    try {
+      return infoFromManifest(
+        await fetchManifest([releaseAssetUrl(version, 'update-manifest.json')], version),
+        undefined,
+        true
+      )
+    } catch (error) {
+      log(`appUpdate: Beta manifest unavailable (${(error as Error).message}) — trying the legacy verification asset`)
     }
     const beta = await fetchBetaVerification(
       [releaseAssetUrl(version, 'beta-verification.json')],
@@ -340,14 +413,10 @@ async function refreshManifest(version: string): Promise<AppUpdateInfo> {
 }
 
 function hasVerifiedMetadata(info: AppUpdateInfo, useInstaller: boolean): boolean {
-  if (isBetaVersion(info.version)) return useInstaller && isVerifiedBetaInstaller(info)
-  if (!isRuntimeVersion(info.electronVersion)) return false
-  if (useInstaller) {
-    return isPositiveFileSize(info.installerSize) && isSha256(info.installerSha256) &&
-      info.installerName === installerAssetName(info.version) && info.installerUrls.length > 0
-  }
-  return isPositiveFileSize(info.payloadSize) && isSha256(info.payloadSha256) &&
-    isPositiveFileSize(info.installSize) && info.payloadUrls.length > 0
+  // Stable offers must always name their runtime, including when falling back
+  // to the full installer. Legacy Beta installer-only metadata may omit it.
+  if (!isBetaVersion(info.version) && !isRuntimeVersion(info.electronVersion)) return false
+  return useInstaller ? hasVerifiedInstaller(info) : hasVerifiedPayload(info)
 }
 
 async function needsFullInstaller(info: AppUpdateInfo): Promise<boolean> {
@@ -441,7 +510,7 @@ async function latestBetaFromList(): Promise<AppUpdateInfo | null> {
         : await infoFromRelease(candidate.release)
       if (info) return info
       if (candidate.beta) {
-        log(`appUpdate: skipping Beta ${candidate.version} without a verified installer`)
+        log(`appUpdate: skipping Beta ${candidate.version} without verified assets`)
       }
     } catch (cause) {
       throw new ReleaseManifestError(
@@ -1106,8 +1175,9 @@ export class AppUpdateChecker {
     urls: string[]
     controller: AbortController
     installer: boolean
+    message?: string
   }): Promise<void> {
-    const { info, name, path, size, sha256, urls, controller, installer } = options
+    const { info, name, path, size, sha256, urls, controller, installer, message } = options
     if (!isSha256(sha256)) throw new Error('更新清单缺少文件的 SHA-256')
     this.patch({
       phase: 'downloading',
@@ -1115,7 +1185,7 @@ export class AppUpdateChecker {
       total: size,
       transferred: 0,
       percent: 0,
-      message: installer ? '正在下载安装程序…' : '正在下载更新…'
+      message: message ?? (installer ? '正在下载安装程序…' : '正在下载更新…')
     })
     if (!(await verifyPayloadDownload(path, size, sha256))) {
       await downloadWithFallback({
@@ -1142,6 +1212,22 @@ export class AppUpdateChecker {
     this.patch({ percent: 100, transferred: size, bytesPerSecond: 0 })
   }
 
+  /**
+   * A delta is only an optimization for the exact installed version. A missing,
+   * larger or mismatched descriptor selects the full application ZIP — never
+   * the installer while the host is hot-update compatible.
+   */
+  private usableDelta(info: AppUpdateInfo): AppUpdateDelta | undefined {
+    const delta = info.delta
+    const urls = info.deltaUrls
+    if (!delta || !urls?.length || delta.fromVersion !== this.current() ||
+        delta.size >= info.payloadSize) return undefined
+    if (!isSha256(delta.sha256) || delta.name !== deltaAssetName(delta.fromVersion, info.version) ||
+        urls.some(url => typeof url !== 'string' || url.length === 0) ||
+        !hasVerifiedPayload(info)) return undefined
+    return delta
+  }
+
   private async run(info: AppUpdateInfo, controller: AbortController): Promise<void> {
     const staging = join(app.getPath('userData'), 'update-staging', info.version)
     const archive = join(staging, 'app.zip')
@@ -1151,14 +1237,14 @@ export class AppUpdateChecker {
       // A cached check from an older build may contain incomplete metadata.
       // Get the same version's metadata again before selecting an install mode.
       const beta = isBetaVersion(info.version)
-      let useInstaller = beta || await needsFullInstaller(info)
+      let useInstaller = await needsFullInstaller(info)
       if (!hasVerifiedMetadata(info, useInstaller)) {
         const fresh = await refreshManifest(info.version)
         info = { ...fresh, critical: beta ? false : info.critical || fresh.critical }
-        useInstaller = beta || await needsFullInstaller(info)
+        useInstaller = await needsFullInstaller(info)
         if (!hasVerifiedMetadata(info, useInstaller)) {
           throw new Error(beta
-            ? 'Beta 安装包缺少已校验的大小或 SHA-256，请重新检查更新'
+            ? '当前运行库无法使用该 Beta 更新，且发布缺少已校验的安装包'
             : '缺少适合当前运行库的已校验更新文件，请手动下载安装包')
         }
         if (this.info?.version === info.version) this.info = info
@@ -1170,17 +1256,37 @@ export class AppUpdateChecker {
         return
       }
 
-      await this.downloadVerified({
-        info, name: payloadAssetName(info.version), path: archive, size: info.payloadSize,
-        sha256: info.payloadSha256, urls: info.payloadUrls, controller, installer: false
-      })
+      let delta = this.usableDelta(info)
+      let deltaArchive = delta ? join(staging, delta.name) : null
+      if (delta && deltaArchive) {
+        try {
+          await this.downloadVerified({
+            info, name: delta.name, path: deltaArchive, size: delta.size,
+            sha256: delta.sha256, urls: info.deltaUrls ?? [], controller, installer: false,
+            message: '正在下载差量更新…'
+          })
+        } catch (error) {
+          if (controller.signal.aborted) throw error
+          log(`appUpdate: delta ${delta.name} unavailable (${(error as Error).message}) — falling back to the application ZIP`)
+          this.dropDelta(info.version)
+          await fs.rm(deltaArchive, { recursive: true, force: true }).catch(() => {})
+          delta = undefined
+          deltaArchive = null
+        }
+      }
+      if (!delta || !deltaArchive) {
+        await this.downloadVerified({
+          info, name: payloadAssetName(info.version), path: archive, size: info.payloadSize,
+          sha256: info.payloadSha256, urls: info.payloadUrls, controller, installer: false
+        })
+      }
       this.patch({
         phase: 'installing', percent: 100, installPercent: 0, installTotal: info.installSize,
         message: '正在安装更新…'
       })
       const data = app.getPath('userData')
       await this.withUpdateBackup(`update ${info.version}`, async () => {
-        await this.applyHotUpdate(archive, info)
+        await this.applyHotUpdate(deltaArchive ?? archive, info, delta, staging, controller)
       }, async () => {
         await requireDiskSpace([
           { path: data, bytes: await estimateBackupBytes(data) },
@@ -1245,25 +1351,99 @@ export class AppUpdateChecker {
     }
   }
 
-  private async applyHotUpdate(archive: string, info: AppUpdateInfo): Promise<void> {
+  /** Stop retrying a failed delta while keeping the version offer intact. */
+  private dropDelta(version: string): void {
+    if (this.info?.version === version && (this.info.delta || this.info.deltaUrls)) {
+      this.info = { ...this.info, delta: undefined, deltaUrls: undefined }
+    }
+    if (this.taskInfo?.version === version && (this.taskInfo.delta || this.taskInfo.deltaUrls)) {
+      this.taskInfo = { ...this.taskInfo, delta: undefined, deltaUrls: undefined }
+    }
+  }
+
+  private applyProgress(bytes: number, total: number): void {
+    this.patch({ installPercent: total > 0 ? Math.min(100, (bytes / total) * 100) : 0 })
+  }
+
+  private async validatePreparedApplication(prepared: string, info: AppUpdateInfo): Promise<void> {
+    const required = ['package.json', 'out/main/index.js', 'out/preload/index.js',
+      'out/renderer/index.html', 'release-compatibility.json']
+    const valid = await Promise.all(required.map(file => isRegularFile(join(prepared, file))))
+    if (valid.some(exists => !exists)) throw new Error('更新包内容不完整')
+    const metadata = JSON.parse(await fs.readFile(join(prepared, 'package.json'), 'utf8')) as { version?: string } | null
+    if (metadata?.version !== info.version) throw new Error('更新包版本与清单不匹配')
+    const packaged = parseUpdateCompatibility(JSON.parse(
+      await fs.readFile(join(prepared, 'release-compatibility.json'), 'utf8')
+    ))
+    if (!isHotUpdateCompatible(packaged, info.compatibility)) throw new Error('更新包兼容信息与清单不一致')
+  }
+
+  /**
+   * Prepare a new version directory and atomically select it.
+   *
+   * The delta is applied into an independent staging tree, never over the
+   * active `app-<current>` directory. A bad baseline (or any other delta
+   * failure) falls back to the verified full application ZIP, not the
+   * installer, because this path is only used on a compatible host.
+   */
+  private async applyHotUpdate(
+    archive: string,
+    info: AppUpdateInfo,
+    delta: AppUpdateDelta | undefined,
+    staging: string,
+    controller: AbortController
+  ): Promise<void> {
     const resources = process.resourcesPath
     const stage = await fs.mkdtemp(join(resources, '.kevin-payload-'))
     const prepared = join(stage, 'verified')
     const target = join(resources, `app-${info.version}`)
     try {
-      await extractPayload(archive, prepared, info.installSize, (bytes, total) => {
-        this.patch({ installPercent: total > 0 ? Math.min(100, (bytes / total) * 100) : 0 })
-      })
-      const required = ['package.json', 'out/main/index.js', 'out/preload/index.js',
-        'out/renderer/index.html', 'release-compatibility.json']
-      const valid = await Promise.all(required.map(file => isRegularFile(join(prepared, file))))
-      if (valid.some(exists => !exists)) throw new Error('更新包内容不完整')
-      const metadata = JSON.parse(await fs.readFile(join(prepared, 'package.json'), 'utf8')) as { version?: string } | null
-      if (metadata?.version !== info.version) throw new Error('更新包版本与清单不匹配')
-      const packaged = parseUpdateCompatibility(JSON.parse(
-        await fs.readFile(join(prepared, 'release-compatibility.json'), 'utf8')
-      ))
-      if (!isHotUpdateCompatible(packaged, info.compatibility)) throw new Error('更新包兼容信息与清单不一致')
+      if (delta) {
+        try {
+          controller.signal.throwIfAborted()
+          await applyAppDelta(
+            archive,
+            join(resources, `app-${this.current()}`),
+            prepared,
+            delta.fromVersion,
+            info.version,
+            info.installSize,
+            (bytes, total) => this.applyProgress(bytes, total)
+          )
+          controller.signal.throwIfAborted()
+          await this.validatePreparedApplication(prepared, info)
+        } catch (error) {
+          if (controller.signal.aborted) throw error
+          log(`appUpdate: delta ${delta.name} could not be applied (${(error as Error).message}) — falling back to the verified application ZIP`)
+          this.dropDelta(info.version)
+          await fs.rm(prepared, { recursive: true, force: true }).catch(() => {})
+          await fs.rm(archive, { force: true }).catch(() => {})
+          const fallback = join(staging, 'app.zip')
+          this.patch({
+            phase: 'downloading', percent: 0, transferred: 0, total: info.payloadSize,
+            bytesPerSecond: 0, installPercent: 0, message: '正在下载完整更新…'
+          })
+          await this.downloadVerified({
+            info, name: payloadAssetName(info.version), path: fallback, size: info.payloadSize,
+            sha256: info.payloadSha256, urls: info.payloadUrls, controller, installer: false
+          })
+          this.patch({
+            phase: 'installing', percent: 100, installPercent: 0,
+            installTotal: info.installSize, message: '正在安装更新…'
+          })
+          await extractPayload(fallback, prepared, info.installSize, (bytes, total) => {
+            this.applyProgress(bytes, total)
+          })
+          controller.signal.throwIfAborted()
+          await this.validatePreparedApplication(prepared, info)
+        }
+      } else {
+        await extractPayload(archive, prepared, info.installSize, (bytes, total) => {
+          this.applyProgress(bytes, total)
+        })
+        await this.validatePreparedApplication(prepared, info)
+      }
+      controller.signal.throwIfAborted()
       const existing = await fs.lstat(target).catch((error: NodeJS.ErrnoException) => {
         if (error.code !== 'ENOENT') throw error
         return null

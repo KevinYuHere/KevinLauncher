@@ -1,5 +1,13 @@
 import type { AppUpdateCompatibility } from '@shared/types'
 
+/** Optional delta that may only be applied to one exact installed version. */
+export interface UpdateManifestDelta {
+  fromVersion: string
+  name: string
+  size: number
+  sha256: string
+}
+
 /** Release metadata needed to choose and verify the upgrade artifact. */
 export interface UpdateManifest {
   version: string
@@ -14,6 +22,8 @@ export interface UpdateManifest {
   notes?: string
   compatibility?: AppUpdateCompatibility
   critical: boolean
+  /** Smaller transfer for exactly `fromVersion`; the full payload stays the fallback. */
+  delta?: UpdateManifestDelta
 }
 
 /** Metadata published next to a verified, installer-only Beta release. */
@@ -40,6 +50,11 @@ export function payloadAssetName(version: string): string {
 
 export function installerAssetName(version: string): string {
   return `KevinLauncher-Installer-${version}.exe`
+}
+
+/** Canonical name of the delta whose only valid baseline is `fromVersion`. */
+export function deltaAssetName(fromVersion: string, toVersion: string): string {
+  return `KevinLauncher-${fromVersion}-to-${toVersion}-delta.json.gz`
 }
 
 export function isPositiveFileSize(value: unknown): value is number {
@@ -81,20 +96,39 @@ export function isHotUpdateCompatible(
     current.hostSha256 === target.hostSha256
 }
 
+/**
+ * Deltas are tied to one exact installed version. Anything else (ranges, a
+ * noncanonical asset name, missing size/hash) would make us download an
+ * unverifiable or inapplicable artifact, so the whole descriptor is rejected.
+ */
+function parseUpdateDelta(value: unknown, version: string): UpdateManifestDelta | undefined {
+  if (value == null) return undefined
+  if (typeof value !== 'object' || Array.isArray(value)) throw new Error('更新清单差量格式无效')
+  const { fromVersion, name, size, sha256 } = value as Record<string, unknown>
+  if (typeof fromVersion !== 'string' || !SAFE_VERSION.test(fromVersion) || fromVersion === version ||
+      name !== deltaAssetName(fromVersion, version) || !isPositiveFileSize(size) || !isSha256(sha256)) {
+    throw new Error('更新清单缺少有效的差量来源、名称、大小或校验值')
+  }
+  return { fromVersion, name, size, sha256: sha256.toLowerCase() }
+}
+
 export function parseUpdateManifest(raw: string, expectedVersion?: string): UpdateManifest {
   const data: unknown = JSON.parse(raw)
   if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('更新清单格式无效')
   const { version, electron, appSize, payloadSize, payloadSha256, installerSize, installerName,
-    installerSha256, installerUnpackedSize, notes, critical, compatibility } = data as Record<string, unknown>
+    installerSha256, installerUnpackedSize, notes, critical, compatibility, delta } =
+    data as Record<string, unknown>
   if (typeof version !== 'string' || !SAFE_VERSION.test(version) ||
       (expectedVersion !== undefined && version !== expectedVersion) ||
       !isRuntimeVersion(electron) || !isPositiveFileSize(appSize) ||
       !isPositiveFileSize(payloadSize) || !isSha256(payloadSha256)) {
     throw new Error('更新清单缺少匹配的版本、运行库或应用包校验信息')
   }
+  const parsedDelta = parseUpdateDelta(delta, version)
   const optional = {
     notes: typeof notes === 'string' ? notes.trim() : undefined, critical: critical === true,
-    compatibility: parseUpdateCompatibility(compatibility)
+    compatibility: parseUpdateCompatibility(compatibility),
+    ...(parsedDelta ? { delta: parsedDelta } : {})
   }
   if (installerSize == null || installerSize === 0) {
     if (installerName != null || installerSha256 != null) throw new Error('更新清单安装程序信息不完整')

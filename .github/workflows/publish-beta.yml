@@ -113,29 +113,47 @@ jobs:
             echo '::error::The source artifact was not downloaded.' >&2
             exit 1
           fi
+          expected_installer="KevinLauncher-Installer-${BETA_VERSION}.exe"
+          expected_payload="KevinLauncher-${BETA_VERSION}-app.zip"
+
           mapfile -d '' -t files < <(find "$ARTIFACT_DIR" -type f -print0)
-          if (( ${#files[@]} != 2 )); then
-            echo "::error::Expected only the installer and beta-verification.json in the source artifact." >&2
+          if (( ${#files[@]} < 4 || ${#files[@]} > 5 )); then
+            echo '::error::Expected the installer, beta-verification.json, app ZIP, update-manifest.json and at most one delta.' >&2
             exit 1
           fi
-          mapfile -d '' -t installers < <(find "$ARTIFACT_DIR" -type f -name 'KevinLauncher-Installer-*.exe' -print0)
-          mapfile -d '' -t manifests < <(find "$ARTIFACT_DIR" -type f -name 'beta-verification.json' -print0)
-          if (( ${#installers[@]} != 1 || ${#manifests[@]} != 1 )); then
-            echo '::error::The source artifact must contain exactly one installer and one beta-verification.json.' >&2
+          review_dir="$(dirname -- "${files[0]}")"
+          installers=()
+          payloads=()
+          verifications=()
+          manifests=()
+          deltas=()
+          for file in "${files[@]}"; do
+            if [[ ! -f "$file" || -L "$file" || "$(dirname -- "$file")" != "$review_dir" ]]; then
+              echo "::error::Unexpected or nested file in the frozen Beta artifact: $file" >&2
+              exit 1
+            fi
+            case "$(basename -- "$file")" in
+              "$expected_installer") installers+=("$file") ;;
+              "$expected_payload") payloads+=("$file") ;;
+              beta-verification.json) verifications+=("$file") ;;
+              update-manifest.json) manifests+=("$file") ;;
+              KevinLauncher-*-to-"$BETA_VERSION"-delta.json.gz) deltas+=("$file") ;;
+              *)
+                echo "::error::Unexpected file in the frozen Beta artifact: $(basename -- "$file")" >&2
+                exit 1
+                ;;
+            esac
+          done
+          if (( ${#installers[@]} != 1 || ${#payloads[@]} != 1 || ${#verifications[@]} != 1 ||
+                ${#manifests[@]} != 1 || ${#deltas[@]} > 1 )); then
+            echo '::error::The frozen Beta artifact must contain exactly one installer, beta-verification.json, app ZIP, update-manifest.json and at most one matching delta.' >&2
             exit 1
           fi
 
           installer="${installers[0]}"
+          payload="${payloads[0]}"
+          verification="${verifications[0]}"
           manifest="${manifests[0]}"
-          expected_installer="KevinLauncher-Installer-${BETA_VERSION}.exe"
-          if [[ "$(basename -- "$installer")" != "$expected_installer" ]]; then
-            echo "::error::The installer filename does not match $BETA_VERSION." >&2
-            exit 1
-          fi
-          if [[ "$(dirname -- "$installer")" != "$(dirname -- "$manifest")" ]]; then
-            echo '::error::The installer and beta-verification.json must be from the same build.' >&2
-            exit 1
-          fi
 
           if ! jq -e --arg version "$BETA_VERSION" --arg installer "$expected_installer" '
               type == "object" and
@@ -149,34 +167,185 @@ jobs:
               .installerMode == "requireAdministrator" and
               .entryMode == "requireAdministrator" and
               .runtimeMode == "asInvoker"
-            ' "$manifest" >/dev/null; then
+            ' "$verification" >/dev/null; then
             echo '::error::beta-verification.json is not the expected successful Beta manifest.' >&2
             exit 1
           fi
+
+          if ! jq -e --arg version "$BETA_VERSION" --arg installer "$expected_installer" '
+              def positive: type == "number" and . > 0 and . == floor;
+              def digest: type == "string" and test("^[0-9a-fA-F]{64}$");
+              def runtime: type == "string" and test("^[0-9]+[.][0-9]+[.][0-9]+(?:-[0-9A-Za-z.-]+)?$");
+              type == "object" and
+              .version == $version and
+              (.electron | runtime) and
+              (.appSize | positive) and
+              (.payloadSize | positive) and
+              (.payloadSha256 | digest) and
+              .installerName == $installer and
+              (.installerSize | positive) and
+              (.installerSha256 | digest) and
+              (.installerUnpackedSize | positive) and
+              (.compatibility | type == "object") and
+              (.compatibility.shellProtocol | positive) and
+              (.compatibility.installProtocol | positive) and
+              (.compatibility.dataSchema | positive) and
+              (.compatibility.hostSha256 | digest) and
+              ((.critical == null) or (.critical | type == "boolean")) and
+              ((.delta == null) or (.delta | type == "object"))
+            ' "$manifest" >/dev/null; then
+            echo '::error::update-manifest.json is not the expected standard Beta manifest.' >&2
+            exit 1
+          fi
+
           actual_size="$(stat --format='%s' -- "$installer")"
-          manifest_size="$(jq -er '.size' "$manifest")"
-          if [[ "$actual_size" != "$manifest_size" ]]; then
-            echo '::error::The installer size does not match beta-verification.json.' >&2
+          manifest_size="$(jq -er '.installerSize' "$manifest")"
+          verification_size="$(jq -er '.size' "$verification")"
+          if [[ "$actual_size" != "$manifest_size" || "$actual_size" != "$verification_size" ]]; then
+            echo '::error::The installer size does not match the verified manifests.' >&2
             exit 1
           fi
           actual_sha="$(sha256sum -- "$installer" | cut -d ' ' -f 1)"
-          manifest_sha="$(jq -er '.sha256' "$manifest")"
-          if [[ "$actual_sha" != "$manifest_sha" ]]; then
-            echo '::error::The installer SHA-256 does not match beta-verification.json.' >&2
+          manifest_sha="$(jq -er '.installerSha256' "$manifest" | tr '[:upper:]' '[:lower:]')"
+          verification_sha="$(jq -er '.sha256' "$verification" | tr '[:upper:]' '[:lower:]')"
+          if [[ "$actual_sha" != "$manifest_sha" || "$actual_sha" != "$verification_sha" ]]; then
+            echo '::error::The installer SHA-256 does not match the verified manifests.' >&2
+            exit 1
+          fi
+
+          actual_payload_size="$(stat --format='%s' -- "$payload")"
+          manifest_payload_size="$(jq -er '.payloadSize' "$manifest")"
+          if [[ "$actual_payload_size" != "$manifest_payload_size" ]]; then
+            echo '::error::The app ZIP size does not match update-manifest.json.' >&2
+            exit 1
+          fi
+          actual_payload_sha="$(sha256sum -- "$payload" | cut -d ' ' -f 1)"
+          manifest_payload_sha="$(jq -er '.payloadSha256' "$manifest" | tr '[:upper:]' '[:lower:]')"
+          if [[ "$actual_payload_sha" != "$manifest_payload_sha" ]]; then
+            echo '::error::The app ZIP SHA-256 does not match update-manifest.json.' >&2
             exit 1
           fi
 
           work_dir="$(mktemp -d "${RUNNER_TEMP:?}/publish-beta.XXXXXX")"
+          payload_dir="$work_dir/payload"
+          mkdir -p -- "$payload_dir"
+          entries="$(unzip -Z1 "$payload")"
+          if grep -Eq '(^/|(^|/)[.][.](/|$))' <<<"$entries"; then
+            echo '::error::The app ZIP contains an unsafe path.' >&2
+            exit 1
+          fi
+          unzip -q "$payload" -d "$payload_dir"
+          for required in package.json release-compatibility.json out/main/index.js out/preload/index.js out/renderer/index.html; do
+            if [[ ! -f "$payload_dir/$required" ]]; then
+              echo "::error::The app ZIP is missing $required." >&2
+              exit 1
+            fi
+          done
+          payload_version="$(jq -er '.version' "$payload_dir/package.json")"
+          payload_electron="$(jq -er '.devDependencies.electron' "$payload_dir/package.json")"
+          manifest_electron="$(jq -er '.electron' "$manifest")"
+          if [[ "$payload_version" != "$BETA_VERSION" || "$payload_electron" != "$manifest_electron" ]]; then
+            echo '::error::The app ZIP version or locked Electron runtime does not match update-manifest.json.' >&2
+            exit 1
+          fi
+          manifest_compatibility="$(jq -cS '.compatibility' "$manifest")"
+          payload_compatibility="$(jq -cS '{shellProtocol, installProtocol, dataSchema, hostSha256: (.hostSha256 | ascii_downcase)}' "$payload_dir/release-compatibility.json")"
+          if [[ "$manifest_compatibility" != "$payload_compatibility" ]]; then
+            echo '::error::The app ZIP compatibility does not match update-manifest.json.' >&2
+            exit 1
+          fi
+          actual_app_size="$(find "$payload_dir" -type f -printf '%s\n' | awk '{ total += $1 } END { print total + 0 }')"
+          manifest_app_size="$(jq -er '.appSize' "$manifest")"
+          if [[ "$actual_app_size" != "$manifest_app_size" ]]; then
+            echo '::error::The unpacked app size does not match update-manifest.json.' >&2
+            exit 1
+          fi
+
+          delta_name=''
+          if jq -e '.delta != null' "$manifest" >/dev/null; then
+            if ! jq -e '
+                def positive: type == "number" and . > 0 and . == floor;
+                def digest: type == "string" and test("^[0-9a-fA-F]{64}$");
+                (.delta.fromVersion | type == "string") and
+                (.delta.name | type == "string") and
+                (.delta.size | positive) and
+                (.delta.sha256 | digest)
+              ' "$manifest" >/dev/null; then
+              echo '::error::The optional delta metadata is incomplete.' >&2
+              exit 1
+            fi
+            if [[ "$(jq -er '.delta | keys | join(",")' "$manifest")" != 'fromVersion,name,sha256,size' ]]; then
+              echo '::error::The optional delta must contain only fromVersion, name, size and sha256.' >&2
+              exit 1
+            fi
+            delta_from="$(jq -er '.delta.fromVersion' "$manifest")"
+            delta_name="$(jq -er '.delta.name' "$manifest")"
+            if [[ ! "$delta_from" =~ ^[0-9]+([.][0-9]+)*(-[0-9A-Za-z.-]+)?$ ||
+                  "$delta_from" == "$BETA_VERSION" ]]; then
+              echo '::error::The delta must name one different, exact source version.' >&2
+              exit 1
+            fi
+            expected_delta="KevinLauncher-${delta_from}-to-${BETA_VERSION}-delta.json.gz"
+            if [[ "$delta_name" != "$expected_delta" || ${#deltas[@]} -ne 1 ]]; then
+              echo '::error::The delta filename does not match its exact source version.' >&2
+              exit 1
+            fi
+            delta_file="${deltas[0]}"
+            if [[ "$(basename -- "$delta_file")" != "$delta_name" ]]; then
+              echo '::error::The delta file has an unexpected name.' >&2
+              exit 1
+            fi
+            actual_delta_size="$(stat --format='%s' -- "$delta_file")"
+            manifest_delta_size="$(jq -er '.delta.size' "$manifest")"
+            if [[ "$actual_delta_size" != "$manifest_delta_size" ]]; then
+              echo '::error::The delta size does not match update-manifest.json.' >&2
+              exit 1
+            fi
+            if (( manifest_delta_size >= manifest_payload_size )); then
+              echo '::error::The delta must be smaller than the full app ZIP.' >&2
+              exit 1
+            fi
+            actual_delta_sha="$(sha256sum -- "$delta_file" | cut -d ' ' -f 1)"
+            manifest_delta_sha="$(jq -er '.delta.sha256' "$manifest" | tr '[:upper:]' '[:lower:]')"
+            if [[ "$actual_delta_sha" != "$manifest_delta_sha" ]]; then
+              echo '::error::The delta SHA-256 does not match update-manifest.json.' >&2
+              exit 1
+            fi
+            if ! gzip -t "$delta_file"; then
+              echo '::error::The delta is not a valid gzip file.' >&2
+              exit 1
+            fi
+            if ! gzip -dc "$delta_file" | jq -e 'type == "object"' >/dev/null; then
+              echo '::error::The delta payload is not a JSON object.' >&2
+              exit 1
+            fi
+          elif (( ${#deltas[@]} != 0 )); then
+            echo '::error::A delta file is present but update-manifest.json does not declare it.' >&2
+            exit 1
+          fi
+
           assets_dir="$work_dir/assets"
           notes_file="$work_dir/RELEASE_NOTES.md"
           mkdir -p -- "$assets_dir"
           cp -- "$installer" "$assets_dir/$expected_installer"
-          cp -- "$manifest" "$assets_dir/beta-verification.json"
+          cp -- "$payload" "$assets_dir/$expected_payload"
+          cp -- "$manifest" "$assets_dir/update-manifest.json"
+          cp -- "$verification" "$assets_dir/beta-verification.json"
+          checksum_files=("$expected_installer" "$expected_payload" update-manifest.json beta-verification.json)
+          if [[ -n "$delta_name" ]]; then
+            cp -- "${deltas[0]}" "$assets_dir/$delta_name"
+            checksum_files+=("$delta_name")
+          fi
+          (
+            cd -- "$assets_dir"
+            sha256sum -- "${checksum_files[@]}" > "$work_dir/assets.sha256"
+          )
           printf '%s' "$RELEASE_NOTES" > "$notes_file"
           {
-            printf 'installer=%s\n' "$assets_dir/$expected_installer"
-            printf 'manifest=%s\n' "$assets_dir/beta-verification.json"
+            printf 'assets_dir=%s\n' "$assets_dir"
+            printf 'checksums=%s\n' "$work_dir/assets.sha256"
             printf 'notes_file=%s\n' "$notes_file"
+            printf 'delta_name=%s\n' "$delta_name"
           } >> "$GITHUB_OUTPUT"
 
       - name: Publish the verified Beta without replacement
@@ -185,14 +354,41 @@ jobs:
           GH_REPO: ${{ github.repository }}
           BETA_VERSION: ${{ steps.source.outputs.beta_version }}
           SOURCE_SHA: ${{ steps.source.outputs.sha }}
-          INSTALLER: ${{ steps.frozen.outputs.installer }}
-          MANIFEST: ${{ steps.frozen.outputs.manifest }}
+          ASSETS_DIR: ${{ steps.frozen.outputs.assets_dir }}
+          CHECKSUMS: ${{ steps.frozen.outputs.checksums }}
           NOTES_FILE: ${{ steps.frozen.outputs.notes_file }}
+          DELTA_NAME: ${{ steps.frozen.outputs.delta_name }}
         run: |
           set -euo pipefail
           if [[ ! "$BETA_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-beta\.[1-9][0-9]*$ ||
                 ! "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
             echo '::error::Validated Beta metadata is missing or invalid.' >&2
+            exit 1
+          fi
+          expected_installer="KevinLauncher-Installer-${BETA_VERSION}.exe"
+          expected_payload="KevinLauncher-${BETA_VERSION}-app.zip"
+          if [[ ! -d "$ASSETS_DIR" || ! -f "$CHECKSUMS" || ! -f "$NOTES_FILE" ]]; then
+            echo '::error::The verified Beta assets are missing.' >&2
+            exit 1
+          fi
+          (
+            cd -- "$ASSETS_DIR"
+            sha256sum --check --strict "$CHECKSUMS"
+          )
+          assets=(
+            "$ASSETS_DIR/$expected_installer"
+            "$ASSETS_DIR/$expected_payload"
+            "$ASSETS_DIR/update-manifest.json"
+            "$ASSETS_DIR/beta-verification.json"
+          )
+          expected_count=4
+          if [[ -n "$DELTA_NAME" ]]; then
+            assets+=("$ASSETS_DIR/$DELTA_NAME")
+            expected_count=5
+          fi
+          mapfile -d '' -t frozen < <(find "$ASSETS_DIR" -maxdepth 1 -type f -print0)
+          if (( ${#frozen[@]} != expected_count )); then
+            echo '::error::The publish directory contains unexpected or missing files.' >&2
             exit 1
           fi
           tag="v$BETA_VERSION"
@@ -218,5 +414,15 @@ jobs:
             --prerelease \
             --latest=false \
             --notes-file "$NOTES_FILE" \
-            "$INSTALLER" \
-            "$MANIFEST"
+            "${assets[@]}"
+          release_json="$(gh api "repos/$GH_REPO/releases/tags/$tag")"
+          if ! jq -e --arg tag "$tag" --argjson count "$expected_count" '
+              .tag_name == $tag and
+              .draft == false and
+              .prerelease == true and
+              (.assets | length) == $count and
+              all(.assets[]; .state == "uploaded")
+            ' <<<"$release_json" >/dev/null; then
+            echo "::error::Release $tag was not published as a complete prerelease." >&2
+            exit 1
+          fi

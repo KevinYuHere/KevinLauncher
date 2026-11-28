@@ -70,7 +70,9 @@ export async function copyBetaBuildInputs(root, source) {
 
 async function main() {
   if (process.platform !== 'win32') throw new Error('本地 Beta 安装包须在 Windows 上构建')
-  const { values } = parseArgs({ options: { version: { type: 'string' }, 'keep-unpacked': { type: 'boolean' } } })
+  const { values } = parseArgs({ options: {
+    version: { type: 'string' }, 'keep-unpacked': { type: 'boolean' }, 'build-only': { type: 'boolean' }
+  } })
   const root = resolve(import.meta.dirname, '..')
   const [manifest, lock] = await Promise.all(['package.json', 'package-lock.json'].map(async file =>
     JSON.parse(await readFile(join(root, file), 'utf8'))))
@@ -86,8 +88,14 @@ async function main() {
       await writeFile(join(source, file), JSON.stringify(content, null, 2) + '\n')
     }
     await cp(join(root, 'node_modules'), modules, { recursive: true })
-    for (const command of ['npm.cmd run typecheck', 'npm.cmd test']) {
-      execFileSync('cmd.exe', ['/d', '/s', '/c', command], { cwd: source, stdio: 'inherit' })
+    if (values['build-only']) {
+      // Hosted acceptance skips the duplicate full suite only after the exact
+      // main push CI succeeded; the real package and its verifier still run.
+      console.log('--build-only：仅限已通过精确 main push CI 的托管验收，跳过重复的 typecheck 与测试')
+    } else {
+      for (const command of ['npm.cmd run typecheck', 'npm.cmd test']) {
+        execFileSync('cmd.exe', ['/d', '/s', '/c', command], { cwd: source, stdio: 'inherit' })
+      }
     }
     const build = buildWindowsInstaller(source)
     const filename = basename(build.installer)
