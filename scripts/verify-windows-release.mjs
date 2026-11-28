@@ -25,6 +25,7 @@ const windowsLayout = createRequire(import.meta.url)('../src/shared/windowsLayou
 const windowsProbe = fileURLToPath(new URL('./verify-setup-windows.ps1', import.meta.url))
 const run = promisify(execFile)
 const samePath = (actual, expected) => actual?.toLowerCase() === expected.toLowerCase()
+const escapeRegExp = value => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 const FRESH_HUD_DEFAULTS = Object.freeze({
   enabled: true,
   alwaysVisible: true,
@@ -33,6 +34,7 @@ const FRESH_HUD_DEFAULTS = Object.freeze({
   borderWidth: 2,
   borderColor: '#A7AD48'
 })
+const FEATURE_INTRO_TEXT = '全新功能「KEVIN HUD」现已上线！请前往模块管理体验！'
 const setupField = label => `[...document.querySelectorAll('.setup-field')].find(field =>
   field.querySelector('.setup-field-label')?.textContent.trim() === ${JSON.stringify(label)})`
 
@@ -40,12 +42,24 @@ if (process.platform !== 'win32' || process.env.GITHUB_ACTIONS !== 'true' ||
     process.env.RUNNER_ENVIRONMENT !== 'github-hosted' || !process.env.RUNNER_TEMP) {
   throw new Error('正式安装和覆盖升级验证需要一次性的 GitHub 托管 Windows 运行器')
 }
-const liveFlag = process.argv.indexOf('--live-beta-channel')
-const live = liveFlag >= 0
-const liveBetaVersion = live ? (process.argv[liveFlag + 1] ?? '3.0.0-beta.12') : null
-if (live && (liveFlag !== 2 || process.argv.length > 4 || !isBetaVersion(liveBetaVersion))) {
-  throw new Error('实时 Beta 通道验证用法：node scripts/verify-windows-release.mjs --live-beta-channel 3.0.0-beta.12')
+const live = process.argv.includes('--live-beta-channel')
+let liveBetaVersion = null
+let liveFromVersion = null
+if (live) {
+  const args = process.argv.slice(2)
+  const target = args[1]
+  const from = args.length === 4 && args[2] === '--from-version' ? args[3] : args.length === 2 ? '2.0.5' : null
+  if (args[0] !== '--live-beta-channel' || !isBetaVersion(target) ||
+      !(from === '2.0.5' || isBetaVersion(from)) || !isNewerVersion(target, from)) {
+    throw new Error('实时 Beta 通道验证用法：node scripts/verify-windows-release.mjs ' +
+      '--live-beta-channel <目标 Beta> [--from-version <2.0.5 或已发布 Beta>]')
+  }
+  liveBetaVersion = target
+  liveFromVersion = from
 }
+// v2.0.5 is the legacy installer/app pair. A published Beta source is already
+// a modern production installation and must run without verifier-only switches.
+const legacyLiveSource = live && liveFromVersion === '2.0.5'
 const dir = live
   ? await mkdtemp(join(process.env.RUNNER_TEMP, 'kl-live-beta-verification-'))
   : resolve(process.argv[2])
@@ -57,7 +71,14 @@ if (!live && (!['fresh', 'legacy-tray', 'release'].includes(scenario) || (beta &
 const git = (...args) => execFileSync('git', args, { encoding: 'utf8', windowsHide: true }).trim()
 const betaRecord = beta ? JSON.parse(await readFile(join(dir, 'beta-verification.json'), 'utf8')) : null
 if (beta && !isBetaVersion(betaRecord.version)) throw new Error('预期本地 Beta 版本')
-const liveBeta = live ? await loadPublishedBeta(liveBetaVersion, dir) : null
+const liveBeta = live
+  ? await loadPublishedBeta(liveBetaVersion, dir, legacyLiveSource ? {} : { expectedElectron: null })
+  : null
+const liveSourceDir = live && !legacyLiveSource ? join(dir, 'published-source') : null
+if (liveSourceDir) await mkdir(liveSourceDir, { recursive: true })
+const liveSourceBeta = liveSourceDir
+  ? await loadPublishedBeta(liveFromVersion, liveSourceDir, { expectedElectron: null, withPayload: false })
+  : null
 const source = live ? {
   version: liveBeta.manifest.version,
   electron: liveBeta.manifest.electron,
@@ -134,13 +155,16 @@ function assertAssetDigest(asset, sha256, description) {
 
 /**
  * Reads the already published Beta release. The old public 2.0.5 client only
- * consumes the conventional manifest, so the manifest must advertise the exact
- * Electron 44.7.0 runtime that beta.11/beta.12 ship and the full application
- * ZIP. This channel check deliberately ignores any installerElectron field:
- * beta.11/beta.12 do not require a newer runtime, and the v2.0.5 client must
- * accept the manifest for a lightweight application update.
+ * consumes the conventional manifest, so the old channel check requires the
+ * exact Electron 44.7.0 runtime and the full application ZIP. A published
+ * modern Beta source passes `expectedElectron: null`; its target must instead
+ * match the source installation's runtime before a delta can be applied.
  */
-async function loadPublishedBeta(version, targetDir) {
+async function loadPublishedBeta(
+  version,
+  targetDir,
+  { expectedElectron = '44.7.0', withPayload = true } = {}
+) {
   assert(isBetaVersion(version), '公开发布的 Beta 版本无效')
   const release = await githubJson('/releases/tags/v' + version)
   assert.equal(release.tag_name, 'v' + version, '公开发布的 Beta 标签不匹配')
@@ -167,8 +191,10 @@ async function loadPublishedBeta(version, targetDir) {
   const manifest = parseUpdateManifest(manifestText, version)
   const raw = JSON.parse(manifestText)
   assert.equal(manifest.version, version)
-  assert.equal(manifest.electron, '44.7.0', '公开 Beta 清单必须声明 Electron 44.7.0')
-  assert.equal(raw.electron, '44.7.0')
+  if (expectedElectron !== null) {
+    assert.equal(manifest.electron, expectedElectron, '公开 Beta 清单必须声明 Electron ' + expectedElectron)
+    assert.equal(raw.electron, expectedElectron)
+  }
   assert.equal(manifest.critical, false, '公开 Beta 不能是重要更新')
 
   const verificationBytes = await fetchReleaseAsset(verificationAsset, 'Beta 验证清单')
@@ -183,18 +209,30 @@ async function loadPublishedBeta(version, targetDir) {
   assert.ok(installerAsset, '公开 Beta 缺少清单声明的安装程序')
   assert.equal(installerAsset.size, manifest.installerSize, '安装程序大小与更新清单不一致')
   assertAssetDigest(installerAsset, manifest.installerSha256, 'Beta 安装程序')
+  const deltaAsset = manifest.delta ? pick(manifest.delta.name) : null
+  if (deltaAsset) {
+    assert.equal(deltaAsset.size, manifest.delta.size, '差量更新包大小与更新清单不一致')
+    assertAssetDigest(deltaAsset, manifest.delta.sha256, 'Beta 差量更新包')
+  }
 
-  const payloadFile = join(targetDir, payloadAssetName(version))
-  await downloadPayload({
-    payload: { url: payloadAsset.url, size: payloadAsset.size },
-    manifest
-  }, payloadFile)
-  const payloadHash = await identifyFile(payloadFile)
-  assert.equal(payloadHash.size, manifest.payloadSize)
-  assert.equal(payloadHash.sha256, manifest.payloadSha256)
+  let payloadFile = null
+  let payloadHash = null
+  if (withPayload) {
+    payloadFile = join(targetDir, payloadAssetName(version))
+    await downloadPayload({
+      payload: { url: payloadAsset.url, size: payloadAsset.size },
+      manifest
+    }, payloadFile)
+    payloadHash = await identifyFile(payloadFile)
+    assert.equal(payloadHash.size, manifest.payloadSize)
+    assert.equal(payloadHash.sha256, manifest.payloadSha256)
+  }
   console.log('Verified public Beta ' + version + ' metadata (manifest Electron ' + manifest.electron + ')')
   console.log('  update-manifest.json ' + manifestHash.size + ' bytes · ' + manifestHash.sha256)
-  console.log('  ' + payloadAsset.name + ' ' + payloadHash.size + ' bytes · ' + payloadHash.sha256)
+  if (payloadHash) {
+    console.log('  ' + payloadAsset.name + ' ' + payloadHash.size + ' bytes · ' + payloadHash.sha256)
+  }
+  if (deltaAsset) console.log('  ' + deltaAsset.name + ' ' + deltaAsset.size + ' bytes · ' + manifest.delta.sha256)
   return {
     release: {
       id: release.id,
@@ -207,13 +245,16 @@ async function loadPublishedBeta(version, targetDir) {
     manifestFile,
     manifestSha256: manifestHash.sha256,
     payloadFile,
-    payloadSha256: payloadHash.sha256,
-    payloadSize: payloadHash.size,
+    payloadSha256: payloadHash?.sha256 ?? manifest.payloadSha256,
+    payloadSize: manifest.payloadSize,
     payloadAsset: payloadAsset.name,
     installerAsset: installerAsset.name,
+    installerUrl: installerAsset.url,
+    deltaAsset: deltaAsset ? { name: deltaAsset.name, url: deltaAsset.url, size: deltaAsset.size } : null,
     assets: {
       'update-manifest.json': manifestHash,
-      [payloadAssetName(version)]: payloadHash
+      [payloadAssetName(version)]: payloadHash ?? { size: manifest.payloadSize, sha256: manifest.payloadSha256 },
+      ...(deltaAsset ? { [deltaAsset.name]: { size: deltaAsset.size, sha256: manifest.delta.sha256 } } : {})
     }
   }
 }
@@ -240,6 +281,13 @@ async function betaFixtureRoot() {
     }
   }
   return realpath(await mkdtemp(join(process.env.RUNNER_TEMP, 'kl-beta-check-')))
+}
+
+/** A raced deadline must not keep this verifier alive after the real work ends. */
+function deadline(milliseconds, message) {
+  const timer = delay(milliseconds)
+  timer.unref?.()
+  return timer.then(() => { throw new Error(message) })
 }
 
 async function until(operation, description, timeout = 120_000, failed) {
@@ -272,7 +320,7 @@ async function connectPage(port, description, options = {}) {
   await Promise.race([
     once(socket, 'open'),
     once(socket, 'error').then(() => { throw new Error('无法连接 Electron 页面') }),
-    delay(5000).then(() => { throw new Error('Electron 页面连接超时') })
+    deadline(5000, 'Electron 页面连接超时')
   ])
   let id = 0
   const events = []
@@ -330,6 +378,84 @@ async function connectPage(port, description, options = {}) {
   return { target, socket, command, run, events }
 }
 
+/** The real one-time dialog, visible in the attached renderer. */
+function visibleFeatureIntro(ui) {
+  return ui.run(`(() => {
+    const title = document.querySelector('#feature-intro-title')
+    const dialog = title?.closest('[role="dialog"]')
+    if (!title || !dialog) return null
+    const rect = dialog.getBoundingClientRect()
+    if (rect.width <= 0 || rect.height <= 0 || !dialog.checkVisibility({ visibilityProperty: true })) return null
+    return {
+      title: title.textContent.trim(),
+      notes: (dialog.querySelector('.update-notes')?.textContent ?? '').trim()
+    }
+  })()`)
+}
+
+async function featureIntroApplied(data, version) {
+  let config
+  try {
+    config = JSON.parse(await readFile(join(data, 'config.json'), 'utf8'))
+  } catch (error) {
+    if (error.code === 'ENOENT') return false
+    throw error
+  }
+  return Array.isArray(config.launcher?.featureIntroApplied) &&
+    config.launcher.featureIntroApplied.includes(version)
+}
+
+async function assertNoFeatureIntro(ui, label, quiet = 4000) {
+  await until(async () => (await ui.run('(document.querySelector("#root")?.childElementCount ?? 0) > 0')) === true,
+    label + '界面完成渲染', 30_000)
+  const end = Date.now() + quiet
+  while (Date.now() < end) {
+    const intro = await visibleFeatureIntro(ui)
+    assert.equal(intro, null, label + '不应出现功能介绍：' + JSON.stringify(intro))
+    await delay(250)
+  }
+}
+
+async function installedFeatureIntro(target, version) {
+  const file = join(target, 'resources', 'app-' + version, 'theme-policy.json')
+  let raw
+  try {
+    raw = await readFile(file, 'utf8')
+  } catch (error) {
+    if (error.code === 'ENOENT') return null
+    throw error
+  }
+  const policy = JSON.parse(raw)
+  if (!policy || policy.version !== version || !policy.intro || typeof policy.intro !== 'object' ||
+      Array.isArray(policy.intro)) return null
+  return policy.intro
+}
+
+/**
+ * The introduction must be visibly rendered once, recorded, and gone after a
+ * real restart. `restart` launches the installed entry for the current host.
+ */
+async function verifyFeatureIntroOnce(ui, restart, data, version, expected, label) {
+  assert.equal(String(expected.body ?? '').trim(), FEATURE_INTRO_TEXT,
+    label + '内置功能介绍文案必须为验收文案')
+  const intro = await until(() => visibleFeatureIntro(ui), label + '功能介绍可见', 120_000)
+  assert.equal(intro.title, String(expected.title ?? '').trim(), label + '功能介绍标题应与内置策略一致')
+  assert.ok(intro.notes.includes(FEATURE_INTRO_TEXT), label + '功能介绍文案应原样可见：' + intro.notes)
+  console.log(label + ' showed the real one-time introduction: ' + JSON.stringify(intro))
+  await until(() => featureIntroApplied(data, version), label + '功能介绍应用记录持久化', 30_000)
+  await ui.close()
+  const restarted = await restart()
+  try {
+    assert.equal(await restarted.run('window.api.appVersion()'), version)
+    await assertNoFeatureIntro(restarted, label + '后的重新启动')
+    assert.equal(await featureIntroApplied(data, version), true,
+      label + '后的重新启动应保留功能介绍应用记录')
+  } finally {
+    await restarted.close()
+  }
+  return intro
+}
+
 async function launch(file, ...args) {
   return launchWithEnv({}, file, ...args)
 }
@@ -372,16 +498,12 @@ async function launchWithEnv(extraEnv, file, ...args) {
   }
   const waitForExit = async (timeout = 15_000) => {
     page.socket.close()
-    const [code] = await Promise.race([exited, delay(timeout).then(() => {
-      throw new Error('Windows 进程无法正常退出')
-    })])
+    const [code] = await Promise.race([exited, deadline(timeout, 'Windows 进程无法正常退出')])
     assert.equal(code, 0)
     children.delete(child)
   }
   const waitForRelaunchExit = async (timeout = 240_000) => {
-    const [code] = await Promise.race([exited, delay(timeout).then(() => {
-      throw new Error('更新后的旧实例未在时限内退出')
-    })])
+    const [code] = await Promise.race([exited, deadline(timeout, '更新后的旧实例未在时限内退出')])
     assert.equal(code, 0)
     page.socket.close()
     children.delete(child)
@@ -460,7 +582,7 @@ async function stopExactTargetProcesses(target) {
   return ids
 }
 
-async function relaunchLiveInstalled(ui, target) {
+async function relaunchLiveInstalled(ui, target, restart = launchLiveLegacy) {
   const entry = join(target, windowsLayout.entry)
   const runtime = join(target, windowsLayout.runtime)
   const previousIds = new Set((await windows('processes', '-Target', target)).processes.map(process => process.id))
@@ -480,7 +602,7 @@ async function relaunchLiveInstalled(ui, target) {
   } catch (error) {
     console.warn('更新后的实例没有复用旧调试端口，改为重新启动准确入口：' + error.message)
     if ((await windows('processes', '-Target', target)).processes.length) await stopExactTargetProcesses(target)
-    const restarted = await launchLiveLegacy(entry)
+    const restarted = await restart(entry)
     const main = await until(findMain, '重新启动后的主进程就绪', 30_000)
     assert(!previousIds.has(main.id), '重新启动后应运行新的启动器进程')
     return { ui: restarted, method: 're-execed-exact-entry', mainPid: main.id, mainImage: basename(main.path) }
@@ -636,13 +758,17 @@ async function checkProfile(data, fixture, history) {
   assert.deepEqual(JSON.parse(await readFile(join(data, 'playtime.json'), 'utf8')), history)
 }
 
-async function seedProfile(target, data, version) {
+async function seedProfile(target, data, version, { expectNoIntro = false } = {}) {
   const entry = join(target, windowsLayout.entry)
-  const ui = live ? await launchLiveLegacy(entry) : await launch(entry)
+  const ui = live && legacyLiveSource ? await launchLiveLegacy(entry) : await launch(entry)
   assert.equal(await ui.run('window.api.appVersion()'), version)
   assert.deepEqual(await ui.run('window.api.listApps()'), [])
   const fixture = await ui.run('window.api.addApp({ name: "Windows 验收夹具", launchMethods: [] })')
   assert.equal(typeof fixture.id, 'string')
+  if (expectNoIntro) {
+    await assertNoFeatureIntro(ui, '全新安装首次启动')
+    assert.equal(await featureIntroApplied(data, version), false, '全新安装首次启动不应记录功能介绍')
+  }
   await ui.close()
   const end = new Date()
   const history = { version: 1, sessions: [{
@@ -737,7 +863,7 @@ function freshHudSettings(app) {
   return { app: app.name, ...hud }
 }
 
-async function startInstalled(target, version, fixture, savedSession) {
+async function startInstalled(target, version, fixture, { savedSession, data, intro } = {}) {
   windowsExecutable.assertExecutionLevel(join(target, windowsLayout.entry), 'requireAdministrator')
   windowsExecutable.assertExecutionLevel(join(target, windowsLayout.runtime), 'asInvoker')
   const ui = await launch(join(target, windowsLayout.entry))
@@ -763,7 +889,15 @@ async function startInstalled(target, version, fixture, savedSession) {
     const cleanup = await ui.run('window.api.setLauncherBehavior({ closeAction: "close" })')
     assert.equal(cleanup.closeAction, 'close')
   }
+  if (intro) {
+    return {
+      featureIntro: await verifyFeatureIntroOnce(
+        ui, () => launch(join(target, windowsLayout.entry)), data, version, intro, '覆盖安装后的启动'
+      )
+    }
+  }
   await ui.close()
+  return {}
 }
 
 async function verifyBetaIntegration(target, data, selections) {
@@ -922,13 +1056,22 @@ async function verifyFreshBeta() {
   const { target, selections } = await install(installer, 'fresh', source.version)
   const data = sandboxData('fresh')
   console.log('Installed the selected Beta paths: ' + JSON.stringify({ ...selections, program: target, data }))
-  const { fixture, history } = await seedProfile(target, data, source.version)
+  // A fresh install has no upgrade proof, so a bundled introduction must not appear.
+  const intro = await installedFeatureIntro(target, source.version)
+  const { fixture, history } = await seedProfile(target, data, source.version, {
+    expectNoIntro: Boolean(intro)
+  })
   await startInstalled(target, source.version, fixture)
+  if (intro) assert.equal(await featureIntroApplied(data, source.version), false,
+    '全新安装启动不应记录功能介绍')
   await comparePayload(target)
   const integration = await verifyBetaIntegration(target, data, selections)
   console.log('Installed Windows Beta integration: ' + JSON.stringify(integration))
   await uninstallFresh(target, data, fixture, history)
-  const proof = { ...integration, installedPayloadMatched: true, uninstalledWithDataPreserved: true }
+  const proof = {
+    ...integration, installedPayloadMatched: true, uninstalledWithDataPreserved: true,
+    ...(intro ? { featureIntroAbsentOnFreshInstall: true } : {})
+  }
   console.log('Fresh Windows Beta verification: ' + JSON.stringify(proof))
   return proof
 }
@@ -970,12 +1113,19 @@ async function verifyPublishedOverlay() {
     await activityProcess('stop-activity-process')
     activity = undefined
   }
-  await startInstalled(covering, source.version, fixture, beta ? updatedHistory.sessions.at(-1) : undefined)
-  console.log('Verified overwrite upgrade, startup, saved history and previous profile backup')
+  const intro = beta ? await installedFeatureIntro(covering, source.version) : null
+  await startInstalled(covering, source.version, fixture, {
+    savedSession: beta ? updatedHistory.sessions.at(-1) : undefined,
+    data,
+    intro
+  })
+  console.log('Verified overwrite upgrade, startup, saved history and previous profile backup' +
+    (intro ? ', plus the real one-time feature introduction' : ''))
   return {
     previousVersion: previous.manifest.version, previousInstallerSha256: previousInstaller.manifest.installerSha256,
     ...(beta ? { previousInstallerVersion: previousInstaller.manifest.version,
       previousPayloadSha256: previous.manifest.payloadSha256 } : {}),
+    ...(intro ? { featureIntroOnce: true } : {}),
     fixture, history
   }
 }
@@ -999,7 +1149,200 @@ async function loadPublishedLegacyPayload(installation, runtimeRelease, applicat
     ') on the installed v' + runtimeRelease.manifest.version + ' Electron ' + electron + ' runtime')
 }
 
+/** Published modern Beta -> next Beta through the real public updater/delta. */
+async function verifyLiveModernChannel(fromVersion) {
+  const sourceBeta = liveSourceBeta
+  assert(sourceBeta, '缺少已发布来源 Beta 的元数据')
+  assert.equal(sourceBeta.manifest.version, fromVersion)
+  assert.equal(sourceBeta.release.prerelease, true, '来源 Beta 必须是 GitHub 预发布')
+  assert.equal(liveBeta.manifest.electron, sourceBeta.manifest.electron,
+    '目标 Beta 必须沿用来源运行库，才能验证应用差量')
+  assert.ok(liveBeta.manifest.delta, '公开目标 Beta 清单必须声明从 ' + fromVersion + ' 的差量')
+  assert.equal(liveBeta.manifest.delta.fromVersion, fromVersion, '目标清单差量来源必须是 ' + fromVersion)
+  assert.ok(liveBeta.deltaAsset, '公开目标 Beta 缺少差量资产')
+  assert.ok(liveBeta.manifest.delta.size < liveBeta.manifest.payloadSize, '差量包必须小于完整应用包')
+
+  const deltaBytes = await fetchReleaseAsset(liveBeta.deltaAsset, 'Beta 差量更新包')
+  assert.equal(deltaBytes.length, liveBeta.manifest.delta.size, '公开差量包大小与清单不一致')
+  const deltaFile = join(dir, liveBeta.manifest.delta.name)
+  await writeFile(deltaFile, deltaBytes)
+  const deltaHash = await identifyFile(deltaFile)
+  assert.equal(deltaHash.sha256, liveBeta.manifest.delta.sha256, '公开差量包 SHA-256 与清单不一致')
+  console.log('Verified public delta ' + deltaHash.size + ' bytes · ' + deltaHash.sha256)
+
+  const installerFile = join(dir, sourceBeta.manifest.installerName)
+  await downloadInstaller({ manifest: sourceBeta.manifest, installer: { url: sourceBeta.installerUrl } }, installerFile)
+  const installerHash = await identifyFile(installerFile)
+  assert.equal(installerHash.size, sourceBeta.manifest.installerSize)
+  assert.equal(installerHash.sha256, sourceBeta.manifest.installerSha256)
+  windowsExecutable.assertExecutionLevel(installerFile, 'requireAdministrator')
+  console.log('Verified published ' + fromVersion + ' installer ' + installerHash.size + ' bytes · ' + installerHash.sha256)
+
+  const { target } = await install(installerFile, 'live-beta-modern', fromVersion)
+  liveInstalled = target
+  assert.equal((await readFile(join(target, 'resources', 'app-version.txt'), 'utf8')).trim(), fromVersion)
+  windowsExecutable.assertExecutionLevel(join(target, windowsLayout.entry), 'requireAdministrator')
+  windowsExecutable.assertExecutionLevel(join(target, windowsLayout.runtime), 'asInvoker')
+  const data = sandboxData('live-beta-modern')
+  const { fixture, history } = await seedProfile(target, data, fromVersion)
+  const logFile = join(data, 'launcher.log')
+  const logBeforeLength = (await readFile(logFile, 'utf8').catch(() => '')).length
+
+  const ui = await launch(join(target, windowsLayout.entry))
+  assert.equal(await ui.run('window.api.appVersion()'), fromVersion)
+  const electronPattern = escapeRegExp(sourceBeta.manifest.electron)
+  assert.match(await ui.run('navigator.userAgent'), new RegExp('Electron/' + electronPattern + '(?:[^\\d]|$)'),
+    '实际安装的来源 Beta 运行库必须与公开清单一致')
+  const betaSettings = await ui.run('window.api.setLauncherBehavior({ updateChannel: "beta" })')
+  assert.equal(betaSettings.updateChannel, 'beta', '公开设置入口必须能切换到测试通道')
+  const betaStatus = await ui.run('window.api.appUpdateCheck()')
+  assert.equal(betaStatus.error, undefined, 'Beta 检查不应失败：' + betaStatus.error)
+  assert.equal(betaStatus.current, fromVersion)
+  assert.equal(betaStatus.hasUpdate, true, '测试通道应提供公开目标 Beta')
+  assert.ok(betaStatus.info, '测试通道应返回公开目标 Beta 信息')
+  assert.equal(betaStatus.info.version, liveBeta.manifest.version, '必须提供目标 Beta 版本')
+  assert.equal(betaStatus.info.electronVersion, sourceBeta.manifest.electron)
+  assert.equal(betaStatus.info.payloadSize, liveBeta.manifest.payloadSize)
+  assert.equal(betaStatus.info.payloadSha256, liveBeta.manifest.payloadSha256)
+  assert.equal(betaStatus.info.installSize, liveBeta.manifest.appSize)
+  assert.equal(betaStatus.info.delta.fromVersion, fromVersion)
+  assert.equal(betaStatus.info.delta.name, liveBeta.manifest.delta.name)
+  assert.equal(betaStatus.info.delta.size, liveBeta.manifest.delta.size)
+  assert.equal(betaStatus.info.delta.sha256, liveBeta.manifest.delta.sha256)
+  console.log('Beta channel offers ' + liveBeta.manifest.version + ' via the published ' +
+    liveBeta.manifest.delta.size + '-byte delta')
+
+  const entryPath = join(target, windowsLayout.entry)
+  const runtimePath = join(target, windowsLayout.runtime)
+  const entryBefore = await identifyFile(entryPath)
+  const runtimeBefore = await identifyFile(runtimePath)
+  await ui.command('Runtime.addBinding', { name: 'kevinLiveUpdateState' })
+  await ui.run(`(() => {
+    if (!window.api.onAppUpdateState) throw new Error('来源 Beta 缺少更新状态事件')
+    window.api.onAppUpdateState(state => window.kevinLiveUpdateState(JSON.stringify(state)))
+    return true
+  })()`)
+  await ui.run('void window.api.appUpdateStart()')
+  const relaunched = await relaunchLiveInstalled(ui, target, launch)
+  assert.equal(await relaunched.ui.run('window.api.appVersion()'), liveBeta.manifest.version,
+    '更新后必须运行目标 Beta')
+  assert.match(await relaunched.ui.run('navigator.userAgent'), new RegExp('Electron/' + electronPattern + '(?:[^\\d]|$)'),
+    '差量更新必须继续使用来源运行库')
+  await until(async () => (await relaunched.ui.run('document.querySelector("#root")?.childElementCount ?? 0')) > 0,
+    '更新后的真实界面完成渲染', 30_000)
+  assert.equal((await readFile(join(target, 'resources', 'app-version.txt'), 'utf8')).trim(),
+    liveBeta.manifest.version, '资源版本指针必须指向目标 Beta')
+  assert.equal(JSON.parse(await readFile(join(target, 'resources', 'app-' + liveBeta.manifest.version,
+    'package.json'), 'utf8')).version, liveBeta.manifest.version)
+  await compareLivePayload(target)
+  assert.deepEqual(await identifyFile(entryPath), entryBefore, '差量更新后公开入口 exe 必须保持不变')
+  assert.deepEqual(await identifyFile(runtimePath), runtimeBefore, '差量更新后 Electron 运行库必须保持不变')
+
+  assert.equal((await relaunched.ui.run('window.api.getLauncherSettings()')).updateChannel, 'beta',
+    '更新后应保留测试通道选择')
+  const apps = await relaunched.ui.run('window.api.listApps()')
+  assert.ok(apps.some(app => app.id === fixture.id && app.name === fixture.name), '更新后应保留应用数据')
+  assert.equal((await relaunched.ui.run('window.api.playTimeTotals()'))[fixture.id], 60,
+    '更新后应保留使用时长')
+  await checkProfile(data, fixture, history)
+  const configAfter = JSON.parse(await readFile(join(data, 'config.json'), 'utf8'))
+  assert.equal(configAfter.launcher.updateChannel, 'beta')
+  assert.deepEqual(JSON.parse(await readFile(join(data, 'playtime.json'), 'utf8')), history)
+  const backupConfig = JSON.parse(await readFile(join(data, 'update-backup', 'config.json'), 'utf8'))
+  assert.ok(backupConfig.apps.some(app => app.id === fixture.id && app.name === fixture.name))
+  console.log('Verified update backup snapshot and preserved source-Beta profile')
+
+  const states = ui.events.filter(event => event.name === 'kevinLiveUpdateState').map(event => event.value)
+  const transferStates = states.filter(state => state && state.total > 0)
+  const downloaded = Math.max(0, ...transferStates.map(state => Number(state.transferred) || 0))
+  assert.equal(downloaded, liveBeta.manifest.delta.size, '实际下载总字节必须等于 manifest.delta.size')
+  assert(transferStates.every(state => state.total === liveBeta.manifest.delta.size),
+    '差量更新不得退回到完整应用包或安装程序')
+  assert(states.some(state => state.phase === 'installing' || state.phase === 'done'),
+    '来源 Beta 应进入应用差量安装阶段')
+
+  const intro = await installedFeatureIntro(target, liveBeta.manifest.version)
+  let featureIntro = null
+  if (intro) {
+    featureIntro = await verifyFeatureIntroOnce(
+      relaunched.ui, () => launch(join(target, windowsLayout.entry)), data,
+      liveBeta.manifest.version, intro, '差量更新后的启动'
+    )
+  } else {
+    await relaunched.ui.close()
+  }
+
+  const appendedLog = (await readFile(logFile, 'utf8')).slice(logBeforeLength)
+  const versionPattern = escapeRegExp(liveBeta.manifest.version)
+  assert.match(appendedLog, new RegExp('appUpdate: (?:auto|manual) beta check → v' + versionPattern +
+    ' available \\(current ' + escapeRegExp(fromVersion) + '\\)'), '来源 Beta 更新日志必须记录实际 Beta 检查结果')
+  assert.match(appendedLog, new RegExp('backup: "update ' + versionPattern + '" ->'),
+    '来源 Beta 更新日志必须记录实际更新快照')
+  assert.ok(!appendedLog.includes('appUpdate: failed'), '来源 Beta 更新不得失败')
+  assert.ok(!/appUpdate: delta .* (?:unavailable|could not be applied)/.test(appendedLog),
+    '来源 Beta 必须实际应用公开差量，而不是退回完整包')
+  assert.ok(!appendedLog.includes('appUpdate: opening '), '差量更新不得打开安装程序')
+  if (intro) {
+    assert.match(appendedLog, new RegExp('themePolicy: recorded introduction v' + versionPattern + ' after display'),
+      '功能介绍显示后应记录实际策略日志')
+  }
+  console.log('Confirmed source-Beta updater log and exact delta transfer')
+
+  return {
+    mode: 'live-beta-delta',
+    source: {
+      version: fromVersion,
+      electron: sourceBeta.manifest.electron,
+      installerName: sourceBeta.manifest.installerName,
+      installerSize: installerHash.size,
+      installerSha256: installerHash.sha256
+    },
+    beta: {
+      version: liveBeta.manifest.version,
+      electron: liveBeta.manifest.electron,
+      manifestSha256: liveBeta.manifestSha256,
+      payloadName: liveBeta.payloadAsset,
+      payloadSize: liveBeta.payloadSize,
+      payloadSha256: liveBeta.payloadSha256,
+      installerName: liveBeta.installerAsset,
+      installerSize: liveBeta.manifest.installerSize,
+      installerSha256: liveBeta.manifest.installerSha256,
+      critical: liveBeta.manifest.critical,
+      prerelease: liveBeta.release.prerelease
+    },
+    delta: {
+      fromVersion: liveBeta.manifest.delta.fromVersion,
+      name: liveBeta.manifest.delta.name,
+      size: liveBeta.manifest.delta.size,
+      sha256: liveBeta.manifest.delta.sha256
+    },
+    betaOfferExact: true,
+    betaOfferNoncritical: true,
+    publicManifestMatched: true,
+    publicPayloadDownloaded: true,
+    publicDeltaDownloaded: true,
+    deltaBytes: downloaded,
+    appPayloadRequested: false,
+    installerNotRequested: true,
+    relaunch: { method: relaunched.method, mainPid: relaunched.mainPid, mainImage: relaunched.mainImage },
+    versionPointer: liveBeta.manifest.version,
+    restartedVersion: liveBeta.manifest.version,
+    runtimeElectron: sourceBeta.manifest.electron,
+    rendererRendered: true,
+    runtimeLayout: 'dedicated-runtime',
+    entryBinaryUnchanged: true,
+    runtimeBinaryUnchanged: true,
+    dataPreserved: true,
+    backupVerified: true,
+    profile: { app: fixture.name, appId: fixture.id, updateChannel: 'beta' },
+    transferTotals: [...new Set(transferStates.map(state => state.total))],
+    uiStates: states.length,
+    ...(featureIntro ? { featureIntroOnce: true } : {})
+  }
+}
+
 async function verifyLiveBetaChannel() {
+  if (!legacyLiveSource) return verifyLiveModernChannel(liveFromVersion)
   console.log('Live Beta channel: published v2.0.5 -> ' + liveBeta.manifest.version)
   const stable = await releasedAssets('v2.0.5')
   assert.equal(stable.manifest.version, '2.0.5')
@@ -1159,6 +1502,13 @@ async function verifyLiveBetaChannel() {
 
   return {
     mode: 'live-beta-channel',
+    source: {
+      version: stable.manifest.version,
+      electron: stable.manifest.electron,
+      installerName: stable.manifest.installerName,
+      installerSize: previousHash.size,
+      installerSha256: previousHash.sha256
+    },
     stable: {
       version: stable.manifest.version,
       electron: stable.manifest.electron,
@@ -1215,22 +1565,31 @@ try {
     await writeFile(join(dir, 'windows-verification.json'), JSON.stringify(verification, null, 2) + '\n')
     console.log('Live Windows Beta channel verification: ' + JSON.stringify(verification))
     if (process.env.GITHUB_STEP_SUMMARY) {
+      const deltaRun = proof.mode === 'live-beta-delta'
       const summary = [
         '### Published Beta channel verification',
         '',
-        'Stable source: v' + proof.stable.version + ' (Electron ' + proof.stable.electron + ')',
-        'Stable installer SHA-256: ' + proof.stable.installerSha256,
+        'Source: v' + proof.source.version + ' (Electron ' + proof.source.electron + ')',
+        'Source installer SHA-256: ' + proof.source.installerSha256,
         'Published Beta: ' + proof.beta.version + ' (manifest Electron ' + proof.beta.electron + ')',
         'Beta manifest SHA-256: ' + proof.beta.manifestSha256,
         'Beta application ZIP SHA-256: ' + proof.beta.payloadSha256,
-        'Stable channel started without a Beta offer; the old public Beta switch offered exactly the target version.',
-        'The old client downloaded and applied the application ZIP; ' +
-          (proof.runtimeLayout === 'dedicated-runtime'
-            ? 'entry and runtime binaries stayed unchanged.'
-            : 'the single entry binary stayed unchanged and no separate runtime was added.'),
-        'Temporary verifier-only Chromium switches for the published v2.0.5 installer and launcher: ' +
-          LIVE_LEGACY_CHROMIUM_FLAGS.join(' ') + ' (production and release launches are unchanged).',
-        'Restarted on Electron 44.7.0 with the new version pointer, real renderer, profile and update backup intact.',
+        ...(deltaRun
+          ? ['The published Beta client downloaded exactly the ' + proof.delta.size + '-byte delta and applied it.',
+            'Delta SHA-256: ' + proof.delta.sha256,
+            'The app updater log recorded the actual Beta check, update backup and applied introduction.']
+          : ['Stable channel started without a Beta offer; the old public Beta switch offered exactly the target version.',
+            'The old client downloaded and applied the application ZIP; ' +
+              (proof.runtimeLayout === 'dedicated-runtime'
+                ? 'entry and runtime binaries stayed unchanged.'
+                : 'the single entry binary stayed unchanged and no separate runtime was added.'),
+            'Temporary verifier-only Chromium switches for the published v2.0.5 installer and launcher: ' +
+              LIVE_LEGACY_CHROMIUM_FLAGS.join(' ') + ' (production and release launches are unchanged).']),
+        ...(proof.featureIntroOnce
+          ? ['The one-time .13 feature introduction was visible once, recorded, and absent after restart.']
+          : []),
+        'Restarted on Electron ' + proof.runtimeElectron +
+          ' with the new version pointer, real renderer, profile and update backup intact.',
         '',
         ...Object.entries(assets).map(([file, asset]) => '- ' + file + ': ' + asset.sha256)
       ].join('\n') + '\n'
@@ -1256,7 +1615,8 @@ try {
       electron: source.electron,
       launched: true,
       ...(overlay ? { previous: overlay.previousVersion, previousInstallerSha256: overlay.previousInstallerSha256,
-        overwriteUpgrade: true, historyPreserved: true, backupVerified: true } : {}),
+        overwriteUpgrade: true, historyPreserved: true, backupVerified: true,
+        ...(overlay.featureIntroOnce ? { featureIntroOnce: true } : {}) } : {}),
       ...(!beta || betaIntegration ? { freshInstall: true, payloadMatchesInstalled: true, uninstalled: true } : {}),
       entryMode: 'requireAdministrator',
       runtimeMode: 'asInvoker',

@@ -6,7 +6,12 @@ on:
       beta_version:
         description: 已公开发布的 Beta 版本号（x.y.z-beta.n）
         required: true
-        default: 3.0.0-beta.12
+        default: 3.0.0-beta.13
+        type: string
+      from_version:
+        description: 升级来源（默认 2.0.5；指定 3.0.0-beta.12 验证已发布 .12 安装器与公开差量）
+        required: false
+        default: 2.0.5
         type: string
 
 permissions:
@@ -18,7 +23,7 @@ concurrency:
 
 jobs:
   verify:
-    name: Published v2.0.5 -> Beta self-update
+    name: Published ${{ inputs.from_version }} -> Beta self-update
     if: github.ref == 'refs/heads/main'
     runs-on: windows-latest
     timeout-minutes: 35
@@ -41,15 +46,22 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           BETA_VERSION: ${{ inputs.beta_version }}
+          FROM_VERSION: ${{ inputs.from_version }}
         run: |
           $canonicalTemp = node -p "require('node:fs').realpathSync.native(require('node:os').tmpdir())"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $env:TEMP = $env:TMP = $canonicalTemp
           $version = "$env:BETA_VERSION".Trim()
           if ($version -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-beta\.[1-9]\d*$') {
-            throw 'beta_version must be a canonical Beta version, for example 3.0.0-beta.12'
+            throw 'beta_version must be a canonical Beta version, for example 3.0.0-beta.13'
           }
-          node scripts/verify-windows-release.mjs --live-beta-channel $version
+          $fromVersion = "$env:FROM_VERSION".Trim()
+          if (-not $fromVersion) { $fromVersion = '2.0.5' }
+          if ($fromVersion -ne '2.0.5' -and
+              $fromVersion -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-beta\.[1-9]\d*$') {
+            throw 'from_version must be 2.0.5 or a canonical published Beta, for example 3.0.0-beta.12'
+          }
+          node scripts/verify-windows-release.mjs --live-beta-channel $version --from-version $fromVersion
           exit $LASTEXITCODE
       - name: Upload the published-channel verification record
         if: always()
