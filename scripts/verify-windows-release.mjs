@@ -331,12 +331,16 @@ async function connectPage(port, description, options = {}) {
 }
 
 async function launch(file, ...args) {
+  return launchWithEnv({}, file, ...args)
+}
+
+async function launchWithEnv(extraEnv, file, ...args) {
   const server = createServer()
   server.listen(0, '127.0.0.1')
   await once(server, 'listening')
   const port = server.address().port
   await new Promise((resolveClose, reject) => server.close(error => error ? reject(error) : resolveClose()))
-  const env = { ...process.env }
+  const env = { ...process.env, ...extraEnv }
   delete env.GH_TOKEN
   delete env.GITHUB_TOKEN
   delete env.ELECTRON_RUN_AS_NODE
@@ -407,12 +411,22 @@ async function launch(file, ...args) {
 // launches keep their strict sandbox checks.
 const LIVE_LEGACY_CHROMIUM_FLAGS = Object.freeze(['--no-sandbox', '--disable-gpu'])
 function launchLiveLegacy(file, ...args) {
+  return launchLiveLegacyWithEnv({}, file, ...args)
+}
+
+// v2.0.5 seedDataDir compares the source and destination data directories and
+// rejects unknown Electron cache files when they differ. Its native
+// KEVIN_LAUNCHER_DATA_DIR override takes priority over the registry, so point
+// only the verified installer process at the sandbox data directory. That makes
+// the source == target path apply. Installed launchers and their restarts never
+// receive this override and keep resolving their data directory from HKCU.
+function launchLiveLegacyWithEnv(extraEnv, file, ...args) {
   assert(live, '旧版 Chromium 参数仅用于实时 Beta 验证')
   const verifiedInstaller = join(dir, 'KevinLauncher-Installer-2.0.5.exe')
   const verifiedLauncher = liveInstalled && join(liveInstalled, windowsLayout.entry)
   assert(samePath(file, verifiedInstaller) || (verifiedLauncher && samePath(file, verifiedLauncher)),
     '旧版 Chromium 参数只能用于已校验的 v2.0.5 安装程序或已安装启动器')
-  return launch(file, ...args, ...LIVE_LEGACY_CHROMIUM_FLAGS)
+  return launchWithEnv(extraEnv, file, ...args, ...LIVE_LEGACY_CHROMIUM_FLAGS)
 }
 
 function relaunchedUi(page, target) {
@@ -571,7 +585,9 @@ async function install(file, name, version, previousVersion) {
   const target = sandboxInstall(name)
   const data = sandboxData(name)
   await mkdir(data, { recursive: true })
-  const ui = live && name === 'live-beta' ? await launchLiveLegacy(file) : await launch(file)
+  const ui = live && name === 'live-beta'
+    ? await launchLiveLegacyWithEnv({ KEVIN_LAUNCHER_DATA_DIR: data }, file)
+    : await launch(file)
   const info = await ui.run('window.api.installerInfo()')
   let selections
   assert.equal(info.version, version)
