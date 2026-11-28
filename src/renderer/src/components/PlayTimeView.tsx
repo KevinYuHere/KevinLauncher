@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactElement } from 'react'
 import type { AppEntry, PlayTimeDay, PlayTimeTotals } from '@shared/types'
+import { failureText } from '../format'
 
 interface PlayTimeViewProps {
   entry: AppEntry
@@ -23,12 +24,33 @@ function hexToRgb(hex: string): { r: number; g: number; b: number } {
 
 export default function PlayTimeView({ entry, onBack }: PlayTimeViewProps): ReactElement {
   const [totals, setTotals] = useState<PlayTimeTotals | null>(null)
+  const [error, setError] = useState('')
   const [selected, setSelected] = useState<PlayTimeDay | null>(null)
   const [cell, setCell] = useState(13)
   const wrapRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    void window.api.playTimeSummary(entry.id, DAYS).then(setTotals)
+    let active = true
+    let request = 0
+    const refresh = (): void => {
+      const current = ++request
+      void window.api.playTimeSummary(entry.id, DAYS).then((next) => {
+        if (!active || request !== current) return
+        setTotals(next)
+        setError('')
+        setSelected((selected) => next.daily.find((day) => day.date === selected?.date) ?? null)
+      }).catch((failure: unknown) => {
+        if (active && request === current) {
+          setError(failureText(failure, '读取使用时长失败。请稍后重试。若仍失败，请重启启动器后再打开本页。'))
+        }
+      })
+    }
+    const unsubscribe = window.api.onPlayTimeChanged(refresh)
+    refresh()
+    return () => {
+      active = false
+      unsubscribe()
+    }
   }, [entry.id])
 
   const daily = totals?.daily ?? []
@@ -82,8 +104,8 @@ export default function PlayTimeView({ entry, onBack }: PlayTimeViewProps): Reac
       <div className="page-header">
         <div>
           <h1 className="page-title">使用时长 · {entry.name}</h1>
-          <p className="page-subtitle">
-            {totals && totals.totalSec > 0 ? `累计 ${formatHours(totals.totalSec)}` : '暂无记录'}
+          <p className="page-subtitle" role={error ? 'alert' : undefined}>
+            {error || (totals && totals.totalSec > 0 ? `累计 ${formatHours(totals.totalSec)}` : totals ? '暂无使用记录' : '正在读取使用时长…')}
           </p>
         </div>
         <div className="page-actions">
@@ -115,11 +137,21 @@ export default function PlayTimeView({ entry, onBack }: PlayTimeViewProps): Reac
 
         <div className="panel">
           <div className="panel-head">
-            <div className="panel-title">每日使用热力图（近一年）</div>
+            <div className="panel-title">每日使用时长（近一年）</div>
           </div>
           <div className="panel-body">
+            {totals && daily.length === 0 ? (
+              <p className="hint">还没有使用记录。启动游戏并运行一段时间后，这里会显示每日使用时长。</p>
+            ) : (
+              <p className="hint">方格颜色越深，当天使用时间越长。鼠标移上去可查看具体日期与时长。</p>
+            )}
             <div className="heatmap-wrap" ref={wrapRef}>
-              <div className="heatmap" style={heatmapStyle}>
+              <div
+                className="heatmap"
+                role="img"
+                aria-label="近一年每日使用时长热力图：颜色越深，使用时间越长"
+                style={heatmapStyle}
+              >
                 {cells.map((day, index) =>
                   day ? (
                     <div
@@ -134,16 +166,16 @@ export default function PlayTimeView({ entry, onBack }: PlayTimeViewProps): Reac
                 )}
               </div>
             </div>
-            <div className="hm-selected">
+            <div className="hm-selected" aria-live="polite">
               {selected ? (
                 <>
-                  日期 <b>{selected.date}</b> · 使用 <b>{formatHours(selected.sec)}</b>
+                  日期 <b>{selected.date}</b> · 当天使用 <b>{formatHours(selected.sec)}</b>
                 </>
               ) : (
-                '将鼠标移到方格上查看当日日期与使用时长'
+                '将鼠标移到方格上，查看当天日期与使用时长'
               )}
             </div>
-            <div className="hm-legend">
+            <div className="hm-legend" role="group" aria-label="使用时长从少到多">
               <span>少</span>
               {[0, 1, 2, 3, 4].map((level) => (
                 <span key={level} className="hm-cell" style={{ background: colorOf(level) }} />

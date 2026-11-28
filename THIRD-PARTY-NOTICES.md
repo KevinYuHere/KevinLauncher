@@ -125,3 +125,34 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+### GlacierGlimmer/zmd-charge-plus
+
+- 仓库：https://github.com/GlacierGlimmer/zmd-charge-plus
+- 许可证：MIT（SPDX: MIT）
+- 参考版本：`main` 分支提交 [`6204862581a7fd9a5ed4d9671a58d2bb4bd7926d`](https://github.com/GlacierGlimmer/zmd-charge-plus/commit/6204862581a7fd9a5ed4d9671a58d2bb4bd7926d)（v0.2.0，2026-11-07）
+- 参考内容：Kevin HUD 的视觉语言（终末地风格的深色胶囊、荧光黄强调、细线分栏与状态标记）、交互（短时播报与常驻监控、按应用独立配置、选项预览、快捷键）以及可调参数（位置与锚点、尺寸、圆角、边框、透明度、材质、文字/图标颜色、字体缩放与偏移、显示器选择、入场方向/回弹/波纹、采样与展示时长等）。这些仅用于确认本项目的独立设计方向；Kevin HUD 的组件、样式、动画和主进程逻辑均由 KevinLauncher 以 TypeScript / React / Electron 独立实现，**未采用该项目的源代码、图像、图标、字体、动效素材、测试数据或其他文件**，也未引入其运行时依赖。该项目基于 QinAnze/zmd-charge；本项目的独立实现同样不包含上游项目的代码或素材。
+
+```
+MIT License
+
+Copyright (c) 2026 GlacierGlimmer冰川雪貓
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```

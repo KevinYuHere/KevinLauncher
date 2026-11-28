@@ -1,13 +1,11 @@
 import { app } from 'electron'
 import { promises as fs } from 'fs'
-import { dirname, join } from 'path'
-import type { UsageReport } from '@shared/types'
+import { join } from 'path'
+import type { DiskCacheKind, DiskCleanupReport, DiskUsageReport } from '@shared/types'
 import { keepStagedVersion } from '@shared/version'
-import { defaultLaunchMethod } from '@shared/appEntry'
-import { AppStore } from './appStore'
-import { directorySize } from './updateDownload'
+import { GAME_FILE_CATALOG_NAME } from '@shared/paths'
 import { currentAppVersion } from './appVersion'
-import { log } from './logger'
+import { clearLauncherLogs, launcherLogBytes, log } from './logger'
 
 /**
  * Disk housekeeping.
@@ -17,90 +15,129 @@ import { log } from './logger'
  *   folder of the running version, and the folder of a **newer** version (a
  *   download that is still pending — that is what makes a critical update resume
  *   after the user closed the launcher), are kept,
- * - the gallery thumbnail cache and the log files can be cleared on demand from
- *   the settings ("清理与占用").
+ * - legacy thumbnail files and launcher logs can be cleared from settings.
  */
 
 const stagingDir = (): string => join(app.getPath('userData'), 'update-staging')
 const thumbsDir = (): string => join(app.getPath('userData'), 'thumbs')
-const logFiles = (): string[] => [
-  join(app.getPath('userData'), 'launcher.log'),
-  join(app.getPath('userData'), 'launcher.log.1')
-]
+
+function absent(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException).code === 'ENOENT'
+}
+
+async function entriesAt(dir: string) {
+  try {
+    const stat = await fs.lstat(dir)
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('缓存目录不是普通目录')
+    return await fs.readdir(dir, { withFileTypes: true })
+  }
+  catch (error) {
+    if (absent(error)) return []
+    throw error
+  }
+}
+
+async function pathBytes(path: string): Promise<number> {
+  try {
+    const stat = await fs.lstat(path)
+    if (stat.isFile()) return stat.size
+    if (!stat.isDirectory()) return 0
+    let bytes = 0
+    for (const item of await entriesAt(path)) bytes += await pathBytes(join(path, item.name))
+    return bytes
+  } catch (error) {
+    if (absent(error)) return 0
+    throw error
+  }
+}
+
+async function remove(path: string, report: DiskCleanupReport): Promise<boolean> {
+  let before: number | undefined
+  try {
+    before = await pathBytes(path)
+    await fs.rm(path, { force: false, recursive: true })
+    report.diskBytes += before
+    return true
+  } catch (error) {
+    if (!absent(error)) {
+      const failure = error as NodeJS.ErrnoException
+      report.failures.push(`${path}：${failure.code ?? failure.message}`)
+      const remaining = await pathBytes(path).catch(() => undefined)
+      if (before !== undefined && remaining !== undefined) report.diskBytes += Math.max(0, before - remaining)
+    }
+    return false
+  }
+}
+
+async function removeStaleStaging(report: DiskCleanupReport): Promise<number> {
+  const path = stagingDir()
+  const current = currentAppVersion()
+  let removed = 0
+  try {
+    for (const entry of await entriesAt(path)) {
+      if (keepStagedVersion(entry.name, current)) continue
+      if (await remove(join(path, entry.name), report)) removed++
+    }
+  } catch (error) {
+    report.failures.push(`${path}：${(error as Error).message}`)
+  }
+  return removed
+}
 
 /**
  * Deletes staged downloads that can no longer be resumed: anything that is
  * neither the running version nor a newer (therefore still pending) one.
  */
 export async function cleanUpdateStaging(): Promise<number> {
-  const current = currentAppVersion()
-  let removed = 0
-  try {
-    for (const entry of await fs.readdir(stagingDir(), { withFileTypes: true })) {
-      // A newer version may be a download in flight (or one interrupted by
-      // closing the launcher): keep its `.part` files so it resumes.
-      if (keepStagedVersion(entry.name, current)) continue
-      await fs
-        .rm(join(stagingDir(), entry.name), { recursive: true, force: true })
-        .catch(() => undefined)
-      removed++
-    }
-  } catch {
-    /* nothing staged */
-  }
+  const report: DiskCleanupReport = { diskBytes: 0, failures: [] }
+  const removed = await removeStaleStaging(report)
   if (removed > 0) log(`housekeeping: removed ${removed} stale staging folder(s)`)
+  for (const failure of report.failures) log(`housekeeping: ${failure}`)
   return removed
 }
 
-/**
- * Arknights derived staging (`_kl_delta` / `_kl_stage`) is rebuilt on every
- * apply, so leftovers from a killed update are safe to delete at startup.
- * `_kl_pre` is deliberately kept: it is a real staged pre-download.
- */
-export async function cleanArknightsStaging(): Promise<void> {
-  const store = await AppStore.load()
-  for (const entry of store.apps) {
-    if (entry.addonId !== 'arknights') continue
-    const dir =
-      entry.gameDirectory?.trim() || dirname(defaultLaunchMethod(entry)?.targetPath ?? '')
-    if (!dir) continue
-    for (const name of ['_kl_delta', '_kl_stage']) {
-      await fs.rm(join(dir, name), { recursive: true, force: true }).catch(() => undefined)
+async function stagingUsage(): Promise<{ staleStaging: number | null; retainedStaging: number | null }> {
+  try {
+    const path = stagingDir()
+    const current = currentAppVersion()
+    let staleStaging = 0
+    let retainedStaging = 0
+    for (const item of await entriesAt(path)) {
+      const bytes = await pathBytes(join(path, item.name))
+      if (keepStagedVersion(item.name, current)) retainedStaging += bytes
+      else staleStaging += bytes
     }
+    return { staleStaging, retainedStaging }
+  } catch {
+    return { staleStaging: null, retainedStaging: null }
   }
 }
 
-/** Removes the gallery thumbnail cache (regenerated on demand). */
-export async function clearThumbs(): Promise<void> {
-  await fs.rm(thumbsDir(), { recursive: true, force: true }).catch(() => undefined)
-}
-
-/** Removes the log files. */
-export async function clearLogs(): Promise<void> {
-  for (const file of logFiles()) await fs.rm(file, { force: true }).catch(() => undefined)
-}
-
-/** Current size of everything the launcher caches on disk. */
-export async function usage(): Promise<UsageReport> {
-  const [staging, thumbs] = await Promise.all([
-    directorySize(stagingDir()),
-    directorySize(thumbsDir())
+/** Logical file sizes. Null is reserved for an unreadable group. */
+export async function usage(): Promise<DiskUsageReport> {
+  const root = app.getPath('userData')
+  const groupBytes = (paths: string[]): Promise<number | null> =>
+    Promise.all(paths.map((path) => pathBytes(join(root, path))))
+      .then((bytes) => bytes.reduce((sum, value) => sum + value, 0), () => null)
+  const [staging, legacyThumbs, logs, gameCache, media, recovery] = await Promise.all([
+    stagingUsage(),
+    pathBytes(thumbsDir()).catch(() => null),
+    launcherLogBytes().catch(() => null),
+    groupBytes(['hoyo-cache', GAME_FILE_CATALOG_NAME, GAME_FILE_CATALOG_NAME + '-wal', GAME_FILE_CATALOG_NAME + '-shm']),
+    groupBytes(['bg', 'icons', 'brand']),
+    groupBytes(['update-backup', 'update-backup.new', 'update-backup.old', 'config.json.corrupt'])
   ])
-  let logs = 0
-  for (const file of logFiles()) {
-    try {
-      logs += (await fs.stat(file)).size
-    } catch {
-      /* missing */
-    }
-  }
-  return { staging, thumbs, logs, total: staging + thumbs + logs }
+  return { ...staging, legacyThumbs, logs, gameCache, media, recovery }
 }
 
-/** Runs the requested cleanups and reports what is left. */
-export async function clean(kinds: ('staging' | 'thumbs' | 'logs')[]): Promise<UsageReport> {
-  if (kinds.includes('staging')) await cleanUpdateStaging()
-  if (kinds.includes('thumbs')) await clearThumbs()
-  if (kinds.includes('logs')) await clearLogs()
-  return usage()
+export async function clean(kinds: DiskCacheKind[]): Promise<DiskCleanupReport> {
+  const report: DiskCleanupReport = { diskBytes: 0, failures: [] }
+  if (kinds.includes('staging')) await removeStaleStaging(report)
+  if (kinds.includes('thumbs')) await remove(thumbsDir(), report)
+  if (kinds.includes('logs')) {
+    const result = await clearLauncherLogs()
+    report.diskBytes += result.bytes
+    report.failures.push(...result.failures)
+  }
+  return report
 }

@@ -8,6 +8,7 @@
   ],
   "compilerOptions": {
     "composite": true,
+    "rewriteRelativeImportExtensions": true,
     "types": ["electron-vite/node", "node"],
     "baseUrl": ".",
     "paths": {

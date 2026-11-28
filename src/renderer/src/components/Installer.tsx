@@ -1,7 +1,9 @@
 import { useEffect, useState, type ReactElement } from 'react'
 import type { InstallerInfo, InstallerProgress, InstallTarget } from '@shared/types'
 import { directoriesOverlap } from '@shared/paths'
-import { formatBytes } from '../format'
+import { failureText, formatBytes } from '../format'
+import { trialBuild } from '@shared/buildIdentity'
+import { isNewerVersion } from '@shared/version'
 
 type Step = 'location' | 'confirm' | 'progress' | 'done'
 
@@ -18,7 +20,7 @@ export default function Installer(): ReactElement | null {
   const [dir, setDir] = useState('')
   const [dataDir, setDataDir] = useState('')
   const [target, setTarget] = useState<InstallTarget | null>(null)
-  const [free, setFree] = useState(0)
+  const [free, setFree] = useState<number | null>(null)
   const [step, setStep] = useState<Step>('location')
   const [progress, setProgress] = useState<InstallerProgress | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -29,6 +31,11 @@ export default function Installer(): ReactElement | null {
       setTarget(data.target)
       setDir(data.prefillDir)
       setDataDir(data.dataDir)
+    }).catch((failure: unknown) => {
+      setError(failureText(
+        failure,
+        '无法读取安装信息。请关闭安装程序后重新打开。若仍失败，请重新运行安装包。'
+      ))
     })
     return window.api.onInstallerProgress(setProgress)
   }, [])
@@ -60,7 +67,10 @@ export default function Installer(): ReactElement | null {
       await window.api.installerRun(dir, dataDir)
       setStep('done')
     } catch (e) {
-      setError((e as Error).message)
+      setError(failureText(
+        e,
+        '安装没有完成。请检查安装目录的写入权限和可用空间，然后重试。'
+      ))
       setStep('location')
     }
   }
@@ -80,6 +90,7 @@ export default function Installer(): ReactElement | null {
 
   /** The data directory must not be the program directory (or inside it). */
   const overlap = !!dir && !!dataDir && directoriesOverlap(dir, dataDir)
+  const insufficient = free !== null && info !== null && free < info.payloadSize
 
   return (
     <div className="setup">
@@ -89,12 +100,34 @@ export default function Installer(): ReactElement | null {
       <header className="setup-top">
         <img className="setup-logo" src="kevin-media://default/icon.png" alt="" />
         <div className="setup-brand">
-          <div className="setup-brand-name">KevinLauncher</div>
+          <div className="setup-brand-name">{trialBuild ? 'KevinLauncher 本地试用' : 'KevinLauncher'}</div>
           <div className="setup-brand-sub">
-            {info ? `安装程序 · ${info.version}` : '正在读取安装信息…'}
+            {info
+              ? `安装程序 · ${info.version}`
+              : error
+                ? '无法读取安装信息'
+                : '正在读取安装信息…'}
           </div>
         </div>
-        <button className="setup-close" title="取消安装" onClick={() => window.api.windowClose()}>
+        <button
+          className="setup-close"
+          title={
+            step === 'progress'
+              ? '安装进行中，无法关闭'
+              : step === 'done'
+                ? '关闭'
+                : '取消安装'
+          }
+          aria-label={
+            step === 'progress'
+              ? '安装进行中，无法关闭'
+              : step === 'done'
+                ? '关闭安装程序'
+                : '取消安装'
+          }
+          disabled={step === 'progress'}
+          onClick={() => window.api.windowClose()}
+        >
           ✕
         </button>
       </header>
@@ -118,14 +151,27 @@ export default function Installer(): ReactElement | null {
           <section className="setup-panel">
             <h1 className="setup-title-lg">选择安装位置</h1>
             <p className="setup-sub">
-              将安装到下面的目录，并创建开始菜单与桌面快捷方式。
+              {trialBuild
+                ? '本地试用版会安装到独立目录，不会影响正式版。'
+                : '将安装到下面的目录，并创建开始菜单与桌面快捷方式。'}
             </p>
 
             <div className="setup-field">
               <label className="setup-field-label">安装位置</label>
               <div className="setup-path">
-                <input value={dir} spellCheck={false} onChange={(e) => setDir(e.target.value)} />
-                <button className="btn" onClick={() => void browse()}>
+                <input
+                  value={dir}
+                  spellCheck={false}
+                  readOnly={trialBuild}
+                  aria-label="安装位置"
+                  onChange={(e) => setDir(e.target.value)}
+                />
+                <button
+                  className="btn"
+                  disabled={trialBuild}
+                  aria-label="浏览安装位置"
+                  onClick={() => void browse()}
+                >
                   浏览…
                 </button>
               </div>
@@ -137,31 +183,42 @@ export default function Installer(): ReactElement | null {
                 <input
                   value={dataDir}
                   spellCheck={false}
+                  readOnly={trialBuild}
+                  aria-label="用户数据目录"
                   onChange={(e) => setDataDir(e.target.value)}
                 />
-                <button className="btn" onClick={() => void browseDataDir()}>
+                <button
+                  className="btn"
+                  disabled={trialBuild}
+                  aria-label="浏览用户数据目录"
+                  onClick={() => void browseDataDir()}
+                >
                   浏览…
                 </button>
               </div>
             </div>
+            <p className="setup-note">
+              {trialBuild
+                ? '本地试用版使用隔离的安装位置和数据目录，不能修改。'
+                : '用户数据目录保存应用列表、使用时长、抽卡记录、图标与壁纸。建议放在安装目录之外。重装时选择同一目录即可继续使用。'}
+            </p>
 
             {target?.isInstalled && (
               <div className="setup-note">
-                检测到已安装 <b>{target.version ?? '旧版本'}</b>
-                ，将<b>覆盖安装</b>并<b>保留全部用户数据</b>。
-                {target.version && info && compare(target.version, info.version) > 0 && (
-                  <div className="setup-warn">注意：本机版本更高，这是降级安装。</div>
+                检测到已安装 <b>{target.version ?? '旧版本'}</b>，将<b>覆盖安装</b>并<b>保留全部用户数据</b>。
+                {target.version && info && isNewerVersion(target.version, info.version) && (
+                  <div className="setup-warn">注意：本机已安装的版本更高，继续会降级安装。</div>
                 )}
               </div>
             )}
             {target && target.exists && !target.isInstalled && (
               <div className="setup-warn">
-                该目录已存在且不是 KevinLauncher 安装目录，将直接写入其中（{target.fileCount} 个文件）。
+                目标目录不是 KevinLauncher 安装目录，当前已有 {target.fileCount} 个文件。继续会覆盖同名文件，请确认没有需要保留的内容。
               </div>
             )}
             {info?.running.length ? (
               <div className="setup-note">
-                检测到正在运行的 KevinLauncher（{info.running[0]}），安装前会自动关闭。
+                检测到正在运行的 KevinLauncher：{info.running[0]}。安装前会自动关闭它。
               </div>
             ) : null}
 
@@ -172,42 +229,56 @@ export default function Installer(): ReactElement | null {
             )}
 
             <div className="setup-meta">
-              <span>需要约 {formatBytes(info?.payloadSize ?? 0)}</span>
-              <span>可用 {formatBytes(free)}</span>
+              <span>
+                {info ? `安装文件约 ${formatBytes(info.payloadSize)}` : '正在计算安装大小…'}
+              </span>
+              <span>{free === null ? '可用空间未知' : `可用空间 ${formatBytes(free)}`}</span>
             </div>
+            {insufficient && info && (
+              <div className="setup-warn">
+                可用空间不足：安装文件约需 {formatBytes(info.payloadSize)}，请更换安装位置或清理磁盘后再继续。
+              </div>
+            )}
           </section>
         )}
 
         {step === 'confirm' && (
           <section className="setup-panel">
             <h1 className="setup-title-lg">确认安装</h1>
-            <p className="setup-sub">以下内容将自动完成，无需其他选择。</p>
+            <p className="setup-sub">确认后会自动完成以下操作，无需其他选择。</p>
             <ul className="setup-list">
               <li>
                 <span>安装到</span>
                 <em>{dir}</em>
               </li>
-              <li>
-                <span>开始菜单快捷方式</span>
-                <em>创建</em>
-              </li>
-              <li>
-                <span>桌面快捷方式</span>
-                <em>创建</em>
-              </li>
-              <li>
-                <span>卸载入口</span>
-                <em>写入</em>
-              </li>
-              <li>
-                <span>开机自启</span>
-                <em>默认开启</em>
-              </li>
+              {!trialBuild && <>
+                <li>
+                  <span>开始菜单快捷方式</span>
+                  <em>创建</em>
+                </li>
+                <li>
+                  <span>桌面快捷方式</span>
+                  <em>创建</em>
+                </li>
+                <li>
+                  <span>Windows 卸载入口</span>
+                  <em>写入「设置 → 应用」</em>
+                </li>
+                <li>
+                  <span>开机自启</span>
+                  <em>默认开启</em>
+                </li>
+              </>}
               <li>
                 <span>用户数据</span>
                 <em>{dataDir || info?.dataDir}</em>
               </li>
             </ul>
+            {!trialBuild && (
+              <p className="setup-note">
+                开机自启会以计划任务在 Windows 登录后启动启动器，可随时在启动器设置中关闭。
+              </p>
+            )}
           </section>
         )}
 
@@ -239,7 +310,7 @@ export default function Installer(): ReactElement | null {
           </section>
         )}
 
-        {error && <div className="setup-warn setup-warn-block">安装失败：{error}</div>}
+        {error && <div className="setup-warn setup-warn-block" role="alert">{error}</div>}
       </main>
 
       <footer className="setup-actions">
@@ -286,7 +357,6 @@ export default function Installer(): ReactElement | null {
     </div>
   )
 }
-
 /** Animated aurora built from the theme colour (brand + two complements). */
 function Aurora(): ReactElement {
   return (
@@ -297,16 +367,4 @@ function Aurora(): ReactElement {
       <div className="setup-grid" />
     </div>
   )
-}
-
-/** Minimal dotted comparator (only used to warn about a downgrade). */
-function compare(a: string, b: string): number {
-  const pa = a.split('.').map((n) => Number.parseInt(n, 10) || 0)
-  const pb = b.split('.').map((n) => Number.parseInt(n, 10) || 0)
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const x = pa[i] ?? 0
-    const y = pb[i] ?? 0
-    if (x !== y) return x < y ? -1 : 1
-  }
-  return 0
 }

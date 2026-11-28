@@ -1,0 +1,1037 @@
+/* KEVIN HUD settings — only this card uses these classes. Surfaces follow the
+   active glass tokens so they track brightness / material / special themes. */
+.kh-card {
+  position: relative;
+}
+
+.kh-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 18px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background-image: linear-gradient(100deg, var(--brand-dim), transparent 58%);
+}
+
+.kh-card > .collapse:not(.open) > .collapse-head .kh-head {
+  border-bottom-color: transparent;
+}
+
+.kh-head-main {
+  display: flex;
+  align-items: center;
+  flex: 1 1 auto;
+  gap: 13px;
+  min-width: 0;
+}
+
+/* Quiet round capsule with a tiny scan band; only transform/opacity animate. */
+.kh-mark {
+  position: relative;
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 54px;
+  height: 30px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--brand) 42%, var(--line-strong));
+  border-radius: 999px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--brand) 12%, transparent), transparent),
+    var(--field-bg);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--fg) 4%, transparent),
+    0 0 18px color-mix(in srgb, var(--brand) 14%, transparent);
+  color: var(--fg);
+}
+
+.kh-mark-text {
+  position: relative;
+  z-index: 2;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.18em;
+  text-shadow: 0 0 10px color-mix(in srgb, var(--brand) 45%, transparent);
+}
+
+.kh-mark-scan {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background: linear-gradient(
+    104deg,
+    transparent 18%,
+    color-mix(in srgb, var(--brand) 58%, transparent) 46%,
+    transparent 74%
+  );
+  opacity: 0.7;
+  transform: translateX(-120%);
+  animation: kh-mark-scan 3.8s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+@keyframes kh-mark-scan {
+  0%,
+  28% {
+    opacity: 0;
+    transform: translateX(-120%);
+  }
+
+  42% {
+    opacity: 0.7;
+  }
+
+  62% {
+    opacity: 0.7;
+  }
+
+  76%,
+  100% {
+    opacity: 0;
+    transform: translateX(120%);
+  }
+}
+
+.kh-head-copy {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.kh-head-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.kh-wordmark {
+  flex: none;
+  color: var(--fg);
+  font-size: 15px;
+  font-weight: 750;
+  letter-spacing: 0.055em;
+  line-height: 1.15;
+}
+
+.kh-head-sub {
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--fg-3);
+  font-size: 11.5px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kh-head-right {
+  display: flex;
+  align-items: center;
+  flex: none;
+  gap: 12px;
+}
+
+/* "New feature" capsule: a faint pastel sheen with one narrow diagonal
+   reflection, reusing the start button's btnFlow sweep. The sheen sits on the
+   adaptive field fill, so light, dark and special themes keep their contrast. */
+.kh-fresh {
+  position: relative;
+  isolation: isolate;
+  flex: none;
+  overflow: hidden;
+  padding: 3px 9px;
+  border: 1px solid color-mix(in srgb, var(--line-strong) 74%, #c4b5fd);
+  border-radius: 999px;
+  background:
+    linear-gradient(
+      115deg,
+      color-mix(in srgb, #93c5fd 16%, transparent),
+      color-mix(in srgb, #c4b5fd 14%, transparent) 38%,
+      color-mix(in srgb, #f9a8d4 12%, transparent) 68%,
+      color-mix(in srgb, #fcd34d 10%, transparent)
+    ),
+    var(--field-bg);
+  color: var(--fg);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+
+.kh-fresh::after {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  background: linear-gradient(
+    115deg,
+    transparent 38%,
+    color-mix(in srgb, #dbeafe 28%, transparent) 47%,
+    color-mix(in srgb, #fce7f3 42%, transparent) 50%,
+    color-mix(in srgb, #fef3c7 26%, transparent) 53%,
+    transparent 62%
+  );
+  transform: translateX(-130%);
+  animation: btnFlow 5.2s var(--ease) infinite;
+  pointer-events: none;
+}
+
+.kh-head[data-kh-anim='off'] .kh-mark-scan,
+.kh-head[data-kh-anim='off'] .kh-fresh::after {
+  animation-play-state: paused;
+}
+
+.kh-head-actions {
+  flex: none;
+  gap: 14px;
+}
+
+.kh-notice {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 10px 18px 2px 22px;
+  padding: 8px 10px 9px 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--brand);
+  border-radius: 0 8px 8px 0;
+  background: var(--field-bg);
+  color: var(--fg-3);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.kh-notice b {
+  color: var(--fg-2);
+  font-weight: 600;
+}
+
+.kh-form .settings-row {
+  min-height: 54px;
+}
+
+.kh-form .settings-action {
+  flex-wrap: wrap;
+}
+
+.kh-form .collapse-head > .settings-row {
+  padding-left: 22px;
+}
+
+.kh-form .collapse.open > .collapse-head > .settings-row {
+  border-bottom-color: transparent;
+}
+
+.kh-form .settings-color-panel {
+  padding-left: 22px;
+}
+
+.kh-form .select-box {
+  min-width: 168px;
+}
+
+.kh-form .range-value {
+  min-width: 58px;
+}
+
+.kh-size-note {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 7px 12px;
+  margin: 0 18px 8px 22px;
+  padding: 8px 10px;
+  border-left: 2px solid var(--line-strong);
+  border-radius: 0 7px 7px 0;
+  background: color-mix(in srgb, var(--field-bg) 72%, transparent);
+  color: var(--fg-3);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.kh-size-note > span {
+  flex: 1 1 280px;
+  min-width: 0;
+}
+
+.kh-size-note.warn {
+  border-left-color: var(--error);
+  color: var(--fg-2);
+}
+
+.kh-size-note .btn {
+  flex: none;
+  margin-left: auto;
+}
+
+/* The standalone gradient editor sits in the same inset track as the other
+   background controls; its own file keeps the compact preview/stop layout. */
+.kh-gradient-field {
+  padding: 2px 18px 10px 22px;
+}
+
+.kh-gradient-field .khg-editor {
+  padding: 10px 12px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--field-bg) 64%, transparent);
+}
+
+.kh-pair {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.kh-num {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.kh-num-label {
+  padding-left: 2px;
+  color: var(--fg-3);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+}
+
+.kh-num-box {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.kh-form .kh-num .kh-num-input {
+  width: 92px;
+  height: 32px;
+  padding-right: 28px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.kh-num-unit {
+  position: absolute;
+  right: 9px;
+  color: var(--fg-3);
+  font-size: 11px;
+  pointer-events: none;
+}
+
+.kh-color-swatch {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 5px;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.18);
+}
+
+.kh-card .color-trigger:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.kh-metrics-note {
+  padding: 0 18px 10px 22px;
+  color: var(--fg-3);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.kh-metric-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 2px 18px 4px 22px;
+}
+
+.kh-metric-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--field-bg);
+}
+
+.kh-metric-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.kh-metric-name {
+  color: var(--fg);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.kh-metric-desc {
+  color: var(--fg-3);
+  font-size: 11px;
+}
+
+/* ---- sizing / per-item style drawers ----------------------------------- */
+
+.kh-style-default {
+  padding: 0 18px 10px 22px;
+}
+
+.kh-style-default-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--field-bg);
+}
+
+.kh-style-default-head .kh-metric-main {
+  flex: 1 1 210px;
+}
+
+.kh-style-default-head .btn {
+  flex: none;
+}
+
+.kh-metric-stack {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* The metric row is the Collapse header: always visible when closed, sticky
+   while its own compact style drawer is open. */
+.kh-metric-stack .collapse-head,
+.kh-style-default .collapse-head {
+  border-radius: 9px;
+}
+
+.kh-metric-stack .collapse.open > .collapse-head,
+.kh-style-default .collapse.open > .collapse-head {
+  border-radius: 9px 9px 0 0;
+}
+
+.kh-metric-stack .collapse.open > .collapse-head .kh-metric-row,
+.kh-style-default .collapse.open > .collapse-head .kh-style-default-head {
+  border-bottom-color: transparent;
+  border-radius: 9px 9px 0 0;
+}
+
+.kh-metric-stack .collapse-inner::before,
+.kh-style-default .collapse-inner::before {
+  display: none;
+}
+
+.kh-metric-row {
+  flex-wrap: wrap;
+}
+
+.kh-metric-row .kh-metric-main {
+  flex: 1 1 120px;
+}
+
+.kh-metric-style-toggle {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  gap: 4px;
+  height: 28px;
+  padding: 0 8px;
+  color: var(--fg-3);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.kh-metric-style-toggle svg {
+  transition: transform 0.18s var(--ease);
+}
+
+.kh-metric-style-toggle[aria-expanded='true'] svg {
+  transform: rotate(180deg);
+}
+
+.kh-style-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  margin-left: 6px;
+  padding: 0 5px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--fg-3);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  vertical-align: 1px;
+}
+
+.kh-style-badge.custom {
+  border-color: color-mix(in srgb, var(--brand) 48%, var(--line));
+  background: var(--brand-dim);
+  color: var(--brand);
+}
+
+.kh-drawer-title {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 3px 10px;
+  padding: 0 0 7px;
+  color: var(--fg-2);
+  font-size: 11.5px;
+  font-weight: 650;
+}
+
+.kh-drawer-title span {
+  color: var(--fg-3);
+  font-size: 10.5px;
+  font-weight: 500;
+}
+
+.kh-style-drawer {
+  margin: 0 10px 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-top: 0;
+  border-radius: 0 0 9px 9px;
+  background: color-mix(in srgb, var(--field-bg) 74%, transparent);
+}
+
+.kh-style-default .kh-style-drawer {
+  margin: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0 0 9px 9px;
+}
+
+.kh-metric-style-drawer {
+  margin: 0 9px 8px;
+}
+
+.kh-style-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.kh-style-intro {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 5px 10px;
+  min-width: 0;
+  color: var(--fg-3);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.kh-style-intro > div {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
+.kh-style-reserve {
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--field-bg) 68%, transparent);
+  color: var(--fg-3);
+  font-size: 10.5px;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+}
+
+.kh-style-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.kh-style-field-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px 12px;
+}
+
+.kh-style-field-label {
+  flex: 0 0 82px;
+  color: var(--fg-2);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.kh-style-field-control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.kh-style-field-control .segmented {
+  max-width: 100%;
+}
+
+/* Colour rows are their own collapse header so the picker opens underneath. */
+.kh-style-color-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px 12px;
+  min-width: 0;
+  padding: 5px 0;
+}
+
+.kh-style-color-main {
+  display: flex;
+  align-items: baseline;
+  flex: 1 1 160px;
+  gap: 8px;
+  min-width: 0;
+}
+
+.kh-style-color-readout {
+  color: var(--fg-3);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.kh-style-color-actions {
+  display: flex;
+  align-items: center;
+  flex: none;
+  gap: 8px;
+}
+
+.kh-style-color-actions .switch {
+  font-size: 11px;
+}
+
+.kh-style-color-actions .btn {
+  height: 28px;
+  padding-inline: 8px;
+}
+
+.kh-style-editor .settings-color-panel {
+  padding-left: 0;
+}
+
+.kh-style-color-panel {
+  padding: 2px 0 10px 94px;
+}
+
+.kh-style-color-panel .color-editor {
+  width: min(100%, 300px);
+}
+
+.kh-metric-style-gap {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  padding: 2px 0 4px;
+}
+
+.kh-metric-style-gap .kh-num .kh-num-input {
+  width: 92px;
+}
+
+.kh-style-inherit-note {
+  padding-bottom: 6px;
+  color: var(--fg-3);
+  font-size: 10.5px;
+}
+
+.kh-style-inherit-note + .btn {
+  margin-bottom: 1px;
+}
+
+.kh-style-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+  gap: 7px 12px;
+  padding-left: 94px;
+}
+
+.kh-style-grid .kh-num {
+  min-width: 0;
+}
+
+.kh-style-drawer .kh-num .kh-num-input {
+  width: 100%;
+  min-width: 72px;
+}
+
+.kh-style-toggles {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px 18px;
+  padding-left: 94px;
+  color: var(--fg-2);
+  font-size: 11.5px;
+}
+
+.kh-style-foot {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px 10px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--fg-3);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+.kh-style-foot > span {
+  flex: 1 1 210px;
+  min-width: 0;
+}
+
+.kh-style-foot .btn {
+  flex: none;
+  margin-left: auto;
+}
+
+.kh-style-foot .btn:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.kh-metric-available {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px 18px;
+  padding: 0 18px 14px 22px;
+}
+
+/* ---- copy settings from another app ------------------------------------ */
+
+.kh-copy {
+  padding: 4px 18px 14px 22px;
+}
+
+.kh-copy .collapse-head {
+  border-radius: 9px;
+}
+
+.kh-copy .collapse.open > .collapse-head {
+  border-radius: 9px 9px 0 0;
+}
+
+.kh-copy-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--field-bg);
+}
+
+.kh-copy .collapse.open > .collapse-head .kh-copy-head {
+  border-bottom-color: transparent;
+  border-radius: 9px 9px 0 0;
+}
+
+.kh-copy-main {
+  flex: 1 1 230px;
+  min-width: 0;
+}
+
+.kh-copy-head .btn {
+  flex: none;
+  margin-left: auto;
+}
+
+.kh-copy-body {
+  margin: 0 9px 8px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-top: 0;
+  border-radius: 0 0 9px 9px;
+  background: color-mix(in srgb, var(--field-bg) 74%, transparent);
+}
+
+.kh-copy-body .settings-row {
+  padding-inline: 0;
+}
+
+.kh-copy-state {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  color: var(--fg-3);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.kh-copy-state.error {
+  color: var(--error);
+}
+
+.kh-copy-state .btn {
+  flex: none;
+}
+
+.kh-copy-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.kh-copy-status {
+  flex: 1 1 220px;
+  min-width: 0;
+  color: var(--fg-3);
+  font-size: 10.5px;
+  line-height: 1.45;
+}
+
+.kh-copy-status.error {
+  color: var(--error);
+}
+
+.kh-hotkey {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.kh-form .kh-hotkey .input {
+  width: min(260px, 40vw);
+}
+
+.kh-footer {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 9px;
+  padding: 12px 18px 15px 22px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.kh-footer .kh-status {
+  flex: 1;
+  min-width: 180px;
+  text-align: right;
+}
+
+.kh-status {
+  min-height: 16px;
+  color: var(--fg-3);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.kh-status.error {
+  color: var(--error);
+}
+
+.kh-status.live {
+  color: var(--fg-2);
+}
+
+.kh-live-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--brand);
+  box-shadow: 0 0 0 3px var(--brand-dim);
+  vertical-align: 1px;
+}
+
+.kh-modules-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.kh-section-label {
+  padding: 0 4px;
+  color: var(--chrome-fg-3);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+}
+
+/* ---- 星轨手记 (mitia) geometry -----------------------------------------
+   The special theme flattens the launcher's rounded rectangles in main.css.
+   HUD-only surfaces live here, so give the same controls the same square
+   language under the same theme scope. Default radii stay untouched, the
+   live dot / picker pointer / scan-and-grip line marks keep their existing
+   semantics, and every fill still comes from the shared glass tokens. */
+[data-special-theme~='mitia'] :is(
+    .kh-mark,
+    .kh-fresh,
+    .kh-notice,
+    .kh-size-note,
+    .kh-style-badge,
+    .kh-metric-row,
+    .kh-style-default-head,
+    .kh-style-reserve,
+    .kh-style-drawer,
+    .kh-copy-head,
+    .kh-copy-body
+  ) {
+  border-radius: 0 !important;
+}
+
+[data-special-theme~='mitia'] :is(
+    .kh-copy .collapse-head,
+    .kh-metric-stack .collapse-head,
+    .kh-style-default .collapse-head
+  ) {
+  border-radius: 0 !important;
+}
+
+/* Colour pickers inside the HUD form follow the same rectangle language; the
+   saturation/hue pointer stays round because it marks a point. */
+[data-special-theme~='mitia'] .kh-card :is(
+    .kh-color-swatch,
+    .color-editor .react-colorful,
+    .color-editor .react-colorful__saturation,
+    .color-editor .react-colorful__hue,
+    .color-preview,
+    .color-swatch
+  ) {
+  border-radius: 0 !important;
+}
+
+@media (max-width: 760px) {
+  .kh-head {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .kh-head-main {
+    flex-basis: 100%;
+  }
+
+  .kh-head-right {
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  .kh-mark {
+    width: 48px;
+    height: 28px;
+  }
+
+  .kh-form .settings-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .kh-form .settings-action {
+    justify-content: flex-start;
+  }
+
+  .kh-footer .kh-status {
+    flex-basis: 100%;
+    text-align: left;
+  }
+
+  .kh-style-field-label {
+    flex-basis: 100%;
+  }
+
+  .kh-style-grid,
+  .kh-style-toggles,
+  .kh-style-color-panel {
+    padding-left: 0;
+  }
+
+  .kh-style-grid {
+    grid-template-columns: repeat(auto-fit, minmax(108px, 1fr));
+  }
+
+  .kh-copy {
+    padding-inline: 18px;
+  }
+
+  .kh-copy-head .btn,
+  .kh-copy-actions .btn {
+    margin-left: 0;
+  }
+
+  .kh-style-foot .btn {
+    margin-left: 0;
+  }
+
+  .kh-size-note {
+    margin-left: 18px;
+  }
+
+  .kh-gradient-field {
+    padding-left: 18px;
+  }
+
+  .kh-style-default {
+    padding-left: 18px;
+  }
+}
+
+@media (max-width: 460px) {
+  .kh-style-default-head {
+    align-items: flex-start;
+  }
+
+  .kh-style-default-head .btn,
+  .kh-metric-style-toggle {
+    margin-left: 0;
+  }
+
+  .kh-metric-row > .kh-metric-style-toggle {
+    order: 3;
+  }
+
+  .kh-style-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .kh-style-drawer {
+    margin-inline: 6px;
+    padding: 9px;
+  }
+
+  .kh-head-right {
+    flex-wrap: wrap;
+  }
+
+  .kh-copy {
+    padding-inline: 12px;
+  }
+
+  .kh-style-color-main {
+    flex-basis: 100%;
+  }
+
+  .kh-style-color-actions {
+    flex-wrap: wrap;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kh-mark-scan,
+  .kh-fresh::after {
+    animation: none !important;
+  }
+}

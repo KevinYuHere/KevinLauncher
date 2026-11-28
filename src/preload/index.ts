@@ -2,7 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type {
   KevinApi,
   NewAppEntry,
-  AppEntry,
+  AppSettingsPatch,
   GlassPatch,
   HomeModuleId,
   HomeModuleState,
@@ -10,9 +10,8 @@ import type {
   LaunchMethod,
   LinkedLaunch,
   WallpaperSettings,
-  CloseAction,
-  AfterLaunchAction,
-  AutoStartMode
+  LauncherBehaviorPatch,
+  LauncherFontPatch
 } from '@shared/types'
 
 const api: KevinApi = {
@@ -20,7 +19,7 @@ const api: KevinApi = {
 
   listApps: () => ipcRenderer.invoke('apps:list'),
   addApp: (input: NewAppEntry) => ipcRenderer.invoke('apps:add', input),
-  updateApp: (app: AppEntry) => ipcRenderer.invoke('apps:update', app),
+  updateApp: (appId: string, patch: AppSettingsPatch) => ipcRenderer.invoke('apps:update', appId, patch),
   removeApp: (id: string) => ipcRenderer.invoke('apps:remove', id),
   reorderApps: (ids: string[]) => ipcRenderer.invoke('apps:reorder', ids),
   getUiPrefs: () => ipcRenderer.invoke('ui:getPrefs'),
@@ -36,17 +35,19 @@ const api: KevinApi = {
   readImage: (path: string) => ipcRenderer.invoke('image:read', path),
   listFonts: () => ipcRenderer.invoke('fonts:list'),
   appVersion: () => ipcRenderer.invoke('app:version'),
+  confirmAppReady: () => ipcRenderer.invoke('app:ready'),
+  consumeUpgradeFeatures: () => ipcRenderer.invoke('app:upgradeFeatures'),
+  completeUpgradeIntro: () => ipcRenderer.invoke('app:completeUpgradeIntro'),
   desktopWallpaper: () => ipcRenderer.invoke('wallpaper:desktop'),
   getLauncherSettings: () => ipcRenderer.invoke('launcher:getSettings'),
   setLauncherIcon: (dataUrl: string | null) => ipcRenderer.invoke('launcher:setIcon', dataUrl),
+  setLauncherFonts: (patch: LauncherFontPatch) => ipcRenderer.invoke('launcher:setFonts', patch),
   setLauncherFont: (family: string | null) => ipcRenderer.invoke('launcher:setFont', family),
-  setLauncherBehavior: (patch: {
-    closeAction?: CloseAction
-    afterLaunch?: AfterLaunchAction
-    autoStart?: AutoStartMode
-    sidebarMaterial?: boolean
-    themeAreas?: Partial<Record<string, string>>
-  }) => ipcRenderer.invoke('launcher:setBehavior', patch),
+  setLauncherBehavior: (patch: LauncherBehaviorPatch) => ipcRenderer.invoke('launcher:setBehavior', patch),
+  appearancePresetsList: () => ipcRenderer.invoke('appearancePresets:list'),
+  appearancePresetsApply: (id: string) => ipcRenderer.invoke('appearancePresets:apply', id),
+  appearancePresetsRemove: (id: string) => ipcRenderer.invoke('appearancePresets:remove', id),
+  gameDiscoveryScan: () => ipcRenderer.invoke('gameDiscovery:scan'),
   hideToTray: () => ipcRenderer.invoke('window:hideToTray'),
   exportData: () => ipcRenderer.invoke('data:export'),
   importData: () => ipcRenderer.invoke('data:import'),
@@ -61,6 +62,13 @@ const api: KevinApi = {
     ipcRenderer.invoke('apps:setHomeModule', appId, moduleId, patch),
   setLaunchEffect: (appId: string, effect: LaunchEffect) =>
     ipcRenderer.invoke('apps:setLaunchEffect', appId, effect),
+  kevinHudPreview: (appId: string, config: import('@shared/kevinHud').KevinHudConfig) =>
+    ipcRenderer.invoke('kevinHud:preview', appId, config),
+  kevinHudUpdateLive: (appId: string, config: import('@shared/kevinHud').KevinHudConfig) =>
+    ipcRenderer.invoke('kevinHud:updateLive', appId, config),
+  kevinHudDismissPreview: () => ipcRenderer.invoke('kevinHud:dismissPreview'),
+  kevinHudCommitLaunch: (runtimeKey: string, reducedMotion: boolean) =>
+    ipcRenderer.invoke('kevinHud:commitLaunch', runtimeKey, reducedMotion),
   setModuleLabel: (appId: string, label: string | null) =>
     ipcRenderer.invoke('apps:setModuleLabel', appId, label),
   exportLogs: () => ipcRenderer.invoke('logs:export'),
@@ -95,7 +103,8 @@ const api: KevinApi = {
   reorderLinkedLaunches: (ids: string[]) => ipcRenderer.invoke('linked:reorder', ids),
   setAppLinkedLaunches: (appId: string, ids: string[], defaultId: string | null) =>
     ipcRenderer.invoke('linked:setApp', appId, ids, defaultId),
-  launchLinkedLaunch: (id: string) => ipcRenderer.invoke('linked:launch', id),
+  launchLinkedLaunch: (id: string, ownerAppId?: string) =>
+    ipcRenderer.invoke('linked:launch', id, ownerAppId),
 
   launchApp: (id: string, methodId?: string) => ipcRenderer.invoke('apps:launch', id, methodId),
   listRunning: () => ipcRenderer.invoke('runtime:list'),
@@ -104,11 +113,12 @@ const api: KevinApi = {
   playTimeTotals: () => ipcRenderer.invoke('playtime:totals'),
   playTimeSummary: (appId: string, days?: number) => ipcRenderer.invoke('playtime:summary', appId, days),
 
-  gachaList: (appId: string) => ipcRenderer.invoke('gacha:list', appId),
   gachaStats: (appId: string) => ipcRenderer.invoke('gacha:stats', appId),
+  gachaPage: (appId: string, group: string, showSecond: boolean, offset: number) =>
+    ipcRenderer.invoke('gacha:page', appId, group, showSecond, offset),
   gachaClear: (appId: string) => ipcRenderer.invoke('gacha:clear', appId),
-  gachaUpdateMiHoYo: (appId: string, url: string) =>
-    ipcRenderer.invoke('gacha:updateMiHoYo', appId, url),
+  gachaUpdateMiHoYo: (appId: string, url: string, mode?: 'incremental' | 'full') =>
+    ipcRenderer.invoke('gacha:updateMiHoYo', appId, url, mode),
   gachaLoginArknights: (appId: string) => ipcRenderer.invoke('gacha:loginArknights', appId),
   gachaScanUrl: (appId: string) => ipcRenderer.invoke('gacha:scanUrl', appId),
   gachaExport: (appId: string) => ipcRenderer.invoke('gacha:export', appId),
@@ -118,8 +128,6 @@ const api: KevinApi = {
     ipcRenderer.invoke('update:start', appId, mode),
   updateCancel: (appId: string) => ipcRenderer.invoke('update:cancel', appId),
   updateStatus: (appId: string) => ipcRenderer.invoke('update:status', appId),
-  updateSimulate: (appId: string, mode: 'update' | 'preDownload') =>
-    ipcRenderer.invoke('update:simulate', appId, mode),
 
   galleryList: (appId: string) => ipcRenderer.invoke('gallery:list', appId),
   galleryOpenViewer: (paths: string[], index: number) =>
@@ -158,13 +166,19 @@ const api: KevinApi = {
   dataDirSet: (dir: string) => ipcRenderer.invoke('dataDir:set', dir),
 
   housekeepingUsage: () => ipcRenderer.invoke('housekeeping:usage'),
-  housekeepingClean: (kinds: ('staging' | 'thumbs' | 'logs')[]) =>
+  housekeepingClean: (kinds) =>
     ipcRenderer.invoke('housekeeping:clean', kinds),
 
   windowMinimize: () => ipcRenderer.invoke('window:minimize'),
   windowToggleMaximize: () => ipcRenderer.invoke('window:toggleMaximize'),
   windowClose: () => ipcRenderer.invoke('window:close'),
   windowIsMaximized: () => ipcRenderer.invoke('window:isMaximized'),
+  windowActivity: () => ipcRenderer.invoke('window:activity'),
+  onWindowActivity: (callback: (awake: boolean) => void) => {
+    const listener = (_e: unknown, awake: boolean): void => callback(awake)
+    ipcRenderer.on('window:activity', listener)
+    return () => ipcRenderer.removeListener('window:activity', listener)
+  },
 
   onAppsChanged: (callback: () => void) => {
     const listener = (): void => callback()
@@ -187,6 +201,11 @@ const api: KevinApi = {
     ipcRenderer.on('gacha:progress', listener)
     return () => ipcRenderer.removeListener('gacha:progress', listener)
   },
+  onGachaChanged: (callback: (appId: string | null) => void) => {
+    const listener = (_e: unknown, appId: string | null): void => callback(appId)
+    ipcRenderer.on('gacha:changed', listener)
+    return () => ipcRenderer.removeListener('gacha:changed', listener)
+  },
   onWindowMaximized: (callback: (maximized: boolean) => void) => {
     const listener = (_e: unknown, maximized: boolean): void => callback(maximized)
     ipcRenderer.on('window:maximized', listener)
@@ -196,6 +215,11 @@ const api: KevinApi = {
     const listener = (): void => callback()
     ipcRenderer.on('window:shown', listener)
     return () => ipcRenderer.removeListener('window:shown', listener)
+  },
+  onShutdownFailed: (callback: (message: string) => void) => {
+    const listener = (_e: unknown, message: string): void => callback(message)
+    ipcRenderer.on('app:shutdownFailed', listener)
+    return () => ipcRenderer.removeListener('app:shutdownFailed', listener)
   },
   onLauncherChanged: (callback: () => void) => {
     const listener = (): void => callback()

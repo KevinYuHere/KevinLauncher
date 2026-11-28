@@ -6,16 +6,19 @@ import { HoYoSteps, type HoYoStep } from './hoyoSchedule'
 import { HoYoWorker, type SophonSetup } from './hoyoWorker'
 import { audioEnumNames, detectAudioLanguages, downloadMode, GAME_IDS, getGameBranches, getGameConfig,
   getHoYoPackages, requireGameInfo, selectPackageFiles, type HoYoGame } from './hoyoplay'
-import { applyPackages, cleanGameTemps, componentSteps, downloadPackages, moveCachedResources, prepareComponents,
-  prepareGameDirectory, preparePackageVerification, readIni, verifyUpdatedPackages, writeIni } from './hoyoPackages'
+import { applyPackages, componentSteps, downloadPackages, moveCachedResources, prepareComponents,
+  prepareGameDirectory, preparePackageVerification, verifyUpdatedPackages, writeIni } from './hoyoPackages'
+import { validateHoYoInstall } from './hoyoInstall'
+import { cleanGameWork, gameWorkKey, validateGameWork } from './hoyoTemp'
+import { openSophonCacheOwnership } from './sophonCacheOwnership'
+import { log } from '../services/logger'
 import type { UpdateMode } from '@shared/types'
 
 export async function prepareHoYoJob(game: HoYoGame, dir: string, mode: UpdateMode, paths: {
   worker: string; hpatchz: string; userData: string; launcherVersion: string
 }, signal: AbortSignal): Promise<HoYoSteps> {
-  const ini = await readIni(dir)
-  const local = ini.get('game_version')
-  if (!local) throw new Error('无法读取已安装游戏版本')
+  const ini = await validateHoYoInstall(dir, game)
+  const local = ini.get('game_version')!
   await requireGameInfo(game, signal)
   const config = await getGameConfig(game, signal)
   if (!config) throw new Error('未找到该游戏的启动器配置')
@@ -26,8 +29,17 @@ export async function prepareHoYoJob(game: HoYoGame, dir: string, mode: UpdateMo
   const steps: HoYoStep[] = [ctx => prepareGameDirectory(dir, config, audio, scenario, ctx.signal)]
   let worker: HoYoWorker | undefined
   let links: HardLinkService | undefined
+  let fileVerification: Awaited<ReturnType<typeof preparePackageVerification>> | undefined
+  const closeLinks = async () => {
+    const owner = links
+    links = undefined
+    await owner?.close()
+  }
   let version: string
-  const close = async () => { await worker?.close(); await links?.close() }
+  let work: string
+  const close = async () => {
+    try { await worker?.close() } finally { fileVerification?.park(); await closeLinks() }
+  }
   const prepareExtra = () => predownload ? null : prepareComponents(game, dir, ini, signal)
   try {
     if (flow === 'chunk') {
@@ -37,12 +49,15 @@ export async function prepareHoYoJob(game: HoYoGame, dir: string, mode: UpdateMo
       const warm = await getSophonBuild(branches.main, undefined, signal)
       const { ignoreFields, blacklist } = await selectionFiles(game, dir, config)
       version = target.tag
+      work = gameWorkKey(game, local, version, mode)
+      await validateGameWork(dir, work)
       const main = branches.main
       const prepareChunks = async () => {
         const plan = await getSophonPlan(main, target, local, signal, audio, ignoreFields, warm, scenario)
         worker = new HoYoWorker(paths.worker)
         const setup: SophonSetup = { dir, gameId: GAME_IDS[game], userData: paths.userData, launcherVersion: paths.launcherVersion,
-          plan, version: local, predownload, hpatchz: paths.hpatchz, blacklist }
+          plan, version: local, predownload, hpatchz: paths.hpatchz, blacklist, work,
+          cacheTarget: gameWorkKey(game, local, version, 'sophon-cache') }
         await worker.run({ type: 'prepare', setup }, { signal, progress() {}, phase() {} })
       }
       const [chunk, extra] = await Promise.allSettled([prepareChunks(), prepareExtra()])
@@ -57,41 +72,59 @@ export async function prepareHoYoJob(game: HoYoGame, dir: string, mode: UpdateMo
         await moveCachedResources(dir, config, ctx.signal)
         await worker!.run({ type: 'verify' }, ctx)
       })
-      if (extra.value) steps.push(...componentSteps(dir, ini, extra.value))
+      if (extra.value) steps.push(...componentSteps(dir, ini, extra.value, work))
     } else {
       const packages = await getHoYoPackages(game, local, signal)
       const target = predownload ? packages.preDownload : packages.main
       if (!target) throw new Error('未找到对应的游戏压缩包')
       version = target.version
+      work = gameWorkKey(game, local, version, mode)
+      await validateGameWork(dir, work)
       const files = selectPackageFiles(target, audio)
       const [verify, extra] = await Promise.allSettled([
-        predownload ? [] : preparePackageVerification(dir, target.resListUrl, audio, signal), prepareExtra()
+        predownload ? undefined : preparePackageVerification(dir, target.resListUrl, audio, signal, work), prepareExtra()
       ])
       if (verify.status === 'rejected') throw verify.reason
       if (extra.status === 'rejected') throw extra.reason
-      links = new HardLinkService(paths.userData, GAME_IDS[game])
+      const verification = verify.value
+      fileVerification = verification
       steps.push(async ctx => {
+        const checkedFiles = await verification?.load(ctx.signal)
         if (!predownload) await moveCachedResources(dir, config, ctx.signal)
-        await downloadPackages(dir, files, ctx.signal, ctx.progress)
-        if (!predownload) {
+        await downloadPackages(dir, files, ctx.signal, ctx.progress, work)
+        if (checkedFiles) {
           ctx.phase('正在解压并应用游戏更新…', true)
-          await applyPackages(dir, files, paths.hpatchz, ctx.signal, links!)
+          links ??= new HardLinkService(paths.userData, GAME_IDS[game])
+          await applyPackages(dir, files, paths.hpatchz, ctx.signal, links, work, checkedFiles)
         }
       })
-      if (!predownload) steps.push(async ctx => {
+      if (verification) steps.push(async ctx => {
+        const checkedFiles = await verification.load(ctx.signal)
         ctx.phase('正在校验更新文件…')
         await moveCachedResources(dir, config, ctx.signal)
-        await verifyUpdatedPackages(dir, verify.value, ctx.signal, ctx.progress)
+        await verifyUpdatedPackages(dir, checkedFiles, ctx.signal, ctx.progress, work)
       })
-      if (extra.value) steps.push(...componentSteps(dir, ini, extra.value))
+      if (extra.value) steps.push(...componentSteps(dir, ini, extra.value, work))
     }
     steps.push(async ctx => {
       if (predownload) ini.set('predownload', [local, version, audioEnumNames(audio)].join(','))
       else { ini.set('game_version', version); ini.delete('predownload') }
-      await cleanGameTemps(dir, ctx.signal)
+      ctx.signal.throwIfAborted()
+      await cleanGameWork(dir, work)
       await writeIni(dir, game, ini)
+      if (flow === 'chunk' && !predownload) {
+        try {
+          const cache = await openSophonCacheOwnership(dir, gameWorkKey(game, local, version, 'sophon-cache'))
+          await cache.release()
+          await cache.save()
+        } catch (error) { log('游戏已更新，暂时无法回收归档缓存', error) }
+      }
     })
-    return new HoYoSteps(steps, close)
+    return new HoYoSteps(steps, close, async () => {
+      try {
+        await worker?.run({ type: 'park' }, { signal: new AbortController().signal, progress() {}, phase() {} })
+      } finally { fileVerification?.park(); await closeLinks() }
+    })
   } catch (error) {
     await close()
     throw error

@@ -1,15 +1,21 @@
 import { BrowserWindow, ClipboardItem, clipboard, Menu, nativeImage, shell } from 'electron'
 import { handleIpc } from './access'
-import { promises as fs } from 'fs'
-import { extname, join } from 'path'
-import type { GalleryItem } from '@shared/types'
+import { extname, isAbsolute } from 'path'
 import { AppStore } from '../services/appStore'
+import { collectGalleryImages, IMAGE_EXT } from '../services/gallery'
 import { log } from '../services/logger'
 import { openViewer, permitsViewerFile, viewerNav } from '../services/viewer'
+import {
+  isAllowedMediaRead,
+  isGalleryMediaFile,
+  rememberGalleryDirectory,
+  rememberGalleryListing,
+  rememberSelectedFiles,
+  resolveScreenshotDirectory
+} from '../services/mediaAccess'
+import { managedMediaRoots } from '../services/mediaRoots'
 
-const IMAGE_EXT = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.avif'])
-const MAX_IMAGES = 3000
-const MAX_DEPTH = 6
+const MAX_VIEWER_PATHS = 5000
 
 type NativeImageType = ReturnType<typeof nativeImage.createFromPath>
 
@@ -28,44 +34,49 @@ function copyImage(image: NativeImageType): void {
   }
 }
 
-async function collectImages(dir: string, out: GalleryItem[], depth = 0): Promise<void> {
-  if (depth > MAX_DEPTH || out.length >= MAX_IMAGES) return
-  let entries: import('fs').Dirent[]
-  try {
-    entries = await fs.readdir(dir, { withFileTypes: true })
-  } catch {
-    return
-  }
-  for (const entry of entries) {
-    if (out.length >= MAX_IMAGES) return
-    const full = join(dir, entry.name)
-    if (entry.isDirectory()) {
-      await collectImages(full, out, depth + 1)
-    } else if (IMAGE_EXT.has(extname(entry.name).toLowerCase())) {
-      try {
-        const stat = await fs.stat(full)
-        out.push({ path: full, name: entry.name, mtimeMs: stat.mtimeMs, size: stat.size })
-      } catch {
-        /* skip unreadable file */
-      }
-    }
-  }
-}
-
 export function registerGalleryIpc(): void {
   handleIpc('gallery:list', async (_e, appId: string) => {
+    if (typeof appId !== 'string') return []
     const store = await AppStore.load()
     const entry = store.apps.find((a) => a.id === appId)
     const dir = entry?.screenshotDirectory
-    if (!dir) return []
-    const items: GalleryItem[] = []
-    await collectImages(dir, items)
-    items.sort((a, b) => b.mtimeMs - a.mtimeMs)
-    return items
+    if (!dir || typeof dir !== 'string' || !isAbsolute(dir)) {
+      rememberGalleryDirectory(appId, null)
+      rememberGalleryListing(appId, [])
+      return []
+    }
+    let directory: string
+    try {
+      directory = await resolveScreenshotDirectory(dir)
+    } catch (error) {
+      // A previous listing must not stay readable when the configured root is
+      // no longer the same real directory the trust was established for.
+      rememberGalleryDirectory(appId, null)
+      rememberGalleryListing(appId, [])
+      throw error
+    }
+    rememberGalleryDirectory(appId, directory)
+    try {
+      const items = await collectGalleryImages(directory)
+      rememberGalleryListing(appId, items.map((item) => item.path))
+      return items
+    } catch (error) {
+      // A failed refresh must not leave the previous directory's files readable.
+      rememberGalleryListing(appId, [])
+      throw error
+    }
   })
 
   handleIpc('gallery:openViewer', (_e, paths: string[] | string, index: number) => {
-    openViewer(Array.isArray(paths) ? paths : [String(paths)], index)
+    const list = Array.isArray(paths) ? paths : [String(paths)]
+    if (list.length === 0 || list.length > MAX_VIEWER_PATHS ||
+        list.some((path) => typeof path !== 'string' || !isGalleryMediaFile(path))) {
+      throw new Error('这个文件不在当前图库中，无法打开')
+    }
+    // Keep the opened collection readable for viewer navigation and its menu
+    // even if another gallery listing replaces the registry meanwhile.
+    rememberSelectedFiles(list)
+    openViewer(list, index)
   })
 
   // Previous/next image (wraps). Returns the new path; the viewer window updates
@@ -75,9 +86,10 @@ export function registerGalleryIpc(): void {
   handleIpc('gallery:contextMenu', (e, path: string) => {
     const win = BrowserWindow.fromWebContents(e.sender)
     if (!win || typeof path !== 'string' || !permitsViewerFile(win, path)) return
+    if (!isAllowedMediaRead(path, managedMediaRoots())) return
     const isImage = IMAGE_EXT.has(extname(path).toLowerCase())
     const template = [
-      { label: '在文件资源管理器中打开', click: () => shell.showItemInFolder(path) }
+      { label: '在文件夹中显示', click: () => shell.showItemInFolder(path) }
     ] as Electron.MenuItemConstructorOptions[]
     // "复制图片" only makes sense for a still image — the wallpaper viewer reuses
     // this menu and a wallpaper may be a video (nativeImage would be empty).

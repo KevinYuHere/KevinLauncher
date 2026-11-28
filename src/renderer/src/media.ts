@@ -1,6 +1,8 @@
 // Helpers that turn stored file names / paths into `kevin-media://` URLs. The
 // custom protocol is served by the main process (icon / brand / bg / file /
-// default hosts), so the renderer never needs direct filesystem access.
+// default hosts), so the renderer never needs direct filesystem access. The
+// main process independently authorizes every read; a path here is only an
+// address, never a grant.
 export const VIDEO_RE = /\.(mp4|webm)$/i
 
 /** URL for an app's stored icon file (relative to the `icons` folder). */
@@ -22,7 +24,7 @@ export function defaultIconUrl(): string {
   return 'kevin-media://default/icon.png'
 }
 
-/** URL for an arbitrary absolute file path (used by the gallery / viewer). */
+/** URL for a gallery / viewer file already approved by the main process. */
 export function fileUrl(path: string): string {
   return `kevin-media://file/${encodePath(path)}`
 }

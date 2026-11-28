@@ -3,6 +3,20 @@ import { promises as fs } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { isTransientEntry, migrateDataDirectory, normalizeDataDir, seedDataDir } from '../src/main/services/dataDir'
+import { recordDataMove, recoverDataMove } from '../src/main/services/dataMoveJournal'
+import { APPEARANCE_PRESET_FILE } from '../src/shared/appearancePreset'
+
+const appearancePresets = JSON.stringify({
+  version: 1,
+  presets: [{
+    id: 'preset-1',
+    name: '迁移',
+    createdAt: '2026-11-26T08:00:00.000Z',
+    updatedAt: '2026-11-26T08:00:00.000Z',
+    areas: {},
+    apps: {}
+  }]
+})
 
 const roots: string[] = []
 async function makeDir(prefix: string): Promise<string> {
@@ -23,8 +37,10 @@ describe('seedDataDir', () => {
     const fallback = join(root, 'default')
     const target = join(root, 'KevinLauncherData')
     await fs.mkdir(join(fallback, 'update-backup'), { recursive: true })
-    await fs.writeFile(join(fallback, 'config.json'), '{"apps":["current"]}')
-    await fs.writeFile(join(fallback, 'update-backup', 'config.json'), '{"apps":["backup"]}')
+    const current = '{"apps":[{"id":"current","name":"Current"}]}'
+    const backup = '{"apps":[{"id":"backup","name":"Backup"}]}'
+    await fs.writeFile(join(fallback, 'config.json'), current)
+    await fs.writeFile(join(fallback, 'update-backup', 'config.json'), backup)
     const mkdir = fs.mkdir.bind(fs)
     const mockedMkdir = vi.spyOn(fs, 'mkdir').mockImplementation((path, options) => {
       if (path === root) {
@@ -34,9 +50,9 @@ describe('seedDataDir', () => {
     })
     const mkdtemp = vi.spyOn(fs, 'mkdtemp')
     const commit = vi.fn(async (published: string) => {
-      expect(await fs.readFile(join(published, 'config.json'), 'utf8')).toBe('{"apps":["current"]}')
-      expect(await fs.readFile(join(published, 'update-backup', 'config.json'), 'utf8')).toBe('{"apps":["backup"]}')
-      expect(await fs.readFile(join(fallback, 'config.json'), 'utf8')).toBe('{"apps":["current"]}')
+      expect(await fs.readFile(join(published, 'config.json'), 'utf8')).toBe(current)
+      expect(await fs.readFile(join(published, 'update-backup', 'config.json'), 'utf8')).toBe(backup)
+      expect(await fs.readFile(join(fallback, 'config.json'), 'utf8')).toBe(current)
     })
 
     await expect(seedDataDir(target, fallback, commit)).resolves.toEqual({ copied: 2, failed: 0, keptExisting: false })
@@ -71,7 +87,7 @@ describe('seedDataDir', () => {
     await fs.mkdir(target, { recursive: true })
     await fs.writeFile(join(fallback, 'config.json'), '{"apps":[]}')
     await fs.writeFile(join(fallback, 'playtime.json'), '{"sessions":["old"]}')
-    await fs.writeFile(join(target, 'config.json'), '{"apps":["x"]}')
+    await fs.writeFile(join(target, 'config.json'), '{"apps":[{"id":"x","name":"X"}]}')
     await fs.writeFile(join(target, 'playtime.json'), '{"sessions":["new"]}')
 
     const result = await seedDataDir(target, fallback)
@@ -120,12 +136,21 @@ describe('migrateDataDirectory', () => {
   it('copies after a session checkpoint and commits while the old data is still available', async () => {
     const { from, to } = await fixture()
     await migrateDataDirectory(from, to, async (published) => {
-      expect(await fs.readFile(join(published, 'playtime.json'), 'utf8')).toBe('last played')
+      expect(await fs.readFile(join(published, 'playtime.json'), 'utf8')).toBe('{"sessions":[]}')
       await expect(fs.access(from)).resolves.toBeUndefined()
     }, {
-      beforeCopy: () => fs.writeFile(join(from, 'playtime.json'), 'last played')
+      beforeCopy: () => fs.writeFile(join(from, 'playtime.json'), '{"sessions":[]}')
     })
     await expect(fs.access(from)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('carries appearance presets into the moved data directory', async () => {
+    const { from, to } = await fixture()
+    await fs.writeFile(join(from, APPEARANCE_PRESET_FILE), appearancePresets)
+    let published = ''
+    await migrateDataDirectory(from, to, async (directory) => { published = directory })
+    expect(published).toBe(to)
+    expect(await fs.readFile(join(to, APPEARANCE_PRESET_FILE), 'utf8')).toBe(appearancePresets)
   })
 
   it('preserves the source and original empty destination when the registry commit fails', async () => {
@@ -160,6 +185,42 @@ describe('migrateDataDirectory', () => {
     await expect(migrateDataDirectory(from, join(from, 'nested'), commit)).rejects.toThrow('互相包含')
     await expect(fs.access(to)).rejects.toMatchObject({ code: 'ENOENT' })
     expect(commit).not.toHaveBeenCalled()
+  })
+
+  it('rejects an alias to a location inside the source', async () => {
+    const { from, to } = await fixture()
+    try {
+      await fs.symlink(from, to, process.platform === 'win32' ? 'junction' : 'dir')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EPERM' || process.env.KEVIN_TEST_REQUIRE_REAL_JUNCTION === '1') throw error
+      // The Windows AppContainer may block junction creation. Exercise the
+      // same resolved-path boundary with only the OS lookup simulated.
+      const realpath = fs.realpath.bind(fs)
+      vi.spyOn(fs, 'realpath').mockImplementation((path, options) =>
+        String(path).toLowerCase() === to.toLowerCase()
+          ? Promise.resolve(from) : realpath(path, options))
+    }
+    await expect(migrateDataDirectory(from, join(to, 'nested'), vi.fn())).rejects.toThrow('互相包含')
+  })
+
+  it.each([false, true])('recovers the correct directory after interrupted publication (committed: %s)', async (committed) => {
+    const { from, to } = await fixture()
+    const work = await fs.mkdtemp(join(to, '..', '.kevin-data-move-'))
+    const stage = join(work, 'next')
+    const previous = join(work, 'previous')
+    await fs.mkdir(to)
+    await fs.writeFile(join(to, 'owned.txt'), 'old target')
+    await fs.mkdir(stage)
+    await fs.copyFile(join(from, 'config.json'), join(stage, 'config.json'))
+    await recordDataMove({ source: from, target: to, work, hadTarget: true }, stage)
+    await fs.rename(to, previous)
+    await fs.rename(stage, to)
+    await recoverDataMove(committed ? to : from)
+    const file = join(committed ? previous : to, 'owned.txt')
+    expect(await fs.readFile(file, 'utf8')).toBe('old target')
+    await expect(fs.access(join(from, 'data-move.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(fs.access(join(from, 'config.json'))).resolves.toBeUndefined()
+    if (committed) await expect(fs.access(join(to, 'config.json'))).resolves.toBeUndefined()
   })
 
   it('merges into a nonempty target, retaining unrelated files and taking the source value on overlap', async () => {

@@ -10,17 +10,20 @@ import { openJsonStore } from '../services/jsonStore'
 import { throttle } from '../services/rateLimit'
 import { openWritableGameFile } from '../services/writableGameFile'
 import { fetchHoYoResource } from './hoyoTransportBridge'
+import { maintainHoYoCache, touchHoYoCache, MANIFEST_BUDGET, METADATA_BUDGET } from './hoyoCache'
 
 // Scighost/Starward@747ed10: AppConfig.ServiceProvider, RpcRunner,
 // GameInstall.Service.HttpService / DownloadService, and HoYoPlayService.
 type HoYoContext = { directory: string; role: 'desktop' | 'runner'; installedVersion: string }
 const context = new AsyncLocalStorage<HoYoContext>()
 const HTTP_TIMEOUT = 100_000
+const BODY_IDLE_TIMEOUT = 100_000
 const DEFAULT_CACHE_AGE = 5 * 60_000
 const FALLBACK_AGE = 90 * 24 * 60 * 60_000
 const FALLBACK_RETRY_DELAY = 10_000
 const FALLBACK_TIMEOUT = 5_000
 const DOWNLOAD_BUFFER_SIZE = 8192
+export const HOYO_CN_LAUNCHER_ID = 'jGHBHlcOq1'
 
 export function withHoYoNetwork<T>(
   userData: string, role: HoYoContext['role'], operation: () => Promise<T>, installedVersion = ''
@@ -118,14 +121,41 @@ export async function getGameDownload(
   }
 }
 
-async function* responseChunks(response: Response, signal?: AbortSignal): AsyncGenerator<Uint8Array> {
+async function readBodyChunk(
+  reader: ReadableStreamDefaultReader<Uint8Array>, idle: number, signal?: AbortSignal
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  signal?.throwIfAborted()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let abort: (() => void) | undefined
+  try {
+    return await Promise.race([
+      reader.read(),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('游戏下载响应体长时间没有数据')), idle)
+        abort = () => reject(signal?.reason)
+        signal?.addEventListener('abort', abort, { once: true })
+      })
+    ])
+  } finally {
+    clearTimeout(timer)
+    if (abort) signal?.removeEventListener('abort', abort)
+  }
+}
+
+async function* responseChunks(response: Response, signal?: AbortSignal, idle = BODY_IDLE_TIMEOUT,
+  paced = true
+): AsyncGenerator<Uint8Array> {
   const reader = response.body?.getReader()
   if (!reader) return
   try {
     for (;;) {
       signal?.throwIfAborted()
-      const { done, value } = await reader.read()
+      const { done, value } = await readBodyChunk(reader, idle, signal)
       if (done) return
+      if (!paced) {
+        yield value
+        continue
+      }
       for (let start = 0; start < value.length; start += DOWNLOAD_BUFFER_SIZE) {
         const chunk = value.subarray(start, start + DOWNLOAD_BUFFER_SIZE)
         await throttle(chunk.length, signal)
@@ -137,10 +167,12 @@ async function* responseChunks(response: Response, signal?: AbortSignal): AsyncG
   }
 }
 
-export async function* streamGameBytes(url: string, signal: AbortSignal, progress: (bytes: number) => void): AsyncGenerator<Uint8Array> {
+export async function* streamGameBytes(url: string, signal: AbortSignal, progress: (bytes: number) => void,
+  idle = BODY_IDLE_TIMEOUT
+): AsyncGenerator<Uint8Array> {
   const response = await getGameDownload(url, { signal })
   let received = 0
-  for await (const bytes of responseChunks(response, signal)) {
+  for await (const bytes of responseChunks(response, signal, idle)) {
     received += bytes.length
     progress(received)
     yield bytes
@@ -233,17 +265,23 @@ export async function downloadManifest(spec: ManifestSpec, signal?: AbortSignal)
       return null
     })
     if (existing?.length === spec.uncompressedSize && existing && md5Bytes(existing) === checksum) {
+      await touchHoYoCache(path)
       return existing
     }
   }
   const response = await hoyoFetch(spec.url, { signal }, true)
-  const raw = new Uint8Array(await response.arrayBuffer())
+  const chunks: Uint8Array[] = []
+  for await (const chunk of responseChunks(response, signal, BODY_IDLE_TIMEOUT, false)) chunks.push(chunk)
+  const raw = Buffer.concat(chunks)
   const plain = spec.compressed ? decompress(raw) : raw
   signal?.throwIfAborted()
   if (checksum && md5Bytes(plain) !== checksum) {
     throw new Error(`Sophon 清单 MD5 校验失败: ${spec.id}`)
   }
-  if (path) await writeFileAtomic(path, plain)
+  if (path && scope && plain.length <= MANIFEST_BUDGET) {
+    await writeFileAtomic(path, plain)
+    await maintainHoYoCache(scope.directory, 'manifest', plain.length)
+  }
   return plain
 }
 
@@ -252,6 +290,19 @@ type MetadataFactory<T> = (signal?: AbortSignal) => Promise<T>
 const metadata = new Map<string, MetadataEntry>()
 const refreshes = new Map<string, Promise<MetadataEntry>>()
 const retryAfter = new Map<string, number>()
+const METADATA_ENTRIES = 256
+// Existing snapshots use the same digest and remain the offline GameInfo fallback.
+const permanentMetadataFiles = new Set([sha256Bytes(Buffer.from('getGames_' + HOYO_CN_LAUNCHER_ID)) + '.json'])
+
+function touchMetadata(key: string, value: MetadataEntry): void {
+  metadata.delete(key)
+  metadata.set(key, value)
+  while (metadata.size > METADATA_ENTRIES) {
+    const oldest = metadata.keys().next().value!
+    metadata.delete(oldest)
+    retryAfter.delete(oldest)
+  }
+}
 
 function interruptible<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (!signal) return work
@@ -283,6 +334,7 @@ export async function getHoYoMetadata<T>(
   const cacheKey = `${scope.directory}\0${scope.role}\0${key}`
   const path = desktop ? join(scope.directory, 'metadata', sha256Bytes(Buffer.from(key)) + '.json') : null
   let entry = metadata.get(cacheKey)
+  if (entry) touchMetadata(cacheKey, entry)
   let writable = path !== null
   if (!entry && path) {
     const loaded = await openJsonStore<MetadataEntry | null>(path, () => null, 'HoYoPlay metadata')
@@ -290,7 +342,8 @@ export async function getHoYoMetadata<T>(
     writable = loaded.writable
     if (loaded.data && Number.isFinite(loaded.data.updated) && 'value' in loaded.data) {
       entry = loaded.data
-      metadata.set(cacheKey, entry)
+      touchMetadata(cacheKey, entry)
+      await touchHoYoCache(path)
     }
   }
 
@@ -301,8 +354,14 @@ export async function getHoYoMetadata<T>(
       const value = await factory(token)
       token?.throwIfAborted()
       const next = { updated: Date.now(), value }
-      if (path && writable) await writeFileAtomic(path, JSON.stringify(next)).catch(() => undefined)
-      metadata.set(cacheKey, next)
+      if (path && writable) {
+        const stored = JSON.stringify(next)
+        if (Buffer.byteLength(stored) <= METADATA_BUDGET) {
+          await writeFileAtomic(path, stored).catch(() => undefined)
+          await maintainHoYoCache(scope!.directory, 'metadata', Buffer.byteLength(stored), permanentMetadataFiles)
+        }
+      }
+      touchMetadata(cacheKey, next)
       retryAfter.delete(cacheKey)
       return next
     })().finally(() => refreshes.delete(cacheKey))

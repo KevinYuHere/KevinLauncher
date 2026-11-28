@@ -140,12 +140,23 @@ export async function loadJsonSafe<T>(file: string, attempts = 3): Promise<JsonL
   return { status: 'read-error', error: lastError }
 }
 
-/** Rename a corrupt store file aside (`<file>.corrupt`) so it can be recovered. */
-export async function quarantineFile(file: string): Promise<boolean> {
+/**
+ * Rename a corrupt store file aside so it can be recovered. The first corruption
+ * uses `<file>.corrupt`; later ones keep that historical evidence and use a
+ * timestamped `<file>.corrupt-<time>-<pid>` instead. Returns the quarantine path
+ * (or `null` when the file could not be moved).
+ */
+export async function quarantineFile(file: string): Promise<string | null> {
   try {
-    await fs.rename(file, `${file}.corrupt`)
-    return true
+    const previous = `${file}.corrupt`
+    const exists = await fs.lstat(previous).then(() => true, (error: NodeJS.ErrnoException) => {
+      if (error.code !== 'ENOENT') throw error
+      return false
+    })
+    const quarantined = exists ? `${previous}-${Date.now()}-${process.pid}` : previous
+    await fs.rename(file, quarantined)
+    return quarantined
   } catch {
-    return false
+    return null
   }
 }

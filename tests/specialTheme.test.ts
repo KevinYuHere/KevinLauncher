@@ -4,6 +4,7 @@ import {
   SPECIAL_AREA_GROUPS,
   applyAppThemePolicy,
   applyThemePolicy,
+  normalizeReleaseUpgradePolicy,
   normalizeThemePolicy,
   policyTargetsVersion,
   resolveAreaTheme,
@@ -184,5 +185,26 @@ describe('specialTheme', () => {
     // 2.1.0 must not re-apply 2.0.0's changes (and a stale copy is harmless).
     expect(policyTargetsVersion(policy, '2.1.0')).toBe(false)
     expect(policyTargetsVersion(policy, '2.0.0-beta.1')).toBe(false)
+  })
+
+  it('normalises intro and theme/material/effect opt-ins independently for the exact SemVer', () => {
+    const introOnly = normalizeReleaseUpgradePolicy({
+      version: '2.0.0-beta.1',
+      intro: { title: ' 新版本 ', body: ' 介绍 ', features: [' A ', ''] }
+    })!
+    expect(introOnly).toMatchObject({
+      version: '2.0.0-beta.1',
+      theme: null,
+      intro: { title: '新版本', body: '介绍', features: ['A'], buttonLabel: null }
+    })
+    const materialOnly = normalizeReleaseUpgradePolicy({ version: '2.0.0', material: 'mica' })!
+    expect(materialOnly.theme).toEqual({ material: 'mica' })
+    expect(materialOnly.intro).toBeNull()
+    const effectOnly = normalizeReleaseUpgradePolicy({ version: '2.0.0', launchEffect: 'nova' })!
+    expect(effectOnly.theme).toEqual({ launchEffect: 'nova' })
+
+    expect(normalizeReleaseUpgradePolicy({ version: '2.0', intro: { title: 'x', body: 'y' } })).toBeNull()
+    expect(normalizeReleaseUpgradePolicy({ version: '2.0.0', intro: { title: 'only' } })).toBeNull()
+    expect(normalizeReleaseUpgradePolicy({ version: '2.0.0' })).toBeNull()
   })
 })

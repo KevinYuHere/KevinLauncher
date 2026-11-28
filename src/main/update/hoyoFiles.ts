@@ -1,6 +1,7 @@
 import { promises as fs } from 'fs'
 import type { HoYoGame, HoYoGameConfig } from './hoyoplay'
 import { isAbsolute, relative, resolve, sep } from 'path'
+import { realDirectoryPath, sameDirectoryPath } from '../services/directoryPath'
 export { retryHoYo } from './hoyoNetwork'
 
 export function gamePath(root: string, name: string): string {
@@ -10,6 +11,19 @@ export function gamePath(root: string, name: string): string {
     throw new Error('无效的游戏资源路径')
   }
   return target
+}
+
+/** Check the actual path immediately before a game file can be modified or moved. */
+export async function requirePlainGamePath(root: string, target: string): Promise<void> {
+  gamePath(root, relative(root, target))
+  if (!sameDirectoryPath(await realDirectoryPath(target), target)) {
+    throw new Error('游戏资源路径包含重解析点：' + target)
+  }
+  const entry = await fs.lstat(target).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== 'ENOENT') throw error
+    return null
+  })
+  if (entry?.isSymbolicLink()) throw new Error('游戏资源路径包含重解析点：' + target)
 }
 
 export async function optionalText(path: string): Promise<string | null> {

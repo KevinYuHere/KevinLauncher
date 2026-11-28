@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   compareVersions,
   isNewerVersion,
+  isSemVerVersion,
   keepStagedVersion,
   pickNewestVersion
 } from '../src/shared/version'
@@ -32,6 +33,17 @@ describe('compareVersions', () => {
   it('handles missing segments', () => {
     expect(compareVersions('1.2', '1.2.0')).toBe(0)
     expect(compareVersions('1.2', '1.2.1')).toBeLessThan(0)
+  })
+})
+
+describe('isSemVerVersion', () => {
+  it('accepts exact release/pre-release versions and rejects partial ones', () => {
+    expect(isSemVerVersion('2.0.5')).toBe(true)
+    expect(isSemVerVersion('2.0.6-beta.2')).toBe(true)
+    expect(isSemVerVersion('2.0.0-rc.1+build.7')).toBe(true)
+    expect(isSemVerVersion('2.0')).toBe(false)
+    expect(isSemVerVersion('v2.0.5')).toBe(false)
+    expect(isSemVerVersion('02.0.5')).toBe(false)
   })
 })
 

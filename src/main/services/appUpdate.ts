@@ -1,32 +1,45 @@
 import { app, shell } from 'electron'
-import { join } from 'path'
+import { dirname, join } from 'path'
 import { promises as fs } from 'fs'
-import type { AppUpdateInfo, AppUpdateState, AppUpdateStatus } from '@shared/types'
-import { isNewerVersion, pickNewestVersion } from '@shared/version'
+import type { AppUpdateDelta, AppUpdateInfo, AppUpdateState, AppUpdateStatus } from '@shared/types'
+import { compareVersions, isNewerVersion, pickNewestVersion } from '@shared/version'
 import { downloadPayload, extractPayload, verifyPayloadDownload } from './updateDownload'
-import { backupUserData } from './dataBackup'
+import { applyAppDelta } from './appUpdateDelta'
+import { backupUserData, estimateBackupBytes, requireBackup } from './dataBackup'
 import {
+  deltaAssetName,
   installerAssetName,
+  isBetaVersion,
+  isHotUpdateCompatible,
   isPositiveFileSize,
   isRuntimeVersion,
   isSha256,
+  parseBetaVerification,
   parseUpdateManifest,
+  parseUpdateCompatibility,
   payloadAssetName,
   SAFE_VERSION,
+  STABLE_VERSION,
+  type BetaVerification,
   type UpdateManifest
 } from './appUpdateManifest'
 import { currentAppVersion } from './appVersion'
+import { AppStore } from './appStore'
+import {
+  prepareApplicationActivation, protectedApplicationVersions, rejectedApplicationVersion
+} from './appActivation'
+import { requireDiskSpace } from './diskSpace'
+import { recordVersionedInstallation } from './install'
 import { writeFileAtomic } from './atomicFile'
 import { flushBeforeShutdown } from './shutdown'
 import { markQuitting } from './behavior'
-import { AppStore } from './appStore'
 import { log } from './logger'
+import { launcherEntryPath, trialBuild } from './buildIdentity'
 
 /** Owner/repository used for release checks (public GitHub API). */
 export const GITHUB_REPO = 'KevinYuHere/KevinLauncher'
 
 const RELEASES_API = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`
-/** Full release list (includes pre-releases) used by the beta channel. */
 const RELEASES_LIST_API = `https://api.github.com/repos/${GITHUB_REPO}/releases`
 /**
  * Stable URL that always redirects to the newest release's manifest.
@@ -62,10 +75,68 @@ function describeCheckError(error: unknown): string {
   return message
 }
 
-/** Cached / marker data is user-writable: never trust its version string. */
-function safeInfo(info: AppUpdateInfo | null | undefined): AppUpdateInfo | null {
-  return info && typeof info.version === 'string' && SAFE_VERSION.test(info.version) &&
-    Array.isArray(info.payloadUrls) && Array.isArray(info.installerUrls) ? info : null
+/** Which releases the launcher follows. The persisted setting is the source. */
+type Channel = 'stable' | 'beta'
+
+function isVersionForChannel(version: string, channel: Channel): boolean {
+  return channel === 'stable' ? STABLE_VERSION.test(version) : STABLE_VERSION.test(version) || isBetaVersion(version)
+}
+
+function hasVerifiedInstaller(info: AppUpdateInfo): boolean {
+  return isPositiveFileSize(info.installerSize) && isSha256(info.installerSha256) &&
+    info.installerName === installerAssetName(info.version) && info.installerUrls.length > 0
+}
+
+function hasVerifiedPayload(info: AppUpdateInfo): boolean {
+  return isRuntimeVersion(info.electronVersion) && isPositiveFileSize(info.payloadSize) &&
+    isSha256(info.payloadSha256) && isPositiveFileSize(info.installSize) &&
+    info.payloadUrls.length > 0 && info.compatibility !== undefined
+}
+
+/**
+ * A cached delta is usable only when it names this target and one exact
+ * baseline. An invalid cached descriptor is dropped (the full payload remains
+ * the fallback) instead of rejecting an otherwise valid offer.
+ */
+function safeDelta(value: unknown, version: string): AppUpdateDelta | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const { fromVersion, name, size, sha256 } = value as Partial<AppUpdateDelta>
+  if (typeof fromVersion !== 'string' || !SAFE_VERSION.test(fromVersion) || fromVersion === version ||
+      name !== deltaAssetName(fromVersion, version) || !isPositiveFileSize(size) || !isSha256(sha256)) {
+    return undefined
+  }
+  return value as AppUpdateDelta
+}
+
+function safeUrls(value: unknown): string[] | undefined {
+  if (!Array.isArray(value) || value.length === 0 ||
+      value.some(url => typeof url !== 'string' || url.length === 0)) return undefined
+  return value as string[]
+}
+
+/**
+ * Cached / marker data is user-writable: never trust its version string.
+ * Beta entries may be legacy installer-only metadata or the conventional
+ * manifest + application ZIP; either verified form is accepted.
+ */
+function safeInfo(info: AppUpdateInfo | null | undefined, channel: Channel): AppUpdateInfo | null {
+  if (!info || typeof info.version !== 'string' ||
+      !Array.isArray(info.payloadUrls) || !Array.isArray(info.installerUrls) ||
+      !isVersionForChannel(info.version, channel)) return null
+  const delta = safeDelta(info.delta, info.version)
+  const deltaUrls = delta ? safeUrls(info.deltaUrls) : undefined
+  let clean = info
+  if (delta && deltaUrls) {
+    clean = delta === info.delta && deltaUrls === info.deltaUrls
+      ? info : { ...info, delta, deltaUrls }
+  } else if (info.delta !== undefined || info.deltaUrls !== undefined) {
+    clean = { ...info, delta: undefined, deltaUrls: undefined }
+  }
+  if (isBetaVersion(clean.version)) {
+    if (!hasVerifiedInstaller(clean) && !hasVerifiedPayload(clean)) return null
+    if (clean.critical === true) clean = { ...clean, critical: false }
+  }
+  return clean
 }
 
 interface GitHubRelease {
@@ -105,8 +176,15 @@ function assetUrls(asset: { id?: number; browser_download_url?: string }): strin
   return urls
 }
 
-/** Fetch and validate each candidate; an API endpoint might return asset metadata. */
-async function fetchManifest(urls: string[], version?: string): Promise<UpdateManifest> {
+/**
+ * Fetch and validate each candidate; an API asset endpoint might return
+ * metadata instead of the file, so the direct release URL is tried next.
+ */
+async function fetchVerified<T>(
+  urls: string[],
+  parse: (raw: string) => T,
+  failure: string
+): Promise<T> {
   let lastError: unknown
   for (const url of new Set(urls)) {
     try {
@@ -115,47 +193,91 @@ async function fetchManifest(urls: string[], version?: string): Promise<UpdateMa
         signal: AbortSignal.timeout(20_000)
       })
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
-      return parseUpdateManifest(await response.text(), version)
+      return parse(await response.text())
     } catch (error) {
       lastError = error
     }
   }
-  throw lastError ?? new Error('无法获取更新清单')
+  throw lastError ?? new Error(failure)
+}
+
+function fetchManifest(urls: string[], version?: string): Promise<UpdateManifest> {
+  return fetchVerified(urls, raw => parseUpdateManifest(raw, version), '无法获取更新清单')
+}
+
+function fetchBetaVerification(urls: string[], version: string): Promise<BetaVerification> {
+  return fetchVerified(urls, raw => parseBetaVerification(raw, version), '无法获取 Beta 验证清单')
 }
 
 function releaseAssetUrl(version: string, asset: string): string {
   return `https://github.com/${GITHUB_REPO}/releases/download/v${version}/${asset}`
 }
 
-function infoFromManifest(manifest: UpdateManifest, release?: GitHubRelease): AppUpdateInfo {
-  const { version, installerName } = manifest
+/** Fixed asset names reconstructed from the release tag, API URL first. */
+function releaseAssetUrls(release: GitHubRelease | undefined, version: string, name: string): string[] {
+  const asset = release?.assets?.find(item => item.name === name)
+  return [...new Set([...(asset ? assetUrls(asset) : []), releaseAssetUrl(version, name)])]
+}
+
+function releaseVersion(release: GitHubRelease): string {
+  return String(release.tag_name ?? '').trim().replace(/^v/i, '')
+}
+
+function infoFromManifest(
+  manifest: UpdateManifest,
+  release?: GitHubRelease,
+  beta = false
+): AppUpdateInfo {
+  const { version, installerName, delta } = manifest
   const payloadName = payloadAssetName(version)
-  const assets = release?.assets ?? []
-  const urlsFor = (name: string): string[] => {
-    const asset = assets.find(item => item.name === name)
-    return [...new Set([...(asset ? assetUrls(asset) : []), releaseAssetUrl(version, name)])]
-  }
   return {
     version,
     name: release?.name?.trim() || `v${version}`,
     notes: release?.body?.trim() || manifest.notes || '',
     htmlUrl: release?.html_url ?? `https://github.com/${GITHUB_REPO}/releases/tag/v${version}`,
-    payloadUrls: urlsFor(payloadName),
+    payloadUrls: releaseAssetUrls(release, version, payloadName),
     payloadSize: manifest.payloadSize,
     payloadSha256: manifest.payloadSha256,
+    ...(delta
+      ? { delta, deltaUrls: releaseAssetUrls(release, version, delta.name) }
+      : {}),
     installSize: manifest.appSize,
     electronVersion: manifest.electron,
-    installerUrls: installerName ? urlsFor(installerName) : [],
+    compatibility: manifest.compatibility,
+    installerUrls: installerName ? releaseAssetUrls(release, version, installerName) : [],
     installerName,
     installerSize: manifest.installerSize,
+    installerUnpackedSize: manifest.installerUnpackedSize,
     installerSha256: manifest.installerSha256,
     publishedAt: release?.published_at ?? '',
-    critical: manifest.critical
+    critical: beta ? false : manifest.critical
   }
 }
 
-async function fetchReleaseViaLatestUrl(): Promise<AppUpdateInfo> {
-  return infoFromManifest(await fetchManifest([LATEST_MANIFEST_URL]))
+function infoFromBetaVerification(beta: BetaVerification, release?: GitHubRelease): AppUpdateInfo {
+  const { version } = beta
+  return {
+    version,
+    critical: false,
+    name: release?.name?.trim() || `v${version}`,
+    notes: release?.body?.trim() || '',
+    htmlUrl: release?.html_url ?? `https://github.com/${GITHUB_REPO}/releases/tag/v${version}`,
+    payloadUrls: [],
+    payloadSize: 0,
+    payloadSha256: null,
+    installSize: 0,
+    electronVersion: null,
+    installerUrls: releaseAssetUrls(release, version, beta.installer),
+    installerName: beta.installer,
+    installerSize: beta.size,
+    installerSha256: beta.sha256,
+    publishedAt: release?.published_at ?? ''
+  }
+}
+
+async function fetchReleaseViaLatestUrl(): Promise<AppUpdateInfo | null> {
+  const manifest = await fetchManifest([LATEST_MANIFEST_URL])
+  return STABLE_VERSION.test(manifest.version) ? infoFromManifest(manifest) : null
 }
 
 /** API asset URLs for the selected version; the latest tag can change mid-update. */
@@ -199,19 +321,88 @@ async function downloadWithFallback(options: {
 }
 
 async function infoFromRelease(release: GitHubRelease): Promise<AppUpdateInfo | null> {
-  const version = String(release.tag_name ?? '').trim().replace(/^v/i, '')
-  if (!SAFE_VERSION.test(version)) return null
-  const asset = release.assets?.find(item => item.name === 'update-manifest.json')
+  const version = releaseVersion(release)
+  if (!STABLE_VERSION.test(version) || release.draft || release.prerelease) return null
   const manifest = await fetchManifest(
-    [...(asset ? assetUrls(asset) : []), releaseAssetUrl(version, 'update-manifest.json')],
+    releaseAssetUrls(release, version, 'update-manifest.json'),
     version
   )
   return infoFromManifest(manifest, release)
 }
 
+/**
+ * Verified public Beta.
+ *
+ * New Betas publish the same conventional `update-manifest.json` and
+ * `KevinLauncher-<version>-app.zip` as stable releases (plus the installer and
+ * `beta-verification.json` for runtimes that cannot hot-update, and so that
+ * older clients can still consume the release). The conventional pair is
+ * preferred; only releases that have no app ZIP fall back to the legacy
+ * installer-only format. Betas are never critical.
+ */
+async function betaInfoFromRelease(release: GitHubRelease): Promise<AppUpdateInfo | null> {
+  const version = releaseVersion(release)
+  if (!isBetaVersion(version) || release.draft === true || release.prerelease !== true) return null
+  const assets = release.assets ?? []
+  const manifestAsset = assets.find(item => item.name === 'update-manifest.json')
+  const payloadAsset = assets.find(item => item.name === payloadAssetName(version))
+  if (manifestAsset && payloadAsset) {
+    const manifest = await fetchManifest(
+      releaseAssetUrls(release, version, 'update-manifest.json'),
+      version
+    )
+    if (payloadAsset.size !== undefined &&
+        (!isPositiveFileSize(payloadAsset.size) || payloadAsset.size !== manifest.payloadSize)) {
+      throw new Error('Beta 应用包大小与 GitHub 资产不一致')
+    }
+    return infoFromManifest(manifest, release, true)
+  }
+  const verificationAsset = assets.find(item => item.name === 'beta-verification.json')
+  const installerAsset = assets.find(item => item.name === installerAssetName(version))
+  if (!verificationAsset || !installerAsset) return null
+  const beta = await fetchBetaVerification(
+    releaseAssetUrls(release, version, 'beta-verification.json'),
+    version
+  )
+  if (installerAsset.size !== undefined &&
+      (!isPositiveFileSize(installerAsset.size) || installerAsset.size !== beta.size)) {
+    throw new Error('Beta 安装包大小与 GitHub 资产不一致')
+  }
+  return infoFromBetaVerification(beta, release)
+}
+
 class ReleaseManifestError extends Error {}
 
 async function refreshManifest(version: string): Promise<AppUpdateInfo> {
+  if (isBetaVersion(version)) {
+    let release: GitHubRelease | undefined
+    try {
+      release = await releaseFromTag(version)
+    } catch (error) {
+      log(`appUpdate: Beta release lookup failed (${(error as Error).message}) — trying the verification asset`)
+    }
+    if (release) {
+      const info = await betaInfoFromRelease(release)
+      if (!info) throw new Error('Beta 更新发布缺少已校验的应用包或安装包')
+      return info
+    }
+    // The tag lookup can fail while asset downloads still work. Prefer the
+    // conventional manifest, then fall back to the legacy verification file.
+    try {
+      return infoFromManifest(
+        await fetchManifest([releaseAssetUrl(version, 'update-manifest.json')], version),
+        undefined,
+        true
+      )
+    } catch (error) {
+      log(`appUpdate: Beta manifest unavailable (${(error as Error).message}) — trying the legacy verification asset`)
+    }
+    const beta = await fetchBetaVerification(
+      [releaseAssetUrl(version, 'beta-verification.json')],
+      version
+    )
+    return infoFromBetaVerification(beta)
+  }
   try {
     return infoFromManifest(await fetchManifest([releaseAssetUrl(version, 'update-manifest.json')], version))
   } catch {
@@ -221,41 +412,53 @@ async function refreshManifest(version: string): Promise<AppUpdateInfo> {
   }
 }
 
-function hasVerifiedMetadata(info: AppUpdateInfo): boolean {
-  if (!isRuntimeVersion(info.electronVersion)) return false
-  if (info.electronVersion !== process.versions.electron) {
-    return isPositiveFileSize(info.installerSize) && isSha256(info.installerSha256) &&
-      info.installerName === installerAssetName(info.version) && info.installerUrls.length > 0
-  }
-  return isPositiveFileSize(info.payloadSize) && isSha256(info.payloadSha256) &&
-    isPositiveFileSize(info.installSize) && info.payloadUrls.length > 0
+function hasVerifiedMetadata(info: AppUpdateInfo, useInstaller: boolean): boolean {
+  // Stable offers must always name their runtime, including when falling back
+  // to the full installer. Legacy Beta installer-only metadata may omit it.
+  if (!isBetaVersion(info.version) && !isRuntimeVersion(info.electronVersion)) return false
+  return useInstaller ? hasVerifiedInstaller(info) : hasVerifiedPayload(info)
 }
 
-/**
- * Newest release **by version** (GitHub itself lists by publication date, so a
- * patch published last must not hide a newer minor).
- *
- * - `stableOnly: true`  → pre-releases are skipped (the stable channel),
- * - `stableOnly: false` → stable and pre-release compete; the higher version
- *   wins (the beta channel always takes the absolute newest build).
- */
-async function latestFromList(stableOnly: boolean): Promise<AppUpdateInfo | null> {
+async function needsFullInstaller(info: AppUpdateInfo): Promise<boolean> {
+  if (info.electronVersion !== process.versions.electron) return true
+  try {
+    const contents = await fs.readFile(join(process.resourcesPath, 'release-compatibility.json'), 'utf8')
+    return !isHotUpdateCompatible(parseUpdateCompatibility(JSON.parse(contents)), info.compatibility)
+  } catch {
+    return true
+  }
+}
+
+
+/** List response shared by both channels; the list order is publication time. */
+async function fetchReleaseList(): Promise<GitHubRelease[] | null> {
   const response = await fetch(RELEASES_LIST_API, {
     headers: { accept: 'application/vnd.github+json', 'user-agent': USER_AGENT },
     signal: AbortSignal.timeout(20_000)
   })
   if (response.status === 404) return null
   if (!response.ok) throw new Error(`GitHub 返回 HTTP ${response.status}`)
-  const list = (await response.json()) as GitHubRelease[]
+  const list: unknown = await response.json()
+  if (!Array.isArray(list)) throw new Error('GitHub 发布列表格式无效')
+  return list as GitHubRelease[]
+}
+
+/**
+ * Newest stable release **by version** (GitHub itself lists by publication
+ * date, so a patch published last must not hide a newer minor).
+ */
+async function latestStableFromList(): Promise<AppUpdateInfo | null> {
+  const list = await fetchReleaseList()
+  if (!list) return null
   const pool = list
-    .map((release) => ({
+    .map(release => ({
       release,
-      version: String(release.tag_name ?? '').trim().replace(/^v/i, ''),
+      version: releaseVersion(release),
       draft: release.draft === true,
       prerelease: release.prerelease === true
     }))
-    .filter(candidate => SAFE_VERSION.test(candidate.version))
-  const best = pickNewestVersion(pool, stableOnly)
+    .filter(candidate => STABLE_VERSION.test(candidate.version))
+  const best = pickNewestVersion(pool, true)
   if (!best) return null
   try {
     return await infoFromRelease(best.release)
@@ -267,19 +470,72 @@ async function latestFromList(stableOnly: boolean): Promise<AppUpdateInfo | null
   }
 }
 
+interface ChannelCandidate {
+  release: GitHubRelease
+  version: string
+  beta: boolean
+}
+
 /**
- * Newest release for a channel:
- * - `stable` → the highest **non-pre-release** version, so a critical stable
- *   release also reaches beta users that are below it;
- * - `beta`   → the highest version overall (stable or pre-release).
+ * Beta channel: canonical Betas compete with stable releases by SemVer.
+ * Drafts, flag/version mismatches and noncanonical tags never enter the pool.
  */
-async function fetchLatestRelease(channel: 'stable' | 'beta'): Promise<AppUpdateInfo | null> {
-  if (channel === 'beta') return latestFromList(false)
+function betaCandidates(list: GitHubRelease[]): ChannelCandidate[] {
+  return list
+    .flatMap((release): ChannelCandidate[] => {
+      if (release.draft === true) return []
+      const version = releaseVersion(release)
+      if (isBetaVersion(version)) {
+        return release.prerelease === true ? [{ release, version, beta: true }] : []
+      }
+      return STABLE_VERSION.test(version) && release.prerelease !== true
+        ? [{ release, version, beta: false }]
+        : []
+    })
+    .sort((left, right) => compareVersions(right.version, left.version))
+}
+
+/** Newest supported release for the Beta channel (stable or verified Beta). */
+async function latestBetaFromList(): Promise<AppUpdateInfo | null> {
+  const list = await fetchReleaseList()
+  if (!list) return null
+  const current = currentAppVersion()
+  for (const candidate of betaCandidates(list)) {
+    // An offer is only ever an upgrade; do not fetch metadata for the running
+    // or an older release.
+    if (!isNewerVersion(candidate.version, current)) continue
+    try {
+      const info = candidate.beta
+        ? await betaInfoFromRelease(candidate.release)
+        : await infoFromRelease(candidate.release)
+      if (info) return info
+      if (candidate.beta) {
+        log(`appUpdate: skipping Beta ${candidate.version} without verified assets`)
+      }
+    } catch (cause) {
+      throw new ReleaseManifestError(
+        `无法验证 ${candidate.version} 的更新信息: ${(cause as Error).message}`,
+        { cause }
+      )
+    }
+  }
+  return null
+}
+
+async function fetchLatestRelease(channel: Channel): Promise<AppUpdateInfo | null> {
+  if (channel === 'beta') {
+    try {
+      return await latestBetaFromList()
+    } catch (error) {
+      if (error instanceof ReleaseManifestError) throw error
+      log(`appUpdate: Beta release list unavailable (${(error as Error).message})`)
+    }
+  }
 
   // The list API gives the real "newest stable by version"; `releases/latest`
   // only means "newest published", which an out-of-order patch can distort.
   try {
-    const info = await latestFromList(true)
+    const info = await latestStableFromList()
     if (info) return info
   } catch (error) {
     if (error instanceof ReleaseManifestError) throw error
@@ -331,8 +587,30 @@ interface ChannelState {
 function emptyChannelState(): ChannelState {
   return { auto: 0, manual: 0, failedAt: 0, rateLimitedUntil: 0, info: null }
 }
+
+function normalizeChannelState(state: Partial<ChannelState> | undefined, channel: Channel): ChannelState {
+  return {
+    auto: typeof state?.auto === 'number' && Number.isFinite(state.auto) ? state.auto : 0,
+    manual: typeof state?.manual === 'number' && Number.isFinite(state.manual) ? state.manual : 0,
+    failedAt: typeof state?.failedAt === 'number' && Number.isFinite(state.failedAt) ? state.failedAt : 0,
+    rateLimitedUntil: typeof state?.rateLimitedUntil === 'number' && Number.isFinite(state.rateLimitedUntil)
+      ? state.rateLimitedUntil : 0,
+    info: safeInfo(state?.info, channel)
+  }
+}
+
 export class AppUpdateChecker {
-  constructor(private readonly pendingDataTransfer: () => Promise<void> | undefined = () => undefined) {}
+  constructor(
+    private readonly pendingDataTransfer: () => Promise<void> | undefined = () => undefined,
+    private readonly withUpdateBackup: (
+      reason: string, apply: () => Promise<void>, checkSpace: () => Promise<void>
+    ) => Promise<void> =
+      async (reason, apply, checkSpace) => {
+        await checkSpace()
+        requireBackup(await backupUserData(reason))
+        await apply()
+      }
+  ) {}
 
   private info: AppUpdateInfo | null = null
   private error: string | undefined
@@ -342,23 +620,30 @@ export class AppUpdateChecker {
   private state: AppUpdateState = { ...IDLE_STATE }
   private controller: AbortController | null = null
   private running = false
+  private pendingVersion: string | undefined
+  private activeCheck: Promise<AppUpdateStatus> | undefined
+  private activeCheckChannel: Channel | undefined
+  private initialCheck: Promise<void> | undefined
+  private rejectedVersion: string | undefined
+  private cleanupTask: Promise<void> | undefined
+  private taskInfo: AppUpdateInfo | undefined
   /** Critical-update version that already auto-started (start it only once). */
   private autoStarted: string | null = null
   /** Automatic retry timer / counter for a failing critical update. */
   private criticalRetryTimer: NodeJS.Timeout | null = null
   private criticalRetries = 0
-  /** Update channel the current result was computed for. */
-  private channel: 'stable' | 'beta' = 'stable'
-  /** Timestamp of the last successful automatic check (active channel). */
+  /** Timestamp of the last successful automatic check. */
   private lastAutoCheck = 0
-  /** Timestamp of the last successful manual check (active channel). */
+  /** Timestamp of the last successful manual check. */
   private lastManualCheck = 0
   /** Timestamp of the last failed attempt (retry backoff). */
   private failedAt = 0
   /** Automatic checks are skipped until this timestamp after a 403. */
   private rateLimitedUntil = 0
-  /** Per-channel state: switching channels reuses that channel's cache/cooldowns. */
-  private saved: Record<'stable' | 'beta', ChannelState> = {
+  /** Channel the active fields and offer belong to. */
+  private channel: Channel = 'stable'
+  /** Per-channel cache/cooldowns; switching channels never discards them. */
+  private saved: Record<Channel, ChannelState> = {
     stable: emptyChannelState(),
     beta: emptyChannelState()
   }
@@ -373,18 +658,32 @@ export class AppUpdateChecker {
     }
   }
 
-  private applyChannel(channel: 'stable' | 'beta'): void {
+  /** Which channel the persisted launcher setting selects. */
+  private async readChannel(): Promise<Channel> {
+    try {
+      const persisted = String((await AppStore.launcherSettings()).updateChannel)
+      return persisted === 'beta' ? 'beta' : 'stable'
+    } catch (error) {
+      // A temporarily unreadable config must not break self-update. Keep the
+      // last known channel; the next check will reread the setting.
+      log(`appUpdate: cannot read update channel (${(error as Error).message})`)
+      return this.channel
+    }
+  }
+
+  private applyChannel(channel: Channel): void {
     const state = this.saved[channel]
     this.channel = channel
     this.lastAutoCheck = state.auto
     this.lastManualCheck = state.manual
     this.failedAt = state.failedAt
     this.rateLimitedUntil = state.rateLimitedUntil
-    this.info = state.info && isNewerVersion(state.info.version, this.current()) ? state.info : null
+    const info = safeInfo(state.info, channel)
+    this.info = info && isNewerVersion(info.version, this.current()) ? info : null
     this.announced = this.info?.version ?? null
   }
 
-  private switchChannel(channel: 'stable' | 'beta'): void {
+  private switchChannel(channel: Channel): void {
     if (this.channel === channel) return
     this.saved[this.channel] = this.snapshot()
     this.applyChannel(channel)
@@ -395,8 +694,9 @@ export class AppUpdateChecker {
     return currentAppVersion()
   }
 
-  /** Optional fake release read from `%userData%/simulate-app-update.json`. */
+  /** Optional release description used by a local preview build. */
   private async fakeSpec(): Promise<AppUpdateInfo | null> {
+    if (!trialBuild) return null
     try {
       const raw = await fs.readFile(
         join(app.getPath('userData'), 'simulate-app-update.json'),
@@ -433,6 +733,7 @@ export class AppUpdateChecker {
 
   /** Fake download progress (used with `fakeSpec`). */
   private simulateFake(info: AppUpdateInfo): void {
+    if (!trialBuild) return
     const total = 1048576
     let transferred = 0
     this.running = true
@@ -451,11 +752,11 @@ export class AppUpdateChecker {
       if (transferred >= total) {
         clearInterval(timer)
         this.running = false
-        this.patch({ phase: 'done', percent: 1, transferred: total, installPercent: 100 })
+        this.patch({ phase: 'done', percent: 100, transferred: total, installPercent: 100 })
         return
       }
       this.patch({
-        percent: transferred / total,
+        percent: (transferred / total) * 100,
         transferred,
         bytesPerSecond: total / 3,
         installPercent: 0
@@ -464,14 +765,26 @@ export class AppUpdateChecker {
   }
 
   status(): AppUpdateStatus {
+    // A stale or cached entry must still match the active channel (a Beta must
+    // never surface on stable), and an installed version is never advertised.
+    const info = safeInfo(this.info, this.channel)
+    if (info !== this.info) {
+      this.info = info
+      if (!info) this.announced = null
+    }
     // Never advertise a version that is already installed: a cached result can
     // otherwise keep offering the update right after it was applied.
     if (this.info && !isNewerVersion(this.info.version, this.current())) {
       this.info = null
       this.announced = null
-      this.saved[this.channel].info = null
     }
-    return { current: this.current(), hasUpdate: !!this.info, info: this.info, error: this.error }
+    return {
+      current: this.current(),
+      hasUpdate: !!this.info,
+      info: this.info,
+      channel: this.channel,
+      error: this.error
+    }
   }
 
   /** Current download / install state (for the rail ring and popover). */
@@ -501,7 +814,8 @@ export class AppUpdateChecker {
    * check (e.g. after a failed manual refresh) from restarting it.
    */
   private announce(info: AppUpdateInfo): void {
-    if (info.critical && this.autoStarted !== info.version) {
+    // Beta releases are installer-only and never critical.
+    if (info.critical && !isBetaVersion(info.version) && this.autoStarted !== info.version) {
       this.autoStarted = info.version
       this.criticalRetries = 0
       // Persist before starting: if the app is closed mid-download (or crashes),
@@ -510,7 +824,7 @@ export class AppUpdateChecker {
       log(`appUpdate: v${info.version} is a critical update — starting automatically`)
       setTimeout(() => {
         // A later check may already have replaced it; never start a stale one.
-        if (!this.running && this.info?.version === info.version) this.begin()
+        if (!this.running && this.info?.version === info.version) this.begin(false, info)
       }, CRITICAL_AUTOSTART_DELAY)
     }
     for (const listener of this.listeners) listener(info)
@@ -531,7 +845,8 @@ export class AppUpdateChecker {
 
   /** Persist a real critical update (fake local specs are not resumed forever). */
   private async saveCriticalMarker(info: AppUpdateInfo): Promise<void> {
-    if (!info.critical || (info.payloadUrls.length === 0 && info.installerUrls.length === 0)) return
+    if (!info.critical || isBetaVersion(info.version) ||
+        (info.payloadUrls.length === 0 && info.installerUrls.length === 0)) return
     try {
       await writeFileAtomic(this.criticalMarkerFile(), JSON.stringify(info, null, 2))
       log(`appUpdate: critical marker saved for ${info.version}`)
@@ -548,9 +863,10 @@ export class AppUpdateChecker {
   private async loadCriticalMarker(): Promise<void> {
     try {
       const info = safeInfo(
-        JSON.parse(await fs.readFile(this.criticalMarkerFile(), 'utf8')) as AppUpdateInfo
+        JSON.parse(await fs.readFile(this.criticalMarkerFile(), 'utf8')) as AppUpdateInfo,
+        'stable'
       )
-      if (!info?.critical || !isNewerVersion(info.version, this.current())) {
+      if (!info?.critical || isBetaVersion(info.version) || !isNewerVersion(info.version, this.current())) {
         await this.clearCriticalMarker()
         return
       }
@@ -565,11 +881,9 @@ export class AppUpdateChecker {
 
   /** Starts the startup check and the 24-hour interval. */
   start(): void {
+    if (trialBuild) return
     void (async (): Promise<void> => {
-      await this.loadCache()
-      // A critical marker is independent of the check cache (channel changes,
-      // cache invalidation, app closed mid-download) — resume it first.
-      await this.loadCriticalMarker()
+      await this.initializeCheck()
       // A critical update cached by the previous session must still start by
       // itself (the 24h check below may legitimately be answered from cache).
       if (this.info?.critical) this.announce(this.info)
@@ -578,58 +892,70 @@ export class AppUpdateChecker {
     })()
   }
 
-  /** Result of the last checks, cached on disk for a day (per kind). */
+  private initializeCheck(): Promise<void> {
+    this.initialCheck ??= (async () => {
+      this.rejectedVersion = await rejectedApplicationVersion().catch(() => undefined)
+      await this.loadCache()
+      await this.loadCriticalMarker()
+      if (this.info?.version === this.rejectedVersion) this.info = null
+      if (this.rejectedVersion) this.error = `已回到可启动版本。版本 ${this.rejectedVersion} 的完整安装包可在发布页获取。`
+    })()
+    return this.initialCheck
+  }
+
+  /** Result of the last checks, cached on disk for a day (per channel/kind). */
   private async loadCache(): Promise<void> {
     try {
       const raw = JSON.parse(await fs.readFile(this.cacheFile(), 'utf8')) as {
         forVersion?: string
-        channel?: 'stable' | 'beta'
+        channel?: Channel
         autoCheckedAt?: number
         manualCheckedAt?: number
         info?: AppUpdateInfo | null
-        channels?: Partial<Record<'stable' | 'beta', ChannelState>>
+        /** Current stable-only cache format. */
+        state?: ChannelState
+        channels?: Partial<Record<Channel, ChannelState>>
       }
-      const channel = (await AppStore.launcherSettings()).updateChannel
+      const channel = await this.readChannel()
       const current = this.current()
       if (raw.forVersion && raw.forVersion !== current) {
         log(`appUpdate: cache is for ${raw.forVersion}, current is ${current} - discarding`)
-        this.channel = channel
+        this.applyChannel(channel)
         return
       }
-      if (raw.channels) {
+      if (raw.channels && typeof raw.channels === 'object' && !Array.isArray(raw.channels)) {
         for (const key of ['stable', 'beta'] as const) {
           const state = raw.channels[key]
-          if (state) {
-            this.saved[key] = {
-              auto: state.auto ?? 0,
-              manual: state.manual ?? 0,
-              failedAt: state.failedAt ?? 0,
-              rateLimitedUntil: state.rateLimitedUntil ?? 0,
-              info: safeInfo(state.info)
-            }
-          }
+          if (state) this.saved[key] = normalizeChannelState(state, key)
         }
       } else {
-        // Legacy single-channel cache: attribute it to its recorded channel.
-        this.saved[raw.channel ?? 'stable'] = {
+        // Backward compatibility: the previous stable-only format stored one
+        // `state` (or the older flat fields). Attribute it to its channel.
+        const legacyChannel: Channel = raw.channel === 'beta' ? 'beta' : 'stable'
+        const state = raw.state ?? {
           auto: raw.autoCheckedAt ?? 0,
           manual: raw.manualCheckedAt ?? 0,
           failedAt: 0,
           rateLimitedUntil: 0,
-          info: safeInfo(raw.info)
+          info: raw.info
         }
+        this.saved[legacyChannel] = normalizeChannelState(state, legacyChannel)
       }
       this.applyChannel(channel)
     } catch {
       /* no cache yet */
     }
   }
+
   private async saveCache(): Promise<void> {
     try {
       this.saved[this.channel] = this.snapshot()
       await writeFileAtomic(
         this.cacheFile(),
-        JSON.stringify({ forVersion: this.current(), channels: this.saved }, null, 2)
+        JSON.stringify({
+          forVersion: this.current(),
+          channels: this.saved
+        }, null, 2)
       )
     } catch {
       /* caching is best effort */
@@ -646,24 +972,75 @@ export class AppUpdateChecker {
    * manual check of the day always asks GitHub (and can therefore see a release
    * published since the startup check), while the automatic check still runs at
    * most once a day. Neither kind refreshes the other's timestamp.
+   *
+   * The persisted channel is reread before every check. An in-flight check for
+   * the old channel is never returned to callers on the new channel: they wait
+   * for it to settle and then check again with the current setting.
    */
   async check(kind: 'auto' | 'manual' = 'auto'): Promise<AppUpdateStatus> {
+    if (trialBuild) return this.checkNow(kind, this.channel)
+    await this.initializeCheck()
+    for (let round = 0; round < 3; round++) {
+      const channel = await this.readChannel()
+      if (channel !== this.channel) this.switchChannel(channel)
+      if (this.activeCheck && this.activeCheckChannel === channel) return this.activeCheck
+      if (this.activeCheck) {
+        await this.activeCheck.catch(() => undefined)
+        continue
+      }
+      const task = this.checkNow(kind, channel).finally(() => {
+        if (this.activeCheck === task) {
+          this.activeCheck = undefined
+          this.activeCheckChannel = undefined
+        }
+      })
+      this.activeCheck = task
+      this.activeCheckChannel = channel
+      const status = await task
+      if (this.channel === channel) return status
+    }
+    return this.status()
+  }
+
+  /** Store a result for the channel it was fetched for, active or not. */
+  private commitCheck(
+    channel: Channel,
+    kind: 'auto' | 'manual',
+    now: number,
+    info: AppUpdateInfo | null,
+    error: string | undefined
+  ): void {
+    if (channel === this.channel) {
+      this.error = error
+      this.info = info
+      if (kind === 'auto') this.lastAutoCheck = now
+      else this.lastManualCheck = now
+      return
+    }
+    const state = this.saved[channel]
+    this.saved[channel] = {
+      ...state,
+      ...(kind === 'auto' ? { auto: now } : { manual: now }),
+      info
+    }
+  }
+
+  private async checkNow(kind: 'auto' | 'manual', channel: Channel): Promise<AppUpdateStatus> {
     const now = Date.now()
     // Local test affordance: `%userData%/simulate-app-update.json` fakes a newer
     // release so the update dialog / ring can be inspected offline.
-    const fake = await this.fakeSpec()
-    if (fake) {
-      this.error = undefined
+    if (trialBuild) {
+      const fake = await this.fakeSpec()
+      this.error = fake ? undefined : '本地试用版使用本地模拟更新'
       this.info = fake
       this.lastAutoCheck = now
       this.lastManualCheck = now
-      if (this.announced !== fake.version) {
+      if (fake && this.announced !== fake.version) {
         this.announced = fake.version
         this.announce(fake)
       }
       return this.status()
     }
-    this.switchChannel((await AppStore.launcherSettings()).updateChannel)
     const stamp = kind === 'auto' ? this.lastAutoCheck : this.lastManualCheck
     // Fresh for this kind (≤ 24 h) → answer from the cached result.
     if (stamp && now - stamp < CHECK_CACHE_TTL) {
@@ -681,47 +1058,62 @@ export class AppUpdateChecker {
     }
 
     try {
-      const latest = await fetchLatestRelease(this.channel)
-      this.error = undefined
-      this.info = latest && isNewerVersion(latest.version, this.current()) ? latest : null
-      // Timestamp of the last *successful* check of this kind (persisted below).
-      if (kind === 'auto') this.lastAutoCheck = now
-      else this.lastManualCheck = now
+      const latest = await fetchLatestRelease(channel)
+      const rejected = !!latest?.version && latest.version === this.rejectedVersion
+      const info = latest && !rejected && isVersionForChannel(latest.version, channel) &&
+        isNewerVersion(latest.version, this.current()) ? latest : null
+      const error = rejected
+        ? `已回到可启动版本。版本 ${latest!.version} 的完整安装包可在发布页获取。` : undefined
+      this.commitCheck(channel, kind, now, info, error)
       log(
-        `appUpdate: ${kind} check → ${
-          this.info ? `v${this.info.version} available` : 'up to date'
+        `appUpdate: ${kind} ${channel} check → ${
+          info ? `v${info.version} available` : 'up to date'
         } (current ${this.current()})`
       )
-      const found = this.info
-      if (found && this.announced !== found.version) {
-        this.announced = found.version
-        this.announce(found)
+      if (channel === this.channel && info && this.announced !== info.version) {
+        this.announced = info.version
+        this.announce(info)
       }
       await this.saveCache()
     } catch (error) {
       // Keep the previous result: a failed check (network, rate limit, …) must
       // not make an already known update disappear, otherwise a paused download
       // could no longer be resumed.
-      this.failedAt = now
-      this.error = describeCheckError(error)
-      if (/403/.test((error as Error).message)) {
-        this.rateLimitedUntil = now + RATE_LIMIT_BACKOFF
-        log('appUpdate: GitHub rate limit hit — next automatic check in 30 minutes')
+      const limited = /403/.test((error as Error).message)
+      if (channel === this.channel) {
+        this.failedAt = now
+        this.error = describeCheckError(error)
+        if (limited) {
+          this.rateLimitedUntil = now + RATE_LIMIT_BACKOFF
+          log('appUpdate: GitHub rate limit hit — next automatic check in 30 minutes')
+        }
+      } else {
+        const state = this.saved[channel]
+        this.saved[channel] = {
+          ...state,
+          failedAt: now,
+          ...(limited ? { rateLimitedUntil: now + RATE_LIMIT_BACKOFF } : {})
+        }
       }
-      log(`appUpdate: ${kind} check failed: ${(error as Error).message}`)
+      log(`appUpdate: ${kind} ${channel} check failed: ${(error as Error).message}`)
     }
     return this.status()
   }
 
   /** Begins the upgrade, or resumes a paused download. */
-  begin(retry = false): void {
-    const info = this.info
-    if (!info || this.running || !SAFE_VERSION.test(info.version) ||
+  begin(retry = false, info = this.state.phase === 'error' ? this.taskInfo ?? this.info : this.info): void {
+    if (!info || this.running || info.version === this.rejectedVersion || !SAFE_VERSION.test(info.version) ||
         !isNewerVersion(info.version, this.current())) return
+    // Beta releases are always the installer-only path and never critical.
+    if (isBetaVersion(info.version) && info.critical) info = { ...info, critical: false }
+    if (trialBuild) {
+      this.simulateFake(info)
+      return
+    }
     const transfer = this.pendingDataTransfer()
     if (transfer) {
       void transfer.then(() => {
-        if (this.info?.version === info.version) this.begin(retry)
+        if (this.info?.version === info.version || this.taskInfo?.version === info.version) this.begin(retry, info)
       }).catch((error) => log(`appUpdate: waiting for data recovery (${String(error)})`))
       return
     }
@@ -737,31 +1129,20 @@ export class AppUpdateChecker {
       critical: info.critical === true,
       retry: this.criticalRetries
     })
-    const runtimeChanged =
-      !!info.electronVersion && info.electronVersion !== process.versions.electron
-    if (info.payloadUrls.length === 0 && info.installerUrls.length === 0) {
-      // No real asset (the local fake spec): simulate the download UI.
-      if (!this.running) this.simulateFake(info)
-      return
-    }
+    if (info.payloadUrls.length === 0 && info.installerUrls.length === 0) return
     if (!app.isPackaged) {
       void shell.openExternal(info.htmlUrl)
       return
     }
     this.running = true
+    this.taskInfo = info
     // Hold on to the info for the whole run: a later (failed) check must not
     // change what is being downloaded.
     this.controller = new AbortController()
-    // Log what will actually be fetched (the payload is ~0.15 MB, the installer
-    // ~71 MB and only used when the runtime changed).
-    const megabytes = Math.round(
-      (runtimeChanged ? info.installerSize : info.payloadSize) / 1048576
-    )
-    log(
-      `appUpdate: starting ${info.version} (${runtimeChanged ? 'installer' : 'app payload'}, ~${megabytes} MB)`
-    )
+    this.pendingVersion = info.version
     void this.run(info, this.controller).finally(() => {
       this.running = false
+      this.pendingVersion = undefined
     })
   }
 
@@ -771,12 +1152,12 @@ export class AppUpdateChecker {
    */
   toggle(): void {
     // 重要更新不可暂停：the only way forward is to let it finish (or retry).
-    if (this.info?.critical) return
+    if (this.state.critical) return
     const phase = this.state.phase
     if (phase === 'downloading') {
       this.controller?.abort()
     } else if (phase === 'paused' || phase === 'error') {
-      this.begin()
+      this.begin(false, this.taskInfo)
     }
   }
 
@@ -794,8 +1175,9 @@ export class AppUpdateChecker {
     urls: string[]
     controller: AbortController
     installer: boolean
+    message?: string
   }): Promise<void> {
-    const { info, name, path, size, sha256, urls, controller, installer } = options
+    const { info, name, path, size, sha256, urls, controller, installer, message } = options
     if (!isSha256(sha256)) throw new Error('更新清单缺少文件的 SHA-256')
     this.patch({
       phase: 'downloading',
@@ -803,7 +1185,7 @@ export class AppUpdateChecker {
       total: size,
       transferred: 0,
       percent: 0,
-      message: installer ? '正在下载安装程序…' : '正在下载更新…'
+      message: message ?? (installer ? '正在下载安装程序…' : '正在下载更新…')
     })
     if (!(await verifyPayloadDownload(path, size, sha256))) {
       await downloadWithFallback({
@@ -830,54 +1212,101 @@ export class AppUpdateChecker {
     this.patch({ percent: 100, transferred: size, bytesPerSecond: 0 })
   }
 
+  /**
+   * A delta is only an optimization for the exact installed version. A missing,
+   * larger or mismatched descriptor selects the full application ZIP — never
+   * the installer while the host is hot-update compatible.
+   */
+  private usableDelta(info: AppUpdateInfo): AppUpdateDelta | undefined {
+    const delta = info.delta
+    const urls = info.deltaUrls
+    if (!delta || !urls?.length || delta.fromVersion !== this.current() ||
+        delta.size >= info.payloadSize) return undefined
+    if (!isSha256(delta.sha256) || delta.name !== deltaAssetName(delta.fromVersion, info.version) ||
+        urls.some(url => typeof url !== 'string' || url.length === 0) ||
+        !hasVerifiedPayload(info)) return undefined
+    return delta
+  }
+
   private async run(info: AppUpdateInfo, controller: AbortController): Promise<void> {
     const staging = join(app.getPath('userData'), 'update-staging', info.version)
     const archive = join(staging, 'app.zip')
+    let awaitingSave = false
     try {
+      await this.cleanupTask
       // A cached check from an older build may contain incomplete metadata.
-      // Get the same version's manifest again before selecting an install mode.
-      if (!hasVerifiedMetadata(info)) {
+      // Get the same version's metadata again before selecting an install mode.
+      const beta = isBetaVersion(info.version)
+      let useInstaller = await needsFullInstaller(info)
+      if (!hasVerifiedMetadata(info, useInstaller)) {
         const fresh = await refreshManifest(info.version)
-        info = { ...fresh, critical: info.critical || fresh.critical }
-        if (!hasVerifiedMetadata(info)) {
-          throw new Error('缺少适合当前运行库的已校验更新文件，请手动下载安装包')
+        info = { ...fresh, critical: beta ? false : info.critical || fresh.critical }
+        useInstaller = await needsFullInstaller(info)
+        if (!hasVerifiedMetadata(info, useInstaller)) {
+          throw new Error(beta
+            ? '当前运行库无法使用该 Beta 更新，且发布缺少已校验的安装包'
+            : '缺少适合当前运行库的已校验更新文件，请手动下载安装包')
         }
         if (this.info?.version === info.version) this.info = info
+        this.taskInfo = info
       }
       controller.signal.throwIfAborted()
-      if (info.electronVersion !== process.versions.electron) {
+      if (useInstaller) {
         await this.updateViaInstaller(info, staging, controller)
         return
       }
 
-      await this.downloadVerified({
-        info, name: payloadAssetName(info.version), path: archive, size: info.payloadSize,
-        sha256: info.payloadSha256, urls: info.payloadUrls, controller, installer: false
+      let delta = this.usableDelta(info)
+      let deltaArchive = delta ? join(staging, delta.name) : null
+      if (delta && deltaArchive) {
+        try {
+          await this.downloadVerified({
+            info, name: delta.name, path: deltaArchive, size: delta.size,
+            sha256: delta.sha256, urls: info.deltaUrls ?? [], controller, installer: false,
+            message: '正在下载差量更新…'
+          })
+        } catch (error) {
+          if (controller.signal.aborted) throw error
+          log(`appUpdate: delta ${delta.name} unavailable (${(error as Error).message}) — falling back to the application ZIP`)
+          this.dropDelta(info.version)
+          await fs.rm(deltaArchive, { recursive: true, force: true }).catch(() => {})
+          delta = undefined
+          deltaArchive = null
+        }
+      }
+      if (!delta || !deltaArchive) {
+        await this.downloadVerified({
+          info, name: payloadAssetName(info.version), path: archive, size: info.payloadSize,
+          sha256: info.payloadSha256, urls: info.payloadUrls, controller, installer: false
+        })
+      }
+      this.patch({
+        phase: 'installing', percent: 100, installPercent: 0, installTotal: info.installSize,
+        message: '正在安装更新…'
       })
-      this.patch({ phase: 'installing', percent: 100, installPercent: 0, message: '正在安装更新…' })
-      await backupUserData(`update ${info.version}`)
-      const target = join(process.resourcesPath, `app-${info.version}`)
-      await extractPayload(archive, target, info.installSize, (bytes, total) => {
-        this.patch({ installPercent: total > 0 ? Math.min(100, (bytes / total) * 100) : 0 })
+      const data = app.getPath('userData')
+      await this.withUpdateBackup(`update ${info.version}`, async () => {
+        await this.applyHotUpdate(deltaArchive ?? archive, info, delta, staging, controller)
+      }, async () => {
+        await requireDiskSpace([
+          { path: data, bytes: await estimateBackupBytes(data) },
+          { path: process.resourcesPath, bytes: info.installSize }
+        ])
       })
-      const required = ['package.json', 'out/main/index.js', 'out/preload/index.js', 'out/renderer/index.html']
-      const valid = await Promise.all(required.map(file => isRegularFile(join(target, file))))
-      if (valid.some(exists => !exists)) throw new Error('更新包内容不完整')
-      const metadata = JSON.parse(await fs.readFile(join(target, 'package.json'), 'utf8')) as { version?: string } | null
-      if (metadata?.version !== info.version) throw new Error('更新包版本与清单不匹配')
-
-      // 3) switch: flip the version pointer and restart into the new version.
-      await this.switchTo(info.version)
+      awaitingSave = true
+      await flushBeforeShutdown(async () => {
+        awaitingSave = false
+        await prepareApplicationActivation(info.version)
+      })
+      await this.clearCriticalMarker()
+      await fs.rm(staging, { recursive: true, force: true }).catch(() => {})
       this.patch({
         phase: 'done',
         installPercent: 100,
         message: '更新完成，正在重启…',
         critical: info.critical === true
       })
-      await this.clearCriticalMarker()
-      await fs.rm(staging, { recursive: true, force: true }).catch(() => {})
-      await flushBeforeShutdown()
-      app.relaunch()
+      app.relaunch({ execPath: launcherEntryPath() })
       app.exit(0)
     } catch (error) {
       if (controller.signal.aborted) {
@@ -887,7 +1316,16 @@ export class AppUpdateChecker {
       }
       const message = (error as Error).message
       log(`appUpdate: failed: ${message}`)
-      if (info.critical && this.criticalRetries < CRITICAL_MAX_RETRIES) {
+      if (awaitingSave) {
+        this.patch({
+          phase: 'error',
+          message: '更新文件已准备好，保存失败。请保存后重试。',
+          error: message,
+          critical: info.critical === true
+        })
+        return
+      }
+      if (!isBetaVersion(info.version) && info.critical && this.criticalRetries < CRITICAL_MAX_RETRIES) {
         this.criticalRetries += 1
         const attempt = this.criticalRetries
         this.patch({
@@ -900,7 +1338,7 @@ export class AppUpdateChecker {
         if (this.criticalRetryTimer) clearTimeout(this.criticalRetryTimer)
         this.criticalRetryTimer = setTimeout(() => {
           this.criticalRetryTimer = null
-          if (!this.running && this.info?.version === info.version) this.begin(true)
+          if (!this.running && this.taskInfo?.version === info.version) this.begin(true, info)
         }, CRITICAL_RETRY_DELAY)
         return
       }
@@ -909,6 +1347,118 @@ export class AppUpdateChecker {
         message: info.critical ? '重要更新失败，请重试' : '更新失败',
         error: message,
         critical: info.critical === true
+      })
+    }
+  }
+
+  /** Stop retrying a failed delta while keeping the version offer intact. */
+  private dropDelta(version: string): void {
+    if (this.info?.version === version && (this.info.delta || this.info.deltaUrls)) {
+      this.info = { ...this.info, delta: undefined, deltaUrls: undefined }
+    }
+    if (this.taskInfo?.version === version && (this.taskInfo.delta || this.taskInfo.deltaUrls)) {
+      this.taskInfo = { ...this.taskInfo, delta: undefined, deltaUrls: undefined }
+    }
+  }
+
+  private applyProgress(bytes: number, total: number): void {
+    this.patch({ installPercent: total > 0 ? Math.min(100, (bytes / total) * 100) : 0 })
+  }
+
+  private async validatePreparedApplication(prepared: string, info: AppUpdateInfo): Promise<void> {
+    const required = ['package.json', 'out/main/index.js', 'out/preload/index.js',
+      'out/renderer/index.html', 'release-compatibility.json']
+    const valid = await Promise.all(required.map(file => isRegularFile(join(prepared, file))))
+    if (valid.some(exists => !exists)) throw new Error('更新包内容不完整')
+    const metadata = JSON.parse(await fs.readFile(join(prepared, 'package.json'), 'utf8')) as { version?: string } | null
+    if (metadata?.version !== info.version) throw new Error('更新包版本与清单不匹配')
+    const packaged = parseUpdateCompatibility(JSON.parse(
+      await fs.readFile(join(prepared, 'release-compatibility.json'), 'utf8')
+    ))
+    if (!isHotUpdateCompatible(packaged, info.compatibility)) throw new Error('更新包兼容信息与清单不一致')
+  }
+
+  /**
+   * Prepare a new version directory and atomically select it.
+   *
+   * The delta is applied into an independent staging tree, never over the
+   * active `app-<current>` directory. A bad baseline (or any other delta
+   * failure) falls back to the verified full application ZIP, not the
+   * installer, because this path is only used on a compatible host.
+   */
+  private async applyHotUpdate(
+    archive: string,
+    info: AppUpdateInfo,
+    delta: AppUpdateDelta | undefined,
+    staging: string,
+    controller: AbortController
+  ): Promise<void> {
+    const resources = process.resourcesPath
+    const stage = await fs.mkdtemp(join(resources, '.kevin-payload-'))
+    const prepared = join(stage, 'verified')
+    const target = join(resources, `app-${info.version}`)
+    try {
+      if (delta) {
+        try {
+          controller.signal.throwIfAborted()
+          await applyAppDelta(
+            archive,
+            join(resources, `app-${this.current()}`),
+            prepared,
+            delta.fromVersion,
+            info.version,
+            info.installSize,
+            (bytes, total) => this.applyProgress(bytes, total)
+          )
+          controller.signal.throwIfAborted()
+          await this.validatePreparedApplication(prepared, info)
+        } catch (error) {
+          if (controller.signal.aborted) throw error
+          log(`appUpdate: delta ${delta.name} could not be applied (${(error as Error).message}) — falling back to the verified application ZIP`)
+          this.dropDelta(info.version)
+          await fs.rm(prepared, { recursive: true, force: true }).catch(() => {})
+          await fs.rm(archive, { force: true }).catch(() => {})
+          const fallback = join(staging, 'app.zip')
+          this.patch({
+            phase: 'downloading', percent: 0, transferred: 0, total: info.payloadSize,
+            bytesPerSecond: 0, installPercent: 0, message: '正在下载完整更新…'
+          })
+          await this.downloadVerified({
+            info, name: payloadAssetName(info.version), path: fallback, size: info.payloadSize,
+            sha256: info.payloadSha256, urls: info.payloadUrls, controller, installer: false
+          })
+          this.patch({
+            phase: 'installing', percent: 100, installPercent: 0,
+            installTotal: info.installSize, message: '正在安装更新…'
+          })
+          await extractPayload(fallback, prepared, info.installSize, (bytes, total) => {
+            this.applyProgress(bytes, total)
+          })
+          controller.signal.throwIfAborted()
+          await this.validatePreparedApplication(prepared, info)
+        }
+      } else {
+        await extractPayload(archive, prepared, info.installSize, (bytes, total) => {
+          this.applyProgress(bytes, total)
+        })
+        await this.validatePreparedApplication(prepared, info)
+      }
+      controller.signal.throwIfAborted()
+      const existing = await fs.lstat(target).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== 'ENOENT') throw error
+        return null
+      })
+      if (existing) {
+        if (!existing.isDirectory() || (await protectedApplicationVersions()).has(info.version)) {
+          throw new Error('待更新的程序目录仍在使用，请重新启动后再试')
+        }
+        await fs.rm(target, { recursive: true, force: true })
+      }
+      await fs.rename(prepared, target)
+      await recordVersionedInstallation(dirname(resources), info.version, target)
+    } finally {
+      await fs.rm(stage, { recursive: true, force: true }).catch((error) => {
+        log(`appUpdate: could not release staging (${String(error)})`)
       })
     }
   }
@@ -929,11 +1479,15 @@ export class AppUpdateChecker {
       info, name, path: installer, size: info.installerSize, sha256: info.installerSha256,
       urls: info.installerUrls, controller, installer: true
     })
+    if (info.installerUnpackedSize) {
+      await requireDiskSpace([{ path: app.getPath('temp'), bytes: info.installerUnpackedSize }])
+    }
 
     this.patch({
       phase: 'installing',
       percent: 100,
       installPercent: 100,
+      installTotal: info.installerUnpackedSize,
       message: '正在打开安装程序…'
     })
     // The installer takes its own snapshot immediately before writing.
@@ -945,24 +1499,24 @@ export class AppUpdateChecker {
     app.quit()
   }
 
-  /** Atomically rewrites the version pointer read by the shell loader. */
-  private async switchTo(version: string): Promise<void> {
-    const pointer = join(process.resourcesPath, 'app-version.txt')
-    await writeFileAtomic(pointer, version)
-    log(`appUpdate: version pointer -> ${version}`)
+  /** Keep every version mentioned by a running instance or recoverable transaction. */
+  cleanupOldVersions(): Promise<void> {
+    this.cleanupTask ??= this.removeUnusedVersions().finally(() => { this.cleanupTask = undefined })
+    return this.cleanupTask
   }
 
-  /** Deletes leftover `app-<other version>` directories (best effort). */
-  async cleanupOldVersions(): Promise<void> {
+  private async removeUnusedVersions(): Promise<void> {
     if (!app.isPackaged) return
-    const keep = `app-${currentAppVersion()}`
     try {
+      const keep = await protectedApplicationVersions()
       // Only directories: the version pointer (`app-version.txt`) also starts
       // with "app-" and must never be removed.
       const entries = await fs.readdir(process.resourcesPath, { withFileTypes: true })
       for (const entry of entries) {
         if (!entry.isDirectory() || !entry.name.startsWith('app-')) continue
-        if (entry.name === keep) continue
+        const version = entry.name.slice(4)
+        if (!SAFE_VERSION.test(version) || keep.has(version) ||
+            version === this.current() || version === this.pendingVersion) continue
         log(`appUpdate: removing old version directory ${entry.name}`)
         await fs
           .rm(join(process.resourcesPath, entry.name), { recursive: true, force: true })

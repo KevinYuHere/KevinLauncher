@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.node.json",
+  "include": ["tests/**/*.ts", "vitest.config.ts", "src/preload/*.d.ts"],
+  "compilerOptions": {
+    "allowJs": true,
+    "jsx": "react-jsx",
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "paths": {
+      "@renderer/*": ["src/renderer/src/*"],
+      "@shared/*": ["src/shared/*"]
+    }
+  }
+}

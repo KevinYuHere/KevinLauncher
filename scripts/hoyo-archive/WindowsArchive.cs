@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
+using Microsoft.Win32.SafeHandles;
 
 [assembly: DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
 
@@ -26,10 +27,46 @@ internal static class WindowsArchive
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_next_header(IntPtr a, out IntPtr entry);
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_extract(IntPtr a, IntPtr entry, int options);
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] private static extern IntPtr archive_entry_pathname_w(IntPtr entry);
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] private static extern long archive_entry_size(IntPtr entry);
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] private static extern IntPtr archive_entry_hardlink_w(IntPtr entry);
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] private static extern IntPtr archive_entry_symlink_w(IntPtr entry);
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] private static extern IntPtr archive_error_string(IntPtr a);
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_free(IntPtr a);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out FileIdentity result);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileIdentity
+    {
+        public uint Attributes, CreatedLow, CreatedHigh, AccessLow, AccessHigh, WriteLow, WriteHigh;
+        public uint Volume, SizeHigh, SizeLow, LinkCount, IdentityHigh, IdentityLow;
+    }
+
+    private static void PrepareOutputPath(string destination, string name)
+    {
+        string path = destination;
+        string[] parts = name.TrimEnd('/', '\\').Split(new char[] { '/', '\\' });
+        foreach (string part in parts)
+        {
+            if (part == ".") continue;
+            if (part.Length == 0 || part == ".." || part.EndsWith(" ") || part.EndsWith("."))
+                throw new InvalidDataException("Invalid game archive entry: " + name);
+            path = Path.Combine(path, part);
+            if ((File.Exists(path) || Directory.Exists(path)) &&
+                (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+                throw new InvalidDataException("Game archive output has a reparse point: " + name);
+        }
+        if (!File.Exists(path)) return;
+        FileAttributes attributes = File.GetAttributes(path);
+        if ((attributes & FileAttributes.ReadOnly) == 0) return;
+        using (FileStream file = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+        {
+            FileIdentity identity;
+            if (!GetFileInformationByHandle(file.SafeFileHandle, out identity) || identity.LinkCount > 1)
+                throw new IOException("Cannot update a read-only shared game file: " + name);
+        }
+        File.SetAttributes(path, attributes & ~FileAttributes.ReadOnly);
+    }
 
     private sealed class Volumes : IDisposable
     {
@@ -101,10 +138,14 @@ internal static class WindowsArchive
         if (result < 0) throw new InvalidDataException(Marshal.PtrToStringAnsi(archive_error_string(archive)) ?? "Archive error");
     }
 
-    private static void Extract(string[] paths, string destination, bool zipOnly)
+    private static long ReadArchive(string[] paths, string destination, bool zipOnly, bool measure)
     {
-        Directory.CreateDirectory(destination);
-        Directory.SetCurrentDirectory(destination);
+        if (!measure)
+        {
+            Directory.CreateDirectory(destination);
+            Directory.SetCurrentDirectory(destination);
+        }
+        long total = 0;
         using (var volumes = new Volumes(paths))
         {
             IntPtr a = archive_read_new();
@@ -128,6 +169,14 @@ internal static class WindowsArchive
                     if (String.IsNullOrEmpty(name) || name.Contains(":") || Path.IsPathRooted(name) ||
                         archive_entry_hardlink_w(entry) != IntPtr.Zero || archive_entry_symlink_w(entry) != IntPtr.Zero)
                         throw new InvalidDataException("Invalid game archive entry: " + name);
+                    if (measure)
+                    {
+                        long size = archive_entry_size(entry);
+                        if (size < 0) throw new InvalidDataException("Invalid archive entry size: " + name);
+                        total = checked(total + size);
+                        continue;
+                    }
+                    PrepareOutputPath(destination, name);
                     // Preserve modification times. Reject paths through symlinks, parent
                     // segments and absolute paths. Replace an old hardlink before writing.
                     const int options = 0x0004 | 0x0010 | 0x0100 | 0x0200 | 0x10000;
@@ -141,6 +190,7 @@ internal static class WindowsArchive
                 GC.KeepAlive(seek);
             }
         }
+        return total;
     }
 
     private static int Main(string[] args)
@@ -153,9 +203,13 @@ internal static class WindowsArchive
             var files = new List<string>();
             string line;
             while ((line = Console.ReadLine()) != null) files.Add(Path.GetFullPath(line));
-            Extract(files.ToArray(), Path.GetFullPath(args[1]), args[0] == "plugin");
+            bool measure = args[0] == "measure";
+            long bytes = ReadArchive(files.ToArray(), Path.GetFullPath(args[1]), args[0] == "plugin", measure);
+            if (measure) Console.WriteLine(bytes.ToString(System.Globalization.CultureInfo.InvariantCulture));
             return 0;
         }
+        catch (DllNotFoundException) { Console.Error.WriteLine("KL_ARCHIVE_UNAVAILABLE"); return 2; }
+        catch (EntryPointNotFoundException) { Console.Error.WriteLine("KL_ARCHIVE_UNAVAILABLE"); return 2; }
         catch (Exception error) { Console.Error.WriteLine(error.GetBaseException().Message); return 1; }
     }
 }

@@ -4,6 +4,12 @@
  * Pre-release suffixes are handled like SemVer: `1.2.5-beta.1 < 1.2.5`.
  */
 
+/** Strict SemVer accepted by release payloads (`1.2.3`, optional pre-release/build). */
+export function isSemVerVersion(value: unknown): value is string {
+  return typeof value === 'string' &&
+    /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.test(value)
+}
+
 function splitVersion(version: string): { core: number[]; pre: string | null } {
   // Ignore a leading `v`, build metadata, and split off the pre-release part.
   const cleaned = version.trim().replace(/^v/i, '').split('+')[0]

@@ -2,12 +2,28 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { promises as fs } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { backupDataDirectory } from '../src/main/services/dataBackup'
-import { recoverSettingsImport, restoreSettingsBackup } from '../src/main/services/settingsBackup'
+import { APPEARANCE_PRESET_FILE } from '../src/shared/appearancePreset'
+import { backupDataDirectory, requireBackup } from '../src/main/services/dataBackup'
+import {
+  recoverSettingsImport,
+  restoreSettingsBackup,
+  stageSettingsBackup
+} from '../src/main/services/settingsBackup'
 
 let root: string
 const oldConfig = '{"version":14,"apps":[{"id":"old","name":"Old"}]}'
 const newConfig = '{"version":14,"apps":[{"id":"new","name":"New"}]}'
+const presetFile = (name = '夜航') => JSON.stringify({
+  version: 1,
+  presets: [{
+    id: 'preset-1',
+    name,
+    createdAt: '2026-11-26T08:00:00.000Z',
+    updatedAt: '2026-11-26T08:00:00.000Z',
+    areas: {},
+    apps: {}
+  }]
+})
 const playtime = (id: string) => JSON.stringify({ sessions: [
   { appId: id, startUtc: '2026-01-01T00:00:00Z', endUtc: '2026-01-01T00:00:15Z', durationSec: 15 }
 ] })
@@ -42,6 +58,46 @@ describe('settings import', () => {
     expect(reload).not.toHaveBeenCalled()
     expect(await fs.readFile(join(live, 'config.json'), 'utf8')).toBe(oldConfig)
     expect(await fs.readFile(join(live, 'playtime.json'), 'utf8')).toBe(playtime('old'))
+  })
+
+  it('exports and imports appearance presets through the main-process normalizer', async () => {
+    const { live, extracted } = await fixture()
+    await write(join(live, APPEARANCE_PRESET_FILE), presetFile(' 当前 '))
+    const stage = join(root, 'stage')
+    await stageSettingsBackup(live, stage)
+    expect(JSON.parse(await fs.readFile(join(stage, APPEARANCE_PRESET_FILE), 'utf8')).presets).toHaveLength(1)
+
+    // Unknown fields are not trusted; the shared normalizer trims names and
+    // writes a canonical store instead of copying arbitrary JSON.
+    await write(join(extracted, APPEARANCE_PRESET_FILE), JSON.stringify({
+      version: 1,
+      ignored: true,
+      presets: [{
+        id: 'preset-2',
+        name: '  夜航  ',
+        createdAt: '2026-11-26T08:00:00.000Z',
+        updatedAt: '2026-11-26T08:00:00.000Z',
+        areas: {},
+        apps: {},
+        ignored: true
+      }]
+    }))
+    await restoreSettingsBackup(extracted, live, async () => {})
+    const stored = JSON.parse(await fs.readFile(join(live, APPEARANCE_PRESET_FILE), 'utf8'))
+    expect(stored.ignored).toBeUndefined()
+    expect(stored.presets).toHaveLength(1)
+    expect(stored.presets[0]).toMatchObject({ id: 'preset-2', name: '夜航', apps: {} })
+    expect(stored.presets[0].ignored).toBeUndefined()
+    expect(Object.values(stored.presets[0].areas).every((area) => area === 'default')).toBe(true)
+  })
+
+  it('rejects an invalid appearance-preset archive without replacing live data', async () => {
+    const { live, extracted } = await fixture()
+    const original = presetFile()
+    await write(join(live, APPEARANCE_PRESET_FILE), original)
+    await write(join(extracted, APPEARANCE_PRESET_FILE), '{"version":1,"presets":[{"bad":true}]}')
+    await expect(restoreSettingsBackup(extracted, live, async () => {})).rejects.toThrow(APPEARANCE_PRESET_FILE)
+    expect(await fs.readFile(join(live, APPEARANCE_PRESET_FILE), 'utf8')).toBe(original)
   })
 
   it('restores both stores on a failure publishing the second file', async () => {
@@ -86,9 +142,66 @@ describe('settings import', () => {
     expect(await fs.readFile(join(live, 'config.json'), 'utf8')).toBe(oldConfig)
     await expect(fs.access(join(live, 'auth.json'))).rejects.toMatchObject({ code: 'ENOENT' })
   })
+
+  it('removes persisted stores and media missing from a complete restore', async () => {
+    const { live, extracted } = await fixture()
+    await fs.rm(join(extracted, 'playtime.json'))
+    await write(join(extracted, 'config.json'), '{"version":14,"apps":[]}')
+    await write(join(live, 'auth.json'), '{}')
+    await write(join(live, 'gacha', 'old.json'), '{"records":[]}')
+    await write(join(live, 'bg', 'old.png'), 'old image')
+    await write(join(live, 'thumbs', 'other-data'), 'different ownership')
+    await restoreSettingsBackup(extracted, live, async () => {})
+    expect(JSON.parse(await fs.readFile(join(live, 'config.json'), 'utf8')).apps).toEqual([])
+    for (const file of ['playtime.json', 'auth.json', join('gacha', 'old.json'), join('bg', 'old.png')]) {
+      await expect(fs.access(join(live, file))).rejects.toMatchObject({ code: 'ENOENT' })
+    }
+    expect(await fs.readFile(join(live, 'thumbs', 'other-data'), 'utf8')).toBe('different ownership')
+  })
+
+  it.each(['missing.png', '../outside.png', 'CON.png'])('rejects unresolvable media %s before replacing any stores', async (file) => {
+    const { live, extracted } = await fixture()
+    await write(join(extracted, 'config.json'), JSON.stringify({
+      version: 14, apps: [{ id: 'new', name: 'New', iconFile: file }]
+    }))
+    await expect(restoreSettingsBackup(extracted, live, async () => {})).rejects.toThrow(/媒体|配置/)
+    expect(await fs.readFile(join(live, 'config.json'), 'utf8')).toBe(oldConfig)
+  })
 })
 
 describe('pre-update snapshot', () => {
+  it('distinguishes no data from incomplete data and refuses the latter before a commit', async () => {
+    const live = join(root, 'fresh')
+    await write(join(live, 'Cache', 'file'), 'derived')
+    const none = await backupDataDirectory(live, 'fresh install')
+    expect(none).toEqual({ status: 'not-needed', copied: 0, failed: 0 })
+    expect(() => requireBackup(none)).not.toThrow()
+    await write(join(live, 'playtime.json'), playtime('still-present'))
+    const incomplete = await backupDataDirectory(live, 'missing config')
+    expect(incomplete.status).toBe('failed')
+    expect(() => requireBackup(incomplete)).toThrow('无法备份用户数据')
+  })
+
+  it('includes appearance presets in the rotating pre-update snapshot', async () => {
+    const { live } = await fixture()
+    await write(join(live, APPEARANCE_PRESET_FILE), presetFile('快照'))
+    const result = await backupDataDirectory(live, 'preset backup')
+    expect(result).toEqual({ status: 'complete', copied: expect.any(Number), failed: 0 })
+    expect(await fs.readFile(join(live, 'update-backup', APPEARANCE_PRESET_FILE), 'utf8'))
+      .toBe(presetFile('快照'))
+  })
+
+  it('preserves the complete snapshot if configured media no longer exists', async () => {
+    const { live } = await fixture()
+    const old = join(live, 'update-backup', 'config.json')
+    await write(old, oldConfig)
+    await write(join(live, 'config.json'), JSON.stringify({
+      version: 14, apps: [{ id: 'new', name: 'New', iconFile: 'missing.png' }]
+    }))
+    const result = await backupDataDirectory(live, 'test')
+    expect(result.status).toBe('failed')
+    expect(await fs.readFile(old, 'utf8')).toBe(oldConfig)
+  })
   it('preserves the last complete snapshot when a data file fails to copy', async () => {
     const { live } = await fixture()
     const old = join(live, 'update-backup', 'config.json')

@@ -1,6 +1,8 @@
 const fs = require('node:fs')
 const path = require('node:path')
-const { prepareWindowsExecutable } = require('./windows-executable.js')
+const { createHash } = require('node:crypto')
+const { assertExecutionLevel, prepareWindowsExecutable } = require('./windows-executable.js')
+const windowsLayout = require('../src/shared/windowsLayout.json')
 
 /**
  * electron-builder afterPack hook.
@@ -10,7 +12,8 @@ const { prepareWindowsExecutable } = require('./windows-executable.js')
  *    recognise `resources/app/` as the application entry).
  * 2. Writes `resources/app-version.txt` — the pointer read by shell/loader.js.
  * 3. Validates that the versioned application directory shipped correctly
- *    (`resources/app-<version>/`, provided through `extraResources`).
+ *    (`resources/app-<version>/`, provided through `extraResources`), including
+ *    the archive/HUD native helpers and the standalone HUD document/preload.
  */
 module.exports = async function afterPack(context) {
   const projectDir = context.packager.info.projectDir
@@ -34,8 +37,67 @@ module.exports = async function afterPack(context) {
   if (!fs.existsSync(versionedEntry)) {
     throw new Error(`afterPack: 缺少应用目录 app-${version}（检查 extraResources 配置）`)
   }
-  const archiveTool = path.join(resources, `app-${version}`, 'out', 'native', 'KevinArchive.exe')
-  if (!fs.existsSync(archiveTool)) throw new Error(`缺少本项目的 Windows 解压工具 ${archiveTool}`)
+  const mainDirectory = path.dirname(versionedEntry)
+  const mainCode = fs.readdirSync(mainDirectory, { recursive: true })
+    .filter(file => file.endsWith('.js'))
+    .map(file => fs.readFileSync(path.join(mainDirectory, file), 'utf8'))
+    .join('\n')
+  const simulation = ['simulate-app-update.json', "'simulate.json'", '"simulate.json"', 'update:simulate']
+  if (simulation.some(marker => mainCode.includes(marker))) {
+    throw new Error('应用构建身份与安装程序配置不一致')
+  }
+  const versionedOut = path.join(resources, `app-${version}`, 'out')
+  const requiredPayload = [
+    ['Windows 解压工具', path.join(versionedOut, 'native', 'KevinArchive.exe')],
+    ['Windows HUD 辅助程序', path.join(versionedOut, 'native', 'KevinHud.exe')],
+    ['HUD 页面', path.join(versionedOut, 'renderer', 'hud.html')],
+    ['HUD 预加载脚本', path.join(versionedOut, 'preload', 'kevinHud.js')]
+  ]
+  for (const [label, file] of requiredPayload) {
+    const stat = fs.statSync(file, { throwIfNoEntry: false })
+    if (!stat?.isFile() || stat.size === 0) {
+      throw new Error(`afterPack: 缺少${label} ${file}（检查构建输出与 extraResources 配置）`)
+    }
+  }
+  console.log('afterPack: 已验证原生工具与 HUD 页面/预加载')
+  const nativeSources = []
+  if (context.electronPlatformName === 'win32') {
+    const name = `${context.packager.appInfo.productFilename}.exe`
+    const entryName = windowsLayout.entry
+    const runtimeName = windowsLayout.runtime
+    if (name !== entryName) throw new Error('Windows 入口文件名与构建身份不一致')
+    const entry = path.join(context.appOutDir, name)
+    const runtime = path.join(context.appOutDir, runtimeName)
+    const icon = path.join(projectDir, 'resources', 'icon.ico')
+    const { buildWindowsEntry, windowsEntrySourceFiles } = await import('./build-windows-entry.mjs')
+    fs.renameSync(entry, runtime)
+    prepareWindowsExecutable(runtime, icon, 'asInvoker')
+    buildWindowsEntry(entry)
+    assertExecutionLevel(entry, 'requireAdministrator')
+    assertExecutionLevel(runtime, 'asInvoker')
+    nativeSources.push(...windowsEntrySourceFiles,
+      path.join(projectDir, 'src/shared/windowsLayout.json'), path.join(__dirname, 'windows-executable.js'))
+  }
+  const { kevinHudHelperSourceFiles } = await import('./kevin-hud/build.mjs')
+  const fingerprint = createHash('sha256')
+  const hostFiles = [
+    ...['app/package.json', 'app/loader.js', 'app/out/main/index.js', 'hpatchz.exe', 'icon.ico', 'icon.png']
+      .map(file => path.join(resources, file)),
+    ...['scripts/hoyo-archive/WindowsArchive.cs', 'scripts/hoyo-archive/long-path.manifest',
+      'scripts/build-windows-archive.mjs', 'scripts/build-native-tools.mjs']
+      .map(file => path.join(projectDir, file)),
+    ...kevinHudHelperSourceFiles,
+    ...nativeSources
+  ]
+  for (const file of hostFiles) {
+    const content = fs.readFileSync(file)
+    fingerprint.update(String(content.length) + ':').update(content)
+  }
+  const protocols = JSON.parse(fs.readFileSync(path.join(projectDir, 'scripts/release-compatibility.json'), 'utf8'))
+  const compatibility = JSON.stringify({ ...protocols, hostSha256: fingerprint.digest('hex') })
+  fs.writeFileSync(path.join(resources, 'release-compatibility.json'), compatibility, 'utf8')
+  fs.writeFileSync(path.join(resources, `app-${version}`, 'release-compatibility.json'), compatibility, 'utf8')
+  fs.writeFileSync(path.join(resources, 'app-activation.json'), '{"schema":1}', 'utf8')
 
   // Release theme policy: the file only travels with **its own** version, so a
   // later build can never inherit (or re-apply) an older release's settings.
@@ -59,9 +121,4 @@ module.exports = async function afterPack(context) {
 
   fs.writeFileSync(path.join(resources, 'app-version.txt'), version, 'utf8')
   console.log(`afterPack: app-version.txt -> ${version}`)
-
-  if (context.electronPlatformName === 'win32') {
-    const exe = path.join(context.appOutDir, `${context.packager.appInfo.productFilename}.exe`)
-    prepareWindowsExecutable(exe, path.join(projectDir, 'resources', 'icon.ico'))
-  }
 }

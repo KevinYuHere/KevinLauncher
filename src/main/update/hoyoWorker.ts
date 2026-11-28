@@ -14,8 +14,10 @@ export interface SophonSetup {
   predownload: boolean
   hpatchz: string
   blacklist: string[]
+  work?: string
+  cacheTarget?: string
 }
-export type SophonCommand = { type: 'prepare'; setup: SophonSetup } | { type: 'update' | 'verify' | 'dispose' }
+export type SophonCommand = { type: 'prepare'; setup: SophonSetup } | { type: 'update' | 'verify' | 'park' | 'dispose' }
 type Reply = { type: 'done' } | { type: 'error'; message: string } | { type: 'progress'; done: number; total: number }
 
 export class HoYoWorkerStopped extends Error {

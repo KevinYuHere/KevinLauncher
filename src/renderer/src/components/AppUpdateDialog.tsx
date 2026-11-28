@@ -1,5 +1,6 @@
 import { useRef, useState, type ReactElement } from 'react'
 import { useOpenOrigin } from './useOpenOrigin'
+import { useDialogFocus } from './useDialogFocus'
 import type { AppUpdateInfo } from '@shared/types'
 
 interface AppUpdateDialogProps {
@@ -11,7 +12,7 @@ interface AppUpdateDialogProps {
 
 /**
  * Frosted "new version found" dialog: the title shows the version, the body the
- * release notes and the bottom-right offers 暂不更新 / 立即更新. Starting the
+ * release notes and the bottom-right offers 暂不更新 / 下载并更新. Starting the
  * download closes it and the rail ring takes over. Like the other modals it only
  * closes through its buttons.
  *
@@ -32,26 +33,35 @@ export default function AppUpdateDialog({
     setClosing(true)
     window.setTimeout(fn, 180)
   }
+  useDialogFocus(modalRef, true, critical ? undefined : () => run(onDismiss))
   return (
     <div className={`modal-mask${closing ? ' closing' : ''}`}>
       <div
         ref={modalRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${critical ? '重要更新' : '发现新版本'} ${info.version}`}
+        tabIndex={-1}
         className={`modal update-modal wallpaper-region${critical ? ' is-critical' : ''}${closing ? ' closing' : ''}`}
         onClick={(e) => e.stopPropagation()}
       >
         <span className="wp-region-layer" aria-hidden="true" />
         <div className="modal-header">
           <h2>
-            {critical ? '重要更新' : '检测到新版本'} {info.version}
+            {critical ? '重要更新' : '发现新版本'} {info.version}
           </h2>
         </div>
         <div className="modal-body">
-          {critical && (
+          {critical ? (
             <div className="update-critical-hint">
-              此版本为重要更新：检测到后会立即开始下载，完成前无法跳过或暂停。
+              此版本为重要更新。下载会自动开始，下载期间不能跳过或暂停。下载完成后会继续更新。直接在应用内更新时，启动器会自动重启。若弹出安装程序，请按提示完成安装，然后用「立即启动」打开启动器。
             </div>
+          ) : (
+            <p className="hint">
+              下载完成后会继续更新。直接在应用内更新时，启动器会自动重启。若弹出安装程序，请按提示完成安装，然后用「立即启动」打开启动器。
+            </p>
           )}
-          <div className="update-notes">{info.notes || '该版本没有提供更新说明。'}</div>
+          <div className="update-notes">{info.notes || '此版本没有提供更新说明。'}</div>
         </div>
         <div className="modal-footer">
           {!critical && (
@@ -60,7 +70,7 @@ export default function AppUpdateDialog({
             </button>
           )}
           <button className="btn primary" onClick={() => run(onStart)}>
-            {critical ? '立即开始' : '立即更新'}
+            {critical ? '开始下载' : '下载并更新'}
           </button>
         </div>
       </div>

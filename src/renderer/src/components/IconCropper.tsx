@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import { useOpenOrigin } from './useOpenOrigin'
+import { useDialogFocus } from './useDialogFocus'
 
 interface IconCropperProps {
   source: string
@@ -29,6 +30,7 @@ export default function IconCropper({
     setClosing(true)
     window.setTimeout(onCancel, 180)
   }
+  useDialogFocus(modalRef, true, requestCancel)
   const dragRef = useRef<{ x: number; y: number; ox: number; oy: number } | null>(null)
   const imgRef = useRef<HTMLImageElement>(null)
   const stageRef = useRef<HTMLDivElement>(null)
@@ -132,14 +134,18 @@ export default function IconCropper({
     <div className={`modal-mask${closing ? ' closing' : ''}`}>
       <div
         ref={modalRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="裁剪图标"
+        tabIndex={-1}
         className={`modal wallpaper-region${closing ? ' closing' : ''}`}
         style={{ width: 'min(460px, 92vw)' }}
         onClick={(e) => e.stopPropagation()}
       >
         <span className="wp-region-layer" aria-hidden="true" />
         <div className="modal-header">
-          <h2>框选图标（正方形）</h2>
-          <button className="modal-close" onClick={requestCancel}>
+          <h2>裁剪图标</h2>
+          <button className="modal-close" aria-label="关闭图标裁剪" onClick={requestCancel}>
             ✕
           </button>
         </div>
@@ -148,8 +154,17 @@ export default function IconCropper({
             ref={stageRef}
             className="crop-stage"
             style={{ width: STAGE, height: STAGE }}
+            tabIndex={0}
+            aria-label="裁剪区域：拖动图片或使用方向键移动位置，按住 Shift 可加速"
+            onKeyDown={(e) => {
+              const move = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[e.key]
+              if (!move) return
+              e.preventDefault()
+              const step = e.shiftKey ? 16 : 4
+              setOffset((prev) => clampOffset({ x: prev.x + move[0] * step, y: prev.y + move[1] * step }, dispW, dispH))
+            }}
             onMouseDown={(e) => {
-              if (dispW <= 0) return
+              if (dispW <= 0 || e.button !== 0) return
               dragRef.current = { x: e.clientX, y: e.clientY, ox: offset.x, oy: offset.y }
               e.preventDefault()
             }}
@@ -191,6 +206,7 @@ export default function IconCropper({
             <input
               className="slider"
               type="range"
+              aria-label="缩放"
               min={minZoom}
               max={MAX_ZOOM}
               step={0.01}
@@ -198,14 +214,14 @@ export default function IconCropper({
               onChange={(e) => setZoom(Number(e.target.value))}
             />
           </div>
-          <div className="crop-hint">拖动图片调整位置，滚轮或滑块缩放</div>
+          <div className="crop-hint">拖动图片或按方向键调整位置，滚轮、滑块可缩放</div>
         </div>
         <div className="modal-footer">
           <button className="btn" onClick={requestCancel}>
             取消
           </button>
           <button className="btn primary" onClick={confirm}>
-            确定
+            使用此图标
           </button>
         </div>
       </div>

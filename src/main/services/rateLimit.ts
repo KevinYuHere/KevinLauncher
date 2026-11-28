@@ -98,6 +98,9 @@ export function createDownloadWorker(path: string, data?: Record<string, unknown
 }
 
 const mainPort: MessagePort | undefined = workerData?.downloadRatePort
+export function closeDownloadWorkerRatePort(): void {
+  mainPort?.close()
+}
 const requests = new Map<number, () => void>()
 let requestId = 0
 if (mainPort) {

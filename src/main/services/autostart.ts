@@ -2,6 +2,8 @@ import { app } from 'electron'
 import { execFile } from 'child_process'
 import type { AutoStartMode } from '@shared/types'
 import { log } from './logger'
+import { launcherEntryPath, trialBuild } from './buildIdentity'
+import { psQuote, runPowerShell } from './powershell'
 
 /** Argument added when starting hidden (tray mode). */
 export const TRAY_START_ARG = '--tray'
@@ -11,10 +13,33 @@ export const AUTO_START_TASK = 'KevinLauncher'
 
 function runSchtasks(args: string[]): Promise<number> {
   return new Promise((resolve) => {
-    execFile('schtasks', args, { windowsHide: true }, (error) => {
+    execFile('schtasks', args, { windowsHide: true, timeout: 10000 }, (error) => {
       resolve(error ? ((error as { code?: number }).code ?? 1) : 0)
     })
   })
+}
+
+export interface AutoStartResult {
+  requested: AutoStartMode
+  mechanism: 'scheduled-task' | 'run-key' | 'disabled' | 'isolated'
+}
+
+let queue = Promise.resolve()
+
+async function removeScheduledTask(): Promise<void> {
+  if (await runSchtasks(['/Delete', '/F', '/TN', AUTO_START_TASK]) === 0) return
+  const tasks = await runPowerShell(
+    `Get-ScheduledTask -TaskPath '\\' -ErrorAction Stop | Where-Object TaskName -EQ ${psQuote(AUTO_START_TASK)} | Select-Object -ExpandProperty TaskName`,
+    { timeout: 10000 }
+  )
+  if (tasks.trim()) throw new Error('Windows 计划任务无法删除')
+}
+
+function updateRunKey(openAtLogin: boolean, path?: string, args?: string[]): void {
+  app.setLoginItemSettings({ openAtLogin, path, args })
+  if (app.getLoginItemSettings({ path, args }).openAtLogin !== openAtLogin) {
+    throw new Error('Windows 启动项状态未生效')
+  }
 }
 
 /**
@@ -25,17 +50,13 @@ function runSchtasks(args: string[]): Promise<number> {
  * UAC prompt at every logon, while the task starts it elevated silently.
  * (The task is therefore only writable while the launcher runs elevated.)
  */
-export async function applyAutoStart(mode: AutoStartMode, executable = process.execPath): Promise<void> {
-  if (!app.isPackaged) {
-    log(`autoStart: dev build, nothing applied (${mode})`)
-    return
-  }
-  try {
+export function applyAutoStart(mode: AutoStartMode, executable = launcherEntryPath()): Promise<AutoStartResult> {
+  const task = queue.then(async (): Promise<AutoStartResult> => {
+    if (trialBuild || !app.isPackaged) return { requested: mode, mechanism: 'isolated' }
     if (mode === 'off') {
-      await runSchtasks(['/Delete', '/F', '/TN', AUTO_START_TASK])
-      app.setLoginItemSettings({ openAtLogin: false })
-      log('autoStart: off')
-      return
+      await removeScheduledTask()
+      updateRunKey(false)
+      return { requested: mode, mechanism: 'disabled' }
     }
     // Always recreate: keeps the path correct after an update or a reinstall.
     const command =
@@ -54,34 +75,21 @@ export async function applyAutoStart(mode: AutoStartMode, executable = process.e
     ])
     if (code === 0) {
       // Make sure an older Run-key entry is not left behind.
-      app.setLoginItemSettings({ openAtLogin: false })
-      log(`autoStart: ${mode} (scheduled task)`)
-      return
+      updateRunKey(false)
+      return { requested: mode, mechanism: 'scheduled-task' }
     }
     // Fallback: the Run key (shows a UAC prompt at logon).
-    app.setLoginItemSettings({
-      openAtLogin: true,
-      path: executable,
-      args: mode === 'tray' ? [TRAY_START_ARG] : []
-    })
-    log(`autoStart: ${mode} (Run key fallback, schtasks exit ${code})`)
-  } catch (error) {
-    log(`autoStart: failed: ${(error as Error).message}`)
-  }
+    await removeScheduledTask()
+    updateRunKey(true, executable, mode === 'tray' ? [TRAY_START_ARG] : [])
+    return { requested: mode, mechanism: 'run-key' }
+  })
+  queue = task.then(({ requested, mechanism }) => {
+    log(`autoStart: ${requested} (${mechanism})`)
+  }, (error) => log(`autoStart: failed: ${String(error)}`))
+  return task
 }
 
 /** True when this process was started by the autostart entry in silent mode. */
 export function startedHidden(): boolean {
   return process.argv.includes(TRAY_START_ARG)
-}
-
-/** Removes both the scheduled task and the Run-key fallback (used by uninstall). */
-export async function removeAutoStartTask(): Promise<void> {
-  await runSchtasks(['/Delete', '/F', '/TN', AUTO_START_TASK])
-  try {
-    app.setLoginItemSettings({ openAtLogin: false })
-  } catch {
-    /* ignore */
-  }
-  log('autoStart: removed')
 }

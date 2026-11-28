@@ -43,6 +43,8 @@ export default function GamesRow({
               draggable={false}
               className={`game-chip${app.id === currentId ? ' active' : ''}${handle.dragging ? ' dragging' : ''}`}
               title={`${app.name}（拖动可排序）`}
+              aria-label={`${app.name}${app.id === currentId ? '（当前应用）' : ''}，拖动可排序`}
+              aria-current={app.id === currentId ? 'page' : undefined}
               onClick={() => onSelect(app.id)}
               onPointerDown={handle.onPointerDown}
             >

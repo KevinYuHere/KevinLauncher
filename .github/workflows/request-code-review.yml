@@ -1,0 +1,15 @@
+name: Removed PR review requester
+
+# This workflow is intentionally disabled. Review is performed locally before
+# changes reach main; the release gate only verifies main source and CI.
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  removed:
+    if: false
+    runs-on: ubuntu-latest
+    steps:
+      - run: exit 1

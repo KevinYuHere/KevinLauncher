@@ -1,0 +1,181 @@
+name: Windows Beta acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      beta_version:
+        description: Beta 版本号（x.y.z-beta.n；留空则沿用默认递增版本）
+        required: false
+        type: string
+      base_inventory:
+        description: 可选；基线应用文件清单（紧凑 JSON，低于 65K，用于生成精确版本差量包）
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  ci:
+    name: Exact main push CI
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require a successful exact main push CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo '::error::Windows Beta acceptance must run from a main commit.' >&2
+            exit 1
+          fi
+          runs="$(gh api "repos/$GH_REPO/actions/workflows/ci.yml/runs?event=push&branch=main&head_sha=$SOURCE_SHA&per_page=100")"
+          if ! jq -e --arg sha "$SOURCE_SHA" '
+              (.workflow_runs | type == "array") and
+              any(
+                .workflow_runs[];
+                .event == "push" and
+                .head_branch == "main" and
+                .head_sha == $sha and
+                .path == ".github/workflows/ci.yml" and
+                .status == "completed" and
+                .conclusion == "success"
+              )
+            ' <<<"$runs" >/dev/null; then
+            echo "::error::The exact main commit $SOURCE_SHA has no successful push CI yet; dispatch only after CI finishes." >&2
+            exit 1
+          fi
+          echo "Exact main push CI passed for $SOURCE_SHA."
+
+  installer:
+    name: Production Beta installer (${{ matrix.scenario }})
+    needs: ci
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [fresh, legacy-tray]
+    env:
+      npm_config_registry: https://registry.npmjs.org/
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+        env:
+          # Keep repository bytes on Windows; the host fingerprint must match the baseline inventory.
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - name: Restore the locked tools and Electron runtime
+        run: |
+          npm ci --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node node_modules/electron/install.js
+          exit $LASTEXITCODE
+      - name: Build the normal installer with a local Beta version
+        env:
+          BETA_VERSION: ${{ inputs.beta_version }}
+        run: |
+          $canonicalTemp = node -p "require('node:fs').realpathSync.native(require('node:os').tmpdir())"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:TEMP = $env:TMP = $canonicalTemp
+          $requestedVersion = "$env:BETA_VERSION".Trim()
+          if ($requestedVersion) {
+            $betaVersion = $requestedVersion
+          } else {
+            $betaVersion = node -p "const v=require('./package.json').version.split('.'); v[2]=String(BigInt(v[2])+1n); v.join('.')+'-beta.2'"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          npm run package:test -- --version "$betaVersion" --keep-unpacked --build-only
+          exit $LASTEXITCODE
+      - name: Build the standard Beta application payload and optional delta
+        if: matrix.scenario == 'fresh'
+        env:
+          BASE_INVENTORY: ${{ inputs.base_inventory }}
+        run: |
+          $batch = @(Get-ChildItem -LiteralPath . -Directory -Filter 'release-beta-*')
+          if ($batch.Count -ne 1) { throw 'Expected exactly one Beta build' }
+          $inventoryArgs = @()
+          $baseline = $null
+          if ($env:BASE_INVENTORY) {
+            $inventory = "$env:BASE_INVENTORY".Trim()
+            if ($inventory) {
+              if ([Text.Encoding]::UTF8.GetByteCount($inventory) -ge 65536) {
+                throw 'base_inventory must be compact JSON below 65 KB'
+              }
+              try { $baseline = $inventory | ConvertFrom-Json } catch { throw 'base_inventory must be valid JSON' }
+              $inventoryPath = Join-Path $env:RUNNER_TEMP ('kl-beta-base-' + [guid]::NewGuid().ToString('N') + '.json')
+              [System.IO.File]::WriteAllText($inventoryPath, $inventory, (New-Object System.Text.UTF8Encoding($false)))
+              $inventoryArgs = @($inventoryPath)
+            }
+          }
+          $batchPath = $batch[0].FullName
+          & node scripts/build-beta-update.mjs $batchPath @inventoryArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($baseline) {
+            $manifest = Get-Content -LiteralPath (Join-Path $batchPath 'update-manifest.json') -Raw | ConvertFrom-Json
+            $targetCompatibility = Join-Path $batchPath ('win-unpacked\resources\app-' + $manifest.version + '\release-compatibility.json')
+            $baselineCompatibility = @($baseline.files | Where-Object { $_.path -eq 'release-compatibility.json' })
+            if ($baselineCompatibility.Count -ne 1) {
+              throw 'base_inventory must contain exactly one release-compatibility.json entry'
+            }
+            $baselineCompatibility = $baselineCompatibility[0]
+            $actualCompatibility = Get-Item -LiteralPath $targetCompatibility
+            $actualHash = (Get-FileHash -LiteralPath $targetCompatibility -Algorithm SHA256).Hash.ToLowerInvariant()
+            $deltaText = if ($manifest.delta) { "$([long]$manifest.delta.size) bytes" } else { 'none' }
+            Write-Host ("baseline release-compatibility.json {0} bytes {1}; target {2} bytes {3}; payload {4} bytes; delta {5}" -f
+              [long]$baselineCompatibility.size, $baselineCompatibility.sha256, $actualCompatibility.Length, $actualHash,
+              [long]$manifest.payloadSize, $deltaText)
+            if ([long]$baselineCompatibility.size -ne [long]$actualCompatibility.Length -or
+                "$($baselineCompatibility.sha256)".ToLowerInvariant() -ne $actualHash) {
+              throw "base_inventory release-compatibility.json does not match app-$($manifest.version); refusing an incompatible baseline"
+            }
+          }
+      - name: Verify packaged parity and exercise the installer on disposable Windows
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+          KEVIN_BETA_SCENARIO: ${{ matrix.scenario }}
+        run: |
+          $batch = @(Get-ChildItem -LiteralPath . -Directory -Filter 'release-beta-*')
+          if ($batch.Count -ne 1) { throw 'Expected exactly one Beta build' }
+          node scripts/verify-beta-parity.mjs $batch[0].FullName
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # The v2.0.3 setup provides the legacy host for the verified v2.0.5 application payload.
+          node scripts/verify-windows-release.mjs $batch[0].FullName --beta-from-worktree v2.0.3 $env:KEVIN_BETA_SCENARIO
+          exit $LASTEXITCODE
+      - name: Freeze the verified fresh Beta release assets
+        if: success() && matrix.scenario == 'fresh'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-beta-release
+          if-no-files-found: error
+          path: |
+            release-beta-*/KevinLauncher-Installer-*.exe
+            release-beta-*/beta-verification.json
+            release-beta-*/KevinLauncher-*-app.zip
+            release-beta-*/update-manifest.json
+            release-beta-*/KevinLauncher-*-to-*-delta.json.gz
+      - name: Show recent Windows application errors for setup
+        if: failure()
+        run: |
+          $integrity = ((whoami.exe /groups /fo csv /nh) -join "`n") | Select-String -Pattern 'S-1-16-\d+' -AllMatches
+          $integrity.Matches.Value
+          $criteria = @{ LogName = 'Application'; Id = 1000; StartTime = (Get-Date).AddMinutes(-10) }
+          Get-WinEvent -FilterHashtable $criteria -ErrorAction SilentlyContinue |
+            Where-Object { $_.Properties.Count -ge 7 -and $_.Properties[0].Value -like 'KevinLauncher*.exe' } |
+            Select-Object -First 6 -Property TimeCreated, @{N='Executable';E={$_.Properties[0].Value}},
+              @{N='FileVersion';E={$_.Properties[1].Value}}, @{N='Module';E={$_.Properties[3].Value}},
+              @{N='Exception';E={$_.Properties[6].Value}} | Format-List

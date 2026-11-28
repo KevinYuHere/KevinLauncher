@@ -31,7 +31,8 @@ export default function IconPicker({
       <button
         className={`launcher-icon${src ? ' has-image' : ' empty'}`}
         onClick={onPick}
-        title="点击更换图标"
+        title={src ? '更换图标' : '选择图标'}
+        aria-label={src ? `更换${label}` : `选择${label}`}
       >
         {src ? <img src={src} alt="" /> : <Icon name="plus" size={28} />}
       </button>
@@ -40,7 +41,7 @@ export default function IconPicker({
         {desc && <div className="settings-desc">{desc}</div>}
         <div className="media-row" style={{ gap: 8, marginTop: 10 }}>
           <button className="btn sm primary" onClick={onPick}>
-            更换图标
+            {src ? '更换图标' : '选择图标'}
           </button>
           {onClear && (
             <button className="btn sm ghost" onClick={onClear}>

@@ -86,7 +86,7 @@ let baseUrl = ''
 let server: Server
 
 // mutable server state, reset per test
-let manifestZstd = Buffer.alloc(0)
+let manifestZstd: Buffer = Buffer.alloc(0)
 let chunkBodies = new Map<string, Buffer>()
 let chunkReqs = new Map<string, number>()
 let corruptOnce = new Set<string>()
@@ -175,7 +175,7 @@ afterEach(async () => {
 })
 
 async function tmpDir(): Promise<string> {
-  const dir = await fs.mkdtemp(join(tmpdir(), 'sophon-test-'))
+  const dir = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'sophon-test-')))
   temporaryDirs.add(dir)
   return dir
 }
@@ -298,8 +298,8 @@ describe.skipIf(!hasZstd)('downloadSophonBuild', () => {
     expect(chunkReqs.has('d2')).toBe(false)
     expect(chunkReqs.has('p1')).toBe(false)
     expect(chunkReqs.get('p2')).toBe(1)
-    // The cache is removed once the files are assembled.
-    await expect(fs.readdir(cache)).rejects.toBeTruthy()
+    // A cache without a recorded ownership entry survives assembly.
+    expect(await fs.readdir(cache)).toEqual(['p1'])
   })
 
   it('pre-download only fills the chunk cache (cacheOnly)', async () => {

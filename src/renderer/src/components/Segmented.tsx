@@ -49,7 +49,7 @@ export default function Segmented({
   const [thumb, setThumb] = useState<{ x: number; width: number } | null>(null)
   const [dragX, setDragX] = useState<number | null>(null)
   const [pressing, setPressing] = useState(false)
-  const drag = useRef<{ startX: number; baseX: number; moved: boolean } | null>(null)
+  const drag = useRef<{ pointerId: number; startX: number; baseX: number; moved: boolean } | null>(null)
   const base = variant === 'tab' ? 'tab' : 'seg'
 
   const measure = useCallback((): void => {
@@ -83,19 +83,19 @@ export default function Segmented({
   }
 
   const onPointerDown = (event: PointerEvent<HTMLDivElement>): void => {
-    if (options.length < 2) return
+    if (options.length < 2 || event.button !== 0 || drag.current) return
     try {
       event.currentTarget.setPointerCapture(event.pointerId)
     } catch {
       /* ignore (e.g. non-primary/synthetic pointers) */
     }
-    drag.current = { startX: event.clientX, baseX: thumb?.x ?? 0, moved: false }
+    drag.current = { pointerId: event.pointerId, startX: event.clientX, baseX: thumb?.x ?? 0, moved: false }
     setPressing(true)
   }
 
   const onPointerMove = (event: PointerEvent<HTMLDivElement>): void => {
     const state = drag.current
-    if (!state) return
+    if (state?.pointerId !== event.pointerId) return
     const delta = event.clientX - state.startX
     if (Math.abs(delta) > 4) state.moved = true
     const stops = stopsRef.current
@@ -104,17 +104,20 @@ export default function Segmented({
     const max = stops[stops.length - 1].x
     const x = Math.min(max, Math.max(min, state.baseX + delta))
     setDragX(x)
-    const pick = nearest(x)
-    if (pick && pick.value !== value) onChange(pick.value)
   }
 
-  const endDrag = (event: PointerEvent<HTMLDivElement>): void => {
+  const endDrag = (event: PointerEvent<HTMLDivElement>, commit: boolean): void => {
     const state = drag.current
+    if (state?.pointerId !== event.pointerId) return
     drag.current = null
     setDragX(null)
     setPressing(false)
-    if (!state) return
-    if (state.moved) return // a drag already selected the nearest option live
+    if (!commit) return
+    if (state.moved) {
+      const pick = nearest(state.baseX + event.clientX - state.startX)
+      if (pick && pick.value !== value) onChange(pick.value)
+      return
+    }
     // A plain click/tap: select the option under the pointer. The pointer is in
     // viewport coordinates, the stops in container coordinates → convert first.
     const rect = ref.current?.getBoundingClientRect()
@@ -135,8 +138,13 @@ export default function Segmented({
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
     const index = options.findIndex((option) => option.value === value)
     if (index < 0) return
-    if (event.key === 'ArrowRight') onChange(options[Math.min(options.length - 1, index + 1)].value)
-    else if (event.key === 'ArrowLeft') onChange(options[Math.max(0, index - 1)].value)
+    const next = event.key === 'ArrowRight' ? Math.min(options.length - 1, index + 1)
+      : event.key === 'ArrowLeft' ? Math.max(0, index - 1) : null
+    if (next !== null) {
+      event.preventDefault()
+      onChange(options[next].value)
+      ref.current?.querySelectorAll<HTMLButtonElement>('button')[next]?.focus()
+    }
   }
 
   const thumbX = dragX ?? thumb?.x ?? 0
@@ -148,10 +156,13 @@ export default function Segmented({
       ref={ref}
       className={(variant === 'tab' ? 'tabs' : 'segmented') + (pressing ? ' pressing' : '')}
       title={title}
+      role="group"
+      aria-label={title}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
-      onPointerUp={endDrag}
-      onPointerCancel={endDrag}
+      onPointerUp={(event) => endDrag(event, true)}
+      onPointerCancel={(event) => endDrag(event, false)}
+      onLostPointerCapture={(event) => endDrag(event, false)}
       onKeyDown={onKeyDown}
     >
       {thumb && <span ref={thumbRef} className={`${base}-thumb`} style={{ width: thumb.width }} />}
@@ -161,6 +172,7 @@ export default function Segmented({
           type="button"
           data-seg={option.value}
           data-active={option.value === value}
+          aria-pressed={option.value === value}
           className={`${base}${option.value === value ? ' active' : ''}`}
           // Pointer clicks are handled by the container's pointerup (pointer
           // capture retargets the click); this only serves keyboard activation.

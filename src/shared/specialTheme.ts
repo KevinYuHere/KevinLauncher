@@ -1,6 +1,7 @@
 import {
   LAUNCH_EFFECTS,
   MATERIAL_DEFAULTS,
+  type FeatureIntro,
   type GlassAppearance,
   type GlassMaterial,
   type LaunchEffect,
@@ -8,6 +9,7 @@ import {
   type SpecialThemeId,
   type ThemePolicy
 } from './types'
+import { isSemVerVersion } from './version'
 
 /**
  * Special-edition theme registry.
@@ -20,7 +22,7 @@ import {
  */
 
 /** Visual groups shown in the settings drawer, in display order. */
-export const SPECIAL_AREA_GROUPS = ['外壳', '导航', '首页', '更新', '组件', '图库'] as const
+export const SPECIAL_AREA_GROUPS = ['窗口与提示', '导航', '首页', '更新', '界面元素', '图库'] as const
 
 export type SpecialAreaGroup = (typeof SPECIAL_AREA_GROUPS)[number]
 
@@ -114,34 +116,34 @@ export const SPECIAL_THEMES: SpecialThemeDefinition[] = [
 
 /** Every UI surface that can pick a theme independently (order = settings order). */
 export const SPECIAL_AREAS: SpecialAreaDefinition[] = [
-  { id: 'titlebar', label: '标题栏 / 窗口按钮', group: '外壳', hint: '窗口顶部与最小化 / 关闭按钮', defaultTheme: 'default' },
-  { id: 'focusRing', label: '焦点环', group: '外壳', hint: '键盘聚焦时的描边', defaultTheme: 'default' },
-  { id: 'textAccent', label: '文字选中 / 链接', group: '外壳', hint: '选中文本与可点击链接', defaultTheme: 'default' },
-  { id: 'toast', label: 'Toast', group: '外壳', hint: '右下角的轻提示', defaultTheme: 'default' },
-  { id: 'transition', label: '过渡 / 启动画面', group: '外壳', hint: '页面切换与启动特效', defaultTheme: 'default' },
-  { id: 'sidebar', label: '侧边栏', group: '导航', hint: '左侧导航栏底色与材质', defaultTheme: 'default' },
-  { id: 'navSelected', label: '侧边栏选中项', group: '导航', hint: '当前页的强调块（主题为霆核）', defaultTheme: 'default' },
-  { id: 'updateIndicator', label: '设置入口 / 更新指示', group: '导航', hint: '侧边栏底部的更新图标', defaultTheme: 'default' },
-  { id: 'cards', label: '游戏卡片', group: '首页', hint: '主页信息卡与游戏图标卡', defaultTheme: 'default' },
-  { id: 'launchButton', label: '启动按钮', group: '首页', hint: '启动 / 更新主按钮与左侧霆核', defaultTheme: 'default' },
+  { id: 'titlebar', label: '标题栏 / 窗口按钮', group: '窗口与提示', hint: '窗口顶部、最小化与关闭按钮', defaultTheme: 'default' },
+  { id: 'focusRing', label: 'Tab 键定位框', group: '窗口与提示', hint: '按 Tab 键切换按钮或输入框时，当前项外显示的定位框', defaultTheme: 'default' },
+  { id: 'textAccent', label: '文字选中 / 链接', group: '窗口与提示', hint: '选中的文字与可点击的链接', defaultTheme: 'default' },
+  { id: 'toast', label: '浮动提示', group: '窗口与提示', hint: '右下角短暂出现、随后自动消失的提示条', defaultTheme: 'default' },
+  { id: 'transition', label: '页面过渡 / 启动画面', group: '窗口与提示', hint: '页面切换与启动时的动画', defaultTheme: 'default' },
+  { id: 'sidebar', label: '侧边栏', group: '导航', hint: '左侧导航栏的底色与材质', defaultTheme: 'default' },
+  { id: 'navSelected', label: '侧边栏当前页', group: '导航', hint: '侧边栏中表示当前所在页面的高亮标记', defaultTheme: 'default' },
+  { id: 'updateIndicator', label: '设置与更新图标', group: '导航', hint: '侧边栏底部、设置按钮上方的下载更新图标', defaultTheme: 'default' },
+  { id: 'cards', label: '游戏卡片', group: '首页', hint: '主页的信息卡与游戏图标卡', defaultTheme: 'default' },
+  { id: 'launchButton', label: '启动按钮', group: '首页', hint: '启动 / 更新主按钮及其左侧的圆形光点', defaultTheme: 'default' },
   { id: 'gamesBar', label: '游戏栏', group: '首页', hint: '顶部游戏图标条的展开与收起', defaultTheme: 'default' },
-  { id: 'avatars', label: '头像行', group: '首页', hint: '游戏栏右侧的关联启动条目', defaultTheme: 'default' },
-  { id: 'emptyState', label: '空状态', group: '首页', hint: '没有应用 / 没有截图等占位', defaultTheme: 'default' },
-  { id: 'updatePage', label: '更新页', group: '更新', hint: '游戏更新的整页视图', defaultTheme: 'default' },
-  { id: 'downloadOverlay', label: '下载浮层', group: '更新', hint: '悬停进度环时的详情气泡', defaultTheme: 'default' },
-  { id: 'downloadRing', label: '下载进度（霆核）', group: '更新', hint: '侧边栏更新进度环：盾段与轨道弧（启动按钮内的进度环保持默认）', defaultTheme: 'default' },
-  { id: 'dialogs', label: '弹窗', group: '组件', hint: '确认框、更新弹窗、查看器', defaultTheme: 'default' },
-  { id: 'forms', label: '表单', group: '组件', hint: '输入行、路径与设置表单', defaultTheme: 'default' },
-  { id: 'dropdowns', label: '下拉', group: '组件', hint: '选择器展开的菜单', defaultTheme: 'default' },
-  { id: 'drawer', label: '抽屉', group: '组件', hint: '启动方式抽屉', defaultTheme: 'default' },
-  { id: 'segmented', label: '多选一分段', group: '组件', hint: '分段选择器与滑动指示块', defaultTheme: 'default' },
-  { id: 'slider', label: '滑块', group: '组件', hint: '亮度 / 模糊等滑块', defaultTheme: 'default' },
-  { id: 'switch', label: '开关', group: '组件', hint: '自动主题等开关', defaultTheme: 'default' },
-  { id: 'tabs', label: '标签页', group: '组件', hint: '设置页顶部标签', defaultTheme: 'default' },
-  { id: 'inputs', label: '输入框', group: '组件', hint: '文本输入与内联编辑', defaultTheme: 'default' },
-  { id: 'clickEffect', label: '点击特效', group: '组件', hint: '点击时从指针处飞出的几何碎片', defaultTheme: 'default' },
-  { id: 'gallery', label: '图库', group: '图库', hint: '截图网格与查看器', defaultTheme: 'default' },
-  { id: 'skeleton', label: '骨架 / 加载', group: '图库', hint: '图片加载占位', defaultTheme: 'default' }
+  { id: 'avatars', label: '头像行', group: '首页', hint: '游戏栏右侧的关联启动项', defaultTheme: 'default' },
+  { id: 'emptyState', label: '无内容提示', group: '首页', hint: '没有应用、截图等占位画面', defaultTheme: 'default' },
+  { id: 'updatePage', label: '更新页', group: '更新', hint: '游戏更新的整页界面', defaultTheme: 'default' },
+  { id: 'downloadOverlay', label: '下载详情面板', group: '更新', hint: '鼠标停在进度环上时显示详细进度的小面板', defaultTheme: 'default' },
+  { id: 'downloadRing', label: '下载进度环', group: '更新', hint: '侧边栏更新图标的圆形进度环（启动按钮内的进度环不受影响）', defaultTheme: 'default' },
+  { id: 'dialogs', label: '弹窗', group: '界面元素', hint: '确认框、更新弹窗和图片查看器', defaultTheme: 'default' },
+  { id: 'forms', label: '表单', group: '界面元素', hint: '输入框、路径和设置表单', defaultTheme: 'default' },
+  { id: 'dropdowns', label: '下拉菜单', group: '界面元素', hint: '点开下拉按钮后出现的选项列表', defaultTheme: 'default' },
+  { id: 'drawer', label: '启动方式面板', group: '界面元素', hint: '从启动按钮展开的启动方式选择面板', defaultTheme: 'default' },
+  { id: 'segmented', label: '分段选择', group: '界面元素', hint: '一组并排的选项，点击或拖动高亮标记切换当前选项', defaultTheme: 'default' },
+  { id: 'slider', label: '滑块', group: '界面元素', hint: '亮度、模糊等滑块', defaultTheme: 'default' },
+  { id: 'switch', label: '开关', group: '界面元素', hint: '自动主题等开关', defaultTheme: 'default' },
+  { id: 'tabs', label: '标签页', group: '界面元素', hint: '设置页顶部的标签页', defaultTheme: 'default' },
+  { id: 'inputs', label: '输入框', group: '界面元素', hint: '文本输入与就地改名', defaultTheme: 'default' },
+  { id: 'clickEffect', label: '点击特效', group: '界面元素', hint: '点击时从鼠标位置散开的几何碎片', defaultTheme: 'default' },
+  { id: 'gallery', label: '图库', group: '图库', hint: '截图网格与全屏查看器', defaultTheme: 'default' },
+  { id: 'skeleton', label: '加载占位', group: '图库', hint: '图片加载完成前显示的占位块', defaultTheme: 'default' }
 ]
 
 const THEME_BY_ID = new Map(SPECIAL_THEMES.map((theme) => [theme.id, theme]))
@@ -250,13 +252,32 @@ export function applyThemePolicy(
 }
 
 /**
+ * Optional pieces carried by a newer release payload. Unlike the legacy
+ * `ThemePolicy`, every part is optional so a release can opt into only the
+ * theme areas, only the material, or only the launch effect.
+ */
+export interface ReleaseThemePolicy {
+  themeId?: SpecialThemeId
+  areas?: 'all' | SpecialAreaId[]
+  mode?: 'force' | 'default'
+  material?: GlassMaterial
+  launchEffect?: LaunchEffect
+}
+
+export interface ReleaseUpgradePolicy {
+  version: string
+  theme: ReleaseThemePolicy | null
+  intro: FeatureIntro | null
+}
+
+/**
  * Per-app part of a release policy: a forced glass material (with that
  * material's recommended parameters, exactly like switching it in the settings)
  * and a forced launch effect. A missing field leaves the user's choice alone.
  */
 export function applyAppThemePolicy<T extends AppThemePolicyTarget>(
   app: T,
-  policy: ThemePolicy
+  policy: Pick<ReleaseThemePolicy, 'material' | 'launchEffect'>
 ): { app: T; changed: boolean } {
   let next = app
   let changed = false
@@ -334,4 +355,78 @@ export function normalizeThemePolicy(raw: unknown): ThemePolicy | null {
     ...(launchEffect ? { launchEffect } : {}),
     ...(value.critical === true ? { critical: true } : {})
   }
+}
+
+/** Normalise the optional theme/material/effect part of a release payload. */
+export function normalizeReleaseThemePolicy(raw: unknown): ReleaseThemePolicy | null {
+  if (!raw || typeof raw !== 'object') return null
+  const value = raw as Record<string, unknown>
+  const themeId = isSpecialThemeId(value.themeId) ? value.themeId : undefined
+  const areas =
+    value.areas === 'all'
+      ? 'all'
+      : Array.isArray(value.areas)
+        ? value.areas.filter(isSpecialAreaId)
+        : undefined
+  const mode = value.mode === 'default' ? 'default' : 'force'
+  const materials = Object.keys(MATERIAL_DEFAULTS) as GlassMaterial[]
+  const material =
+    typeof value.material === 'string' && materials.includes(value.material as GlassMaterial)
+      ? (value.material as GlassMaterial)
+      : undefined
+  const launchEffect =
+    typeof value.launchEffect === 'string' &&
+    LAUNCH_EFFECTS.some((effect) => effect.id === value.launchEffect)
+      ? (value.launchEffect as LaunchEffect)
+      : undefined
+  const hasTheme = !!themeId &&
+    (areas === 'all' || (Array.isArray(areas) && areas.length > 0))
+  if (!hasTheme && !material && !launchEffect) return null
+  return {
+    ...(hasTheme ? { themeId, areas, mode } : {}),
+    ...(material ? { material } : {}),
+    ...(launchEffect ? { launchEffect } : {})
+  }
+}
+
+/** Normalise the introduction content; an absent/invalid block is simply off. */
+export function normalizeFeatureIntro(raw: unknown): FeatureIntro | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const value = raw as Record<string, unknown>
+  const text = (candidate: unknown): string | null =>
+    typeof candidate === 'string' && candidate.trim() ? candidate.trim() : null
+  const title = text(value.title)
+  if (!title) return null
+  const body = text(value.body)
+  const features = Array.isArray(value.features)
+    ? value.features.map(text).filter((line): line is string => !!line).slice(0, 8)
+    : []
+  // A title alone would render an empty dialog, so it is not a usable intro.
+  if (!body && features.length === 0) return null
+  const buttonLabel = text(value.buttonLabel)
+  return {
+    title: title.slice(0, 120),
+    body: body?.slice(0, 2000) ?? null,
+    features: features.map((line) => line.slice(0, 240)),
+    buttonLabel: buttonLabel?.slice(0, 24) ?? null
+  }
+}
+
+/**
+ * Normalise a version payload's combined one-time actions.
+ *
+ * The flat theme fields stay compatible with existing `theme-policy.json`
+ * files. `intro` is independent: a file may carry only the introduction, only
+ * a theme/material/effect patch, or both. A non-SemVer target is rejected so
+ * the policy can only apply to the exact installed release.
+ */
+export function normalizeReleaseUpgradePolicy(raw: unknown): ReleaseUpgradePolicy | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const value = raw as Record<string, unknown>
+  const version = typeof value.version === 'string' ? value.version.trim() : ''
+  if (!isSemVerVersion(version)) return null
+  const theme = normalizeReleaseThemePolicy(raw)
+  const intro = normalizeFeatureIntro(value.intro)
+  if (!theme && !intro) return null
+  return { version, theme, intro }
 }

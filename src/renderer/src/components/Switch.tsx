@@ -1,4 +1,4 @@
-import { useRef, useState, type KeyboardEvent, type PointerEvent, type ReactElement, type ReactNode } from 'react'
+import { useId, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactElement, type ReactNode } from 'react'
 import { useJelly } from '../drag/useJelly'
 
 /**
@@ -28,14 +28,13 @@ export default function Switch({
   const startX = useRef(0)
   const base = useRef(0)
   const moved = useRef(false)
-  // The latest offset, kept in a ref so the commit never reads a stale state.
-  const offsetRef = useRef(0)
-  // The state committed so far during this drag (for live switching).
-  const committed = useRef(false)
+  const pointerId = useRef<number | null>(null)
+  const labelId = useId()
   const knobRef = useRef<HTMLSpanElement>(null)
 
   const onPointerDown = (event: PointerEvent<HTMLSpanElement>): void => {
-    if (disabled) return
+    if (disabled || event.button !== 0 || pointerId.current !== null) return
+    pointerId.current = event.pointerId
     try {
       event.currentTarget.setPointerCapture(event.pointerId)
     } catch {
@@ -44,31 +43,24 @@ export default function Switch({
     startX.current = event.clientX
     base.current = checked ? TRAVEL : 0
     moved.current = false
-    committed.current = checked
-    offsetRef.current = base.current
     setDrag(base.current)
   }
 
   const onPointerMove = (event: PointerEvent<HTMLSpanElement>): void => {
-    if (drag === null) return
+    if (pointerId.current !== event.pointerId) return
     const delta = event.clientX - startX.current
     if (Math.abs(delta) > 3) moved.current = true
     const offset = Math.max(0, Math.min(TRAVEL, base.current + delta))
-    offsetRef.current = offset
     setDrag(offset)
-    // Switch live as soon as the knob crosses the midpoint — no release needed.
-    const next = offset >= TRAVEL / 2
-    if (moved.current && next !== committed.current) {
-      committed.current = next
-      onChange(next)
-    }
   }
 
-  const finish = (): void => {
-    if (drag === null) return
+  const finish = (event: PointerEvent<HTMLSpanElement>, commit: boolean): void => {
+    if (pointerId.current !== event.pointerId) return
+    pointerId.current = null
     setDrag(null)
-    // A tap toggles; a drag already committed live in onPointerMove.
-    if (!moved.current) onChange(!checked)
+    if (!commit || disabled) return
+    const next = moved.current ? base.current + event.clientX - startX.current >= TRAVEL / 2 : !checked
+    if (next !== checked) onChange(next)
   }
 
   const onKeyDown = (event: KeyboardEvent<HTMLSpanElement>): void => {
@@ -92,17 +84,20 @@ export default function Switch({
         role="switch"
         aria-checked={checked}
         aria-disabled={disabled}
+        aria-labelledby={label != null ? labelId : undefined}
+        aria-label={label == null ? title : undefined}
         tabIndex={disabled ? -1 : 0}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
-        onPointerUp={finish}
-        onPointerCancel={finish}
+        onPointerUp={(event) => finish(event, true)}
+        onPointerCancel={(event) => finish(event, false)}
+        onLostPointerCapture={(event) => finish(event, false)}
         onKeyDown={onKeyDown}
       >
         {/* transform (position + jelly pop) is driven by useJelly. */}
         <span ref={knobRef} className="switch-knob" />
       </span>
-      {label != null && <span>{label}</span>}
+      {label != null && <span id={labelId}>{label}</span>}
     </span>
   )
 }

@@ -1,5 +1,8 @@
-// Run with Electron after building. Uses only a hidden offscreen window, generated
-// images and a disposable profile; no launcher main process, UAC or system input.
+// Run with Electron after building. Hidden-only: one offscreen, non-focusable
+// window, generated images and a disposable profile. It opens no visible window,
+// starts no launcher main process, requests no UAC, injects no system input and
+// takes no host focus. CDP focus emulation marks only this document active so
+// focus-gated visuals still run.
 const { app, BrowserWindow, ipcMain, protocol } = require('electron')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -52,9 +55,12 @@ async function verify() {
   const settings = {themeAreas:{},themeLocks:{},sidebarMaterial:false,updateChannel:'stable',downloadLimitMbps:0}
   const answers = {
     'addons:list':[], 'ui:getPrefs':{},'apps:list':apps,'runtime:list':[], 'linked:list':[],
-    'playtime:totals':{},'launcher:getSettings':settings,'fonts:list':[],'app:version':'trial',
+    'playtime:totals':{},'launcher:getSettings':settings,'fonts:list':[],'app:version':'trial','app:ready':null,
+    // Hidden fixture: no visible main window, so the contract result is "no intro".
+    'app:upgradeFeatures':null,
     'wallpaper:desktop':null,'dataDir:get':{},'housekeeping:usage':{},'appUpdate:status':{},
-    'update:status':{phase:'idle'},'appUpdate:state':{phase:'idle'},'window:isMaximized':false
+    'update:status':{phase:'idle'},'appUpdate:state':{phase:'idle'},'window:isMaximized':false,
+    'window:activity':true
   }
   for (const [channel,value] of Object.entries(answers)) ipcMain.handle(channel,()=>value)
   ipcMain.handle('launcher:setBehavior',(event,patch)=>{
@@ -68,6 +74,13 @@ async function verify() {
   win.webContents.on('console-message',details => {
     if (details.level === 'error') console.error('renderer:',details.message)
   })
+  // The renderer pauses continuous visuals unless the document is visible and
+  // focused. The offscreen window is not focusable and is not reliably reported
+  // as active, so emulate focus/activity for this document only through CDP.
+  // This does not show the window or touch host focus; it follows navigations.
+  await win.loadURL('about:blank')
+  win.webContents.debugger.attach('1.3')
+  await win.webContents.debugger.sendCommand('Emulation.setFocusEmulationEnabled',{enabled:true})
   await win.loadFile(path.join(out,'renderer/index.html'))
   async function until(condition, label, timeout=20000) {
     const until = Date.now()+timeout
@@ -77,12 +90,58 @@ async function verify() {
     }
     throw new Error('Timed out: '+ label+' '+JSON.stringify(await run("({body:document.body.innerText.slice(0,240),perf:window.__klPerf?.slice(-8),imgs:[...document.images].map(i=>[i.className,i.naturalWidth])})")))
   }
+  await until('document.hasFocus() && !document.hidden','emulated active document')
   const active = "document.querySelector('img.bg-layer')"
   const ready = active+"?.complete && "+active+"?.naturalWidth > 0"
   await until(ready,'first wallpaper')
   const first = await run(active+'.src')
   const firstWidth = await run(active+'.naturalWidth')
   assert.ok(first.startsWith('blob:') && firstWidth <= 1200)
+
+  // Regression for the full-window grey flash: a page switch may animate the
+  // stage, but never `.app-anim` (whichever fixed rail/topbar and glass
+  // backdrop surfaces it contains) or a counter-animation on those layers.
+  await run(`(() => {
+    const watched = new Map([
+      [document.querySelector('.app-anim'), 'app-anim'],
+      [document.querySelector('.stage'), 'stage'],
+      [document.querySelector('.rail'), 'rail'],
+      [document.querySelector('.topbar'), 'topbar'],
+      [document.querySelector('.bg-layer'), 'wallpaper'],
+      [document.querySelector('.bg-scrim'), 'scrim']
+    ])
+    window.__klNavStarts = []
+    document.addEventListener('animationstart', event => {
+      const node = watched.get(event.target)
+      if (node && !event.pseudoElement) {
+        window.__klNavStarts.push({ node, animation: event.animationName })
+      }
+    })
+  })()`)
+  await run("document.querySelector('.rail-item[aria-label=设置]').click()")
+  await until("document.querySelector('.stage .page-title')?.textContent === '设置'", 'settings page')
+  await run("document.querySelector('.rail-item[aria-label=主页]').click()")
+  await until("!!document.querySelector('.stage .home')", 'home after page switch')
+  await until("window.__klNavStarts.some(entry => entry.node === 'stage')", 'default page slide')
+  await new Promise(r => setTimeout(r, 400))
+  const navStarts = await run('window.__klNavStarts')
+  assert.deepEqual(
+    [...new Set(navStarts.map(({ node, animation }) => node + ':' + animation))],
+    ['stage:appIn'],
+    'only the stage may animate during a page switch'
+  )
+  assert.deepEqual(
+    await run(`({
+      root: getComputedStyle(document.querySelector('.app-anim')).animationName,
+      stage: getComputedStyle(document.querySelector('.stage')).animationName,
+      rail: getComputedStyle(document.querySelector('.rail')).animationName,
+      topbar: getComputedStyle(document.querySelector('.topbar')).animationName,
+      wallpaper: getComputedStyle(document.querySelector('.bg-layer')).animationName,
+      scrim: getComputedStyle(document.querySelector('.bg-scrim')).animationName
+    })`),
+    { root: 'none', stage: 'appIn', rail: 'none', topbar: 'none', wallpaper: 'none', scrim: 'none' }
+  )
+
   const select = index => run("document.querySelectorAll('.game-chip')["+index+"].click()")
   const paint = { frames: 0, black: 0 }
   function inspectFrame(_event, _dirty, frame) {

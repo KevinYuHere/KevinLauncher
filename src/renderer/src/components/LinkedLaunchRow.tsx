@@ -84,7 +84,8 @@ export default function LinkedLaunchRow({
   if (items.length === 0) return null
 
   return (
-    <div className={`linked-row-wrap${visible ? '' : ' hidden'}`}>
+    <div className={`linked-row-wrap${visible ? '' : ' hidden'}`}
+      ref={(el) => { if (el) el.inert = !visible }}>
       <div
         className={`linked-viewport${scroll.left > 1 ? ' fade-left' : ''}${scroll.left < scroll.max - 1 ? ' fade-right' : ''}`}
         ref={viewportRef}
@@ -106,6 +107,7 @@ export default function LinkedLaunchRow({
                 draggable={false}
                 className={`linked-cap${running ? ' running' : ''}${handle.dragging ? ' dragging' : ''}`}
                 title={running ? `停止「${item.name}」` : `启动「${item.name}」`}
+                aria-label={running ? `停止「${item.name}」` : `启动「${item.name}」`}
                 onClick={(e) => (running ? onStop(item.id) : onLaunch(item.id, e.currentTarget))}
                 onPointerDown={handle.onPointerDown}
               >

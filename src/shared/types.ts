@@ -3,6 +3,10 @@
  * No UI / Node specific imports here on purpose.
  */
 
+import type { AppearancePresetApi } from './appearancePreset'
+import type { GameDiscoveryApi } from './gameDiscovery'
+import type { KevinHudConfig } from './kevinHud'
+
 export type AddonId = 'genshin' | 'starrail' | 'zzz' | 'arknights'
 
 /**
@@ -171,10 +175,10 @@ export const HOME_MODULES: {
   /** Whether the module may be hidden (the launch button may not). */
   hideable: boolean
 }[] = [
-  { id: 'info', name: '信息卡片', desc: '左下角的应用信息与总时长', hideable: true },
-  { id: 'playtime', name: '使用时长', desc: '右下角的使用时长药丸按钮', hideable: true },
+  { id: 'info', name: '信息卡片', desc: '左下角的应用信息与累计使用时长', hideable: true },
+  { id: 'playtime', name: '使用时长', desc: '右下角显示使用时长，点击可查看统计', hideable: true },
   { id: 'wallpaper', name: '壁纸', desc: '左上角的上一张 / 下一张壁纸按钮', hideable: true },
-  { id: 'linkedLaunch', name: '关联启动', desc: '一键拉起多个应用的快捷按钮', hideable: true },
+  { id: 'linkedLaunch', name: '关联启动', desc: '一次启动多个应用的快捷按钮', hideable: true },
   { id: 'launch', name: '启动按钮', desc: '启动 / 更新 / 停止按钮（不可隐藏）', hideable: false }
 ]
 
@@ -198,15 +202,15 @@ export type LaunchEffect =
 /** Registry of launch effects (label + description). */
 export const LAUNCH_EFFECTS: { id: LaunchEffect; label: string; desc: string }[] = [
   { id: 'none', label: '无', desc: '不播放启动特效' },
-  { id: 'shockwave', label: '折射激波', desc: '带色散的激波扫过整个窗口' },
-  { id: 'melt', label: '液态熔蚀', desc: '液态融化 + 方块故障' },
-  { id: 'glitch', label: '赛博故障', desc: '撕裂 / 方块 / RGB 故障' },
-  { id: 'gravity', label: '引力奇点', desc: '启动按钮的霆核膨胀，吞掉整页碎片' },
+  { id: 'shockwave', label: '折射激波', desc: '带彩色边缘的冲击波扫过整个窗口' },
+  { id: 'melt', label: '液态熔蚀', desc: '画面像液体一样融化，并出现方块错位' },
+  { id: 'glitch', label: '赛博故障', desc: '画面撕裂、方块错位，并带红绿蓝重影' },
+  { id: 'gravity', label: '引力奇点', desc: '启动按钮左侧的圆形光点向外膨胀，吞没整页碎片' },
   { id: 'shatter', label: '星屑碎裂', desc: '整页壁纸炸成三角碎片向外飞散' },
   {
     id: 'nova',
     label: '星轨坍缩',
-    desc: '十字星果冻状扩张到两倍，把整页与分子式吸入'
+    desc: '十字星像果冻一样放大到两倍，把整页画面和背景图案一起吸进去'
   }
 ]
 
@@ -346,6 +350,11 @@ export interface AppEntry {
   homeModules?: Partial<Record<HomeModuleId, HomeModuleState>>
   /** Full-screen launch transition played when this app starts. */
   launchEffect: LaunchEffect
+  /**
+   * Optional Kevin HUD overlay settings. Historical configs omit this field;
+   * the config store materializes `DEFAULT_KEVIN_HUD` when reading them.
+   */
+  kevinHud?: KevinHudConfig
   createdAt: string
   updatedAt: string
 }
@@ -374,18 +383,30 @@ export interface NewAppEntry {
   monitorProcessNames?: string[]
 }
 
+export const APP_SETTINGS_FIELDS = [
+  'name', 'addonId', 'gameDirectory', 'screenshotDirectory', 'monitorProcessNames', 'environmentVariables',
+  'kevinHud'
+] as const satisfies readonly (keyof AppEntry)[]
+export type AppSettingsPatch = Partial<Pick<AppEntry, (typeof APP_SETTINGS_FIELDS)[number]>>
+
 export interface LaunchResult {
   ok: boolean
   pid: number | null
   elevated: boolean
+  /** An indirect launch can be accepted before its actual program is observed. */
+  confirmation?: 'started' | 'requested'
   /** Optional informational note (e.g. auto-elevated). Not an error. */
   message?: string
+  /** Whether this launch also started a Kevin HUD session. */
+  kevinHudStarted?: boolean
   error?: string
 }
 
 export interface StopResult {
   ok: boolean
   killed: number
+  remaining?: number
+  error?: string
 }
 
 export interface RunningApp {
@@ -394,6 +415,9 @@ export interface RunningApp {
   elevated: boolean
   startedAt: string
   pids: number[]
+  confirmed?: boolean
+  elapsedSec?: number
+  activeSince?: string
 }
 
 export interface PlayTimeDay {
@@ -432,6 +456,14 @@ export interface GachaRecord {
   rankType: number
   /** Local time string `YYYY-MM-DD HH:MM:SS`. */
   time: string
+  /** Absolute timestamp supplied by the account history service, when known. */
+  timestampMs?: number
+  /** Original server offset and locale, where supplied by the source. */
+  timezone?: number
+  lang?: string
+  /** Game-native banner ID and optional changed-banner code from UIGF. */
+  gachaId?: string
+  uigfGachaType?: string
   isUp?: boolean
   seq?: string
   /** Pulls since the previous item of the same rarity in the same pool. */
@@ -441,6 +473,14 @@ export interface GachaRecord {
 export interface GachaPoolStat {
   /** Pool group id (banners that share pity). */
   group: string
+  game: GachaGame
+  uid: string
+  /** Both displayed pity counters are verifiable (kept as the compatible aggregate). */
+  pityKnown: boolean
+  /** The top-rarity pity counter is verifiable. */
+  topPityKnown: boolean
+  /** The second-rarity window is independently verifiable. */
+  secondPityKnown: boolean
   bannerName: string
   count: number
   topRank: number
@@ -462,6 +502,13 @@ export interface GachaStats {
   secondRank: number | null
   pools: GachaPoolStat[]
   lastUpdated: string | null
+}
+
+export interface GachaRecordPage {
+  records: GachaRecord[]
+  offset: number
+  limit: number
+  matched: number
 }
 
 export interface GachaUpdateResult {
@@ -506,6 +553,7 @@ export type UpdatePhase =
 
 export interface UpdateStatus {
   appId: string
+  taskId?: string
   phase: UpdatePhase
   progress: number
   downloadedBytes: number
@@ -521,6 +569,7 @@ export interface GalleryItem {
   path: string
   name: string
   mtimeMs: number
+  ctimeMs: number
   size: number
 }
 
@@ -571,9 +620,24 @@ export type SpecialAreaId =
   | 'gallery'
   | 'skeleton'
 
-/** 发布方可选的强制主题策略（见 `theme-policy.json`）。 */
+/**
+ * One-time in-app introduction shipped by a release payload
+ * (`theme-policy.json` → `intro`). Absent means production shows nothing.
+ */
+export interface FeatureIntro {
+  title: string
+  body: string | null
+  features: string[]
+  /** Label of the explicit close button; `null` uses the built-in text. */
+  buttonLabel: string | null
+}
+
+/**
+ * 发布方可选的强制主题策略（见 `theme-policy.json`）。
+ * 新载荷也可在同一文件带 `intro`，由 `normalizeReleaseUpgradePolicy` 解析。
+ */
 export interface ThemePolicy {
-  /** 策略版本；同一版本只应用一次（`appliedThemePolicyVersion`）。 */
+  /** 策略版本；同一版本只应用一次（`themePolicyVersion` / `themePolicyApplied`）。 */
   version: string
   themeId: SpecialThemeId
   areas: 'all' | SpecialAreaId[]
@@ -595,10 +659,32 @@ export interface ThemePolicy {
   critical?: boolean
 }
 
+/** Independent per-script launcher font families. `null` means the system default. */
+export interface LauncherFontSelection {
+  /** English/Latin text, digits and their punctuation. */
+  en: string | null
+  /** Chinese (CJK) text and full-width punctuation. */
+  zh: string | null
+}
+
+export type LauncherFontScript = keyof LauncherFontSelection
+
+/** Save one script without changing the other (absent keys are untouched). */
+export type LauncherFontPatch = Partial<LauncherFontSelection>
+
 /** Launcher-wide (global) appearance + behavior settings. */
 export interface LauncherSettings {
   iconFile: string | null
+  /**
+   * Legacy single launcher font. Kept readable so configs and backups written
+   * before per-script fonts still work; a missing `fontFamilyEn`/`fontFamilyZh`
+   * maps to this value in `resolveLauncherFonts`.
+   */
   fontFamily: string | null
+  /** Font family for English/Latin text and digits; `null` = system default. */
+  fontFamilyEn: string | null
+  /** Font family for Chinese text; `null` = system default. */
+  fontFamilyZh: string | null
   /** What the window's × button does. */
   closeAction: CloseAction
   /** What to do to the launcher window after a successful game launch. */
@@ -607,7 +693,7 @@ export interface LauncherSettings {
   autoStart: AutoStartMode
   /** 侧边栏是否应用当前应用的玻璃材质（否则用主题色）。 */
   sidebarMaterial: boolean
-  /** Follow stable releases or also pre-releases (测试版). */
+  /** 启动器自更新通道：正式版，或同时接收 Beta 的测试版。 */
   updateChannel: UpdateChannel
   /** Download speed limit in MB/s (0 = unlimited). */
   downloadLimitMbps: number
@@ -617,6 +703,35 @@ export interface LauncherSettings {
   themeLocks: Partial<Record<SpecialAreaId, SpecialThemeId>>
   /** 已经应用过的主题策略版本（同一版本不再覆盖用户选择）。 */
   themePolicyVersion: string | null
+  /** 所有已应用过的随包主题策略版本（保留历史，不随时间丢失）。 */
+  themePolicyApplied: string[]
+  /** 所有已经展示过一次的随包功能介绍版本。 */
+  featureIntroApplied: string[]
+}
+
+export const LAUNCHER_BEHAVIOR_FIELDS = [
+  'closeAction', 'afterLaunch', 'autoStart', 'sidebarMaterial', 'updateChannel', 'downloadLimitMbps',
+  'themeAreas'
+] as const satisfies readonly (keyof LauncherSettings)[]
+export type LauncherBehaviorPatch = Partial<Pick<LauncherSettings, (typeof LAUNCHER_BEHAVIOR_FIELDS)[number]>>
+
+/** Host interfaces that must match before switching only the versioned app. */
+export interface AppUpdateCompatibility {
+  shellProtocol: number
+  installProtocol: number
+  dataSchema: number
+  hostSha256: string
+}
+
+/** Optional smaller delta that can only patch one exact installed version. */
+export interface AppUpdateDelta {
+  /** Baseline version; no other installed version may apply this delta. */
+  fromVersion: string
+  /** Canonical release asset name. */
+  name: string
+  size: number
+  /** Hex SHA-256 of the delta asset. */
+  sha256: string
 }
 
 /** A newer release found on GitHub (self-update). */
@@ -638,14 +753,20 @@ export interface AppUpdateInfo {
   payloadSize: number
   /** Hex SHA-256 of the payload, from the release manifest. */
   payloadSha256: string | null
+  /** Optional transfer for exactly this installed version; the payload is the fallback. */
+  delta?: AppUpdateDelta
+  /** Download URLs of the delta, best first. */
+  deltaUrls?: string[]
   /** Total bytes of the unpacked application — denominator of install progress. */
   installSize: number
   /** Electron version the release was built with ('' when unknown). */
   electronVersion: string | null
+  compatibility?: AppUpdateCompatibility
   /** Full installer used when the runtime itself changed (URLs, best first). */
   installerUrls: string[]
   installerName: string | null
   installerSize: number
+  installerUnpackedSize?: number
   installerSha256: string | null
   publishedAt: string
 }
@@ -658,6 +779,8 @@ export interface AppUpdateStatus {
   info: AppUpdateInfo | null
   /** Set when the last check failed (network / rate limit / …). */
   error?: string
+  /** Update channel this result was computed for. */
+  channel?: UpdateChannel
 }
 
 /** Lifecycle of the in-app upgrade. */
@@ -682,6 +805,7 @@ export interface AppUpdateState {
   total: number
   bytesPerSecond: number
   installPercent: number
+  installTotal?: number
   message: string
   error?: string
   /** 当前下载是重要更新：不可暂停 / 跳过，失败会自动重试。 */
@@ -737,24 +861,37 @@ export interface UninstallerInfo {
   installSize: number
 }
 
-/** Disk usage of the caches the launcher can clean up. */
-export interface UsageReport {
-  /** Staged update downloads (`update-staging`). */
-  staging: number
-  /** Gallery thumbnail cache (`thumbs`). */
-  thumbs: number
-  /** Log files. */
-  logs: number
-  total: number
+export type DiskCacheKind = 'staging' | 'thumbs' | 'logs'
+export type CacheKind = DiskCacheKind | 'wallpaper'
+
+export interface DiskUsageReport {
+  staleStaging: number | null
+  retainedStaging: number | null
+  legacyThumbs: number | null
+  logs: number | null
+  gameCache: number | null
+  media: number | null
+  recovery: number | null
+}
+
+export interface UsageReport extends DiskUsageReport {
+  thumbnailMemory: number
+  wallpaperMemory: number
+  wallpaperDisk: number | null
+}
+
+export interface DiskCleanupReport {
+  diskBytes: number
+  failures: string[]
 }
 
 /** API exposed on `window.api` through the preload context bridge. */
-export interface KevinApi {
+export interface KevinApi extends AppearancePresetApi, GameDiscoveryApi {
   listAddons(): Promise<AddonDescriptor[]>
 
   listApps(): Promise<AppEntry[]>
   addApp(input: NewAppEntry): Promise<AppEntry>
-  updateApp(app: AppEntry): Promise<AppEntry>
+  updateApp(appId: string, patch: AppSettingsPatch): Promise<AppEntry>
   removeApp(id: string): Promise<void>
   /** Reorder applications by id; returns the new order. */
   reorderApps(ids: string[]): Promise<AppEntry[]>
@@ -775,27 +912,27 @@ export interface KevinApi {
   /** Installed font family names (for the launcher font picker). */
   listFonts(): Promise<string[]>
   appVersion(): Promise<string>
+  confirmAppReady(): Promise<void>
+  /** Called once the main window is actually visible; returns a pending introduction. */
+  consumeUpgradeFeatures(): Promise<FeatureIntro | null>
+  /** Acknowledge that the returned introduction has actually been displayed. */
+  completeUpgradeIntro(): Promise<boolean>
   /** Current Windows desktop wallpaper path (used when there are no apps). */
   desktopWallpaper(): Promise<string | null>
   getLauncherSettings(): Promise<LauncherSettings>
   setLauncherIcon(dataUrl: string | null): Promise<LauncherSettings>
+  /** Save the independent English/Chinese launcher font choices. */
+  setLauncherFonts(patch: LauncherFontPatch): Promise<LauncherSettings>
+  /** Legacy single-font entry point: applies one family to both scripts. */
   setLauncherFont(family: string | null): Promise<LauncherSettings>
-  setLauncherBehavior(patch: {
-    closeAction?: CloseAction
-    afterLaunch?: AfterLaunchAction
-    autoStart?: AutoStartMode
-    sidebarMaterial?: boolean
-    updateChannel?: UpdateChannel
-    downloadLimitMbps?: number
-    themeAreas?: LauncherSettings['themeAreas']
-  }): Promise<LauncherSettings>
+  setLauncherBehavior(patch: LauncherBehaviorPatch): Promise<LauncherSettings>
   /** 抽卡记录里是否显示次高品级（每个应用独立）。 */
   setGachaShowSecond(appId: string, value: boolean): Promise<AppEntry>
   hideToTray(): Promise<void>
   /** Export every setting (apps, playtime, gacha, icons, wallpapers) to a zip. */
   exportData(): Promise<string | null>
   /** Restore a previously exported zip (overwrites everything). */
-  importData(): Promise<{ apps: number } | null>
+  importData(): Promise<{ apps: number; warnings: string[] } | null>
   setThemeColor(appId: string, color: string | null): Promise<AppEntry>
   /** Update the app's glass appearance (colour / material / blur). */
   setGlass(appId: string, patch: GlassPatch): Promise<AppEntry>
@@ -805,6 +942,17 @@ export interface KevinApi {
   setHomeModule(appId: string, moduleId: HomeModuleId, patch: Partial<HomeModuleState>): Promise<AppEntry>
   /** Set the full-screen launch transition for an app. */
   setLaunchEffect(appId: string, effect: LaunchEffect): Promise<AppEntry>
+  /** Show a transient Kevin HUD preview using an unsaved configuration. */
+  kevinHudPreview(appId: string, config: KevinHudConfig): Promise<void>
+  /**
+   * Push a newer configuration to an already bound real/preview HUD in place.
+   * Never opens a HUD and is a no-op when that app has no live surface.
+   */
+  kevinHudUpdateLive(appId: string, config: KevinHudConfig): Promise<void>
+  /** Dismiss the currently open Kevin HUD preview, if any. */
+  kevinHudDismissPreview(): Promise<void>
+  /** Commit the pending HUD session for a successful launch. */
+  kevinHudCommitLaunch(runtimeKey: string, reducedMotion: boolean): Promise<boolean>
   /** Set the home information card's subtitle text ('' clears it). */
   setModuleLabel(appId: string, label: string | null): Promise<AppEntry>
   /** Ask for a directory and copy the launcher logs there; returns it (or null). */
@@ -846,7 +994,8 @@ export interface KevinApi {
   reorderLinkedLaunches(ids: string[]): Promise<LinkedLaunch[]>
   /** Set the linked launches associated with an app, in order, + the default. */
   setAppLinkedLaunches(appId: string, ids: string[], defaultId: string | null): Promise<AppEntry>
-  launchLinkedLaunch(id: string): Promise<LaunchResult>
+  /** Launch a linked launch; `ownerAppId` identifies the app that invoked it. */
+  launchLinkedLaunch(id: string, ownerAppId?: string): Promise<LaunchResult>
 
   launchApp(id: string, methodId?: string): Promise<LaunchResult>
   listRunning(): Promise<RunningApp[]>
@@ -855,22 +1004,21 @@ export interface KevinApi {
   playTimeTotals(): Promise<Record<string, number>>
   playTimeSummary(appId: string, days?: number): Promise<PlayTimeTotals>
 
-  gachaList(appId: string): Promise<GachaRecord[]>
   gachaStats(appId: string): Promise<GachaStats>
+  gachaPage(appId: string, group: string, showSecond: boolean, offset: number): Promise<GachaRecordPage>
   gachaClear(appId: string): Promise<void>
-  gachaUpdateMiHoYo(appId: string, url: string): Promise<GachaUpdateResult>
+  gachaUpdateMiHoYo(appId: string, url: string, mode?: 'incremental' | 'full'): Promise<GachaUpdateResult>
   /** Opens the Hypergryph login page and fetches records automatically. */
   gachaLoginArknights(appId: string): Promise<GachaUpdateResult>
   gachaScanUrl(appId: string): Promise<string | null>
-  gachaExport(appId: string): Promise<string | null>
-  gachaImport(appId: string): Promise<number>
+  gachaExport(appId: string): Promise<{ path: string; format: 'uigf' | 'native' } | null>
+  gachaImport(appId: string): Promise<number | null>
 
   updateInfo(appId: string): Promise<UpdateInfo>
   updateStart(appId: string, mode: UpdateMode): Promise<void>
   updateCancel(appId: string): Promise<void>
   updateStatus(appId: string): Promise<UpdateStatus>
   /** Preview the download UI with a fake progress run. */
-  updateSimulate(appId: string, mode: UpdateMode): Promise<void>
 
   galleryList(appId: string): Promise<GalleryItem[]>
   galleryOpenViewer(paths: string[], index: number): Promise<void>
@@ -906,7 +1054,7 @@ export interface KevinApi {
   installerNormalize(dir: string): Promise<string>
   installerRunning(): Promise<string[]>
   installerInspect(dir: string): Promise<InstallTarget>
-  installerFreeSpace(dir: string): Promise<number>
+  installerFreeSpace(dir: string): Promise<number | null>
   installerPickDirectory(current: string): Promise<string | null>
   /** Copies the payload into `dir`, writes shortcuts + the uninstall entry. */
   installerRun(dir: string, dataDir?: string): Promise<boolean>
@@ -928,9 +1076,9 @@ export interface KevinApi {
   onDataDirProgress(callback: (progress: { step: string }) => void): () => void
 
   /** --- disk housekeeping (settings → 清理与占用) --- */
-  housekeepingUsage(): Promise<UsageReport>
+  housekeepingUsage(): Promise<DiskUsageReport>
   /** Cleans the requested caches and returns the new usage. */
-  housekeepingClean(kinds: ('staging' | 'thumbs' | 'logs')[]): Promise<UsageReport>
+  housekeepingClean(kinds: DiskCacheKind[]): Promise<DiskCleanupReport>
 
   windowMinimize(): Promise<void>
   windowToggleMaximize(): Promise<boolean>
@@ -941,9 +1089,13 @@ export interface KevinApi {
   onRunningChanged(callback: () => void): () => void
   onPlayTimeChanged(callback: () => void): () => void
   onGachaProgress(callback: (progress: GachaProgress) => void): () => void
+  onGachaChanged(callback: (appId: string | null) => void): () => void
   onWindowMaximized(callback: (maximized: boolean) => void): () => void
   /** Fired whenever the main window becomes visible (startup / tray / re-open). */
   onWindowShown(callback: () => void): () => void
+  onShutdownFailed(callback: (message: string) => void): () => void
+  windowActivity(): Promise<boolean>
+  onWindowActivity(callback: (awake: boolean) => void): () => void
   onLauncherChanged(callback: () => void): () => void
   onUpdateProgress(callback: (status: UpdateStatus) => void): () => void
 }

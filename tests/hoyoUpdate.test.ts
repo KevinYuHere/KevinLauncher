@@ -9,6 +9,9 @@ import { GAME_BIZ, downloadMode, getGameConfig, getGameChannelSDK, getHoYoUpdate
 import { getSophonPlan } from '../src/main/update/sophonPlan'
 import { UpdateManager } from '../src/main/update/updateManager'
 import { hoyoPortBudget, withHoYoNetwork } from '../src/main/update/hoyoNetwork'
+import { moveCachedResources, preparePackageVerification } from '../src/main/update/hoyoPackages'
+import { gameWorkKey } from '../src/main/update/hoyoTemp'
+import { openSophonCacheOwnership } from '../src/main/update/sophonCacheOwnership'
 
 let userData: string
 vi.mock('electron', () => ({
@@ -35,6 +38,76 @@ afterEach(async () => {
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
   for (const action of clean.splice(0).reverse()) await action()
+})
+
+it('releases the parsed FILE manifest and reloads its own snapshot without network', async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), 'kl-file-park-'))
+  clean.push(() => fs.rm(root, { recursive: true, force: true }))
+  const dir = await fs.realpath(root)
+  const contents = JSON.stringify({ remoteName: 'file.bin', fileSize: 4, md5: md5(Buffer.from('data')) })
+  const fetch = vi.fn(async () => new Response(contents))
+  vi.stubGlobal('fetch', fetch)
+  const prefix = 'https://fixture.invalid/release'
+  const work = gameWorkKey('starrail', '1.0', '2.0', 'update')
+  const verification = await preparePackageVerification(dir, prefix, [], signal, work)
+  const before = await verification.load(signal)
+  expect(before).toMatchObject([{ name: 'file.bin', size: 4 }])
+  verification.park()
+  await fs.writeFile(join(dir, 'pkg_version'), 'a different live manifest')
+  const after = await verification.load(signal)
+  expect(after).toEqual(before)
+  expect(after).not.toBe(before)
+  expect(fetch).toHaveBeenCalledOnce()
+})
+
+it('does not move a cached asset through a redirected game subdirectory', async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), 'kl-hoyo-alias-'))
+  clean.push(() => fs.rm(root, { recursive: true, force: true }))
+  const dir = join(await fs.realpath(root), 'game')
+  const source = join(dir, 'cache')
+  const outside = join(await fs.realpath(root), 'outside')
+  await Promise.all([fs.mkdir(source, { recursive: true }), fs.mkdir(outside)])
+  await fs.writeFile(join(source, 'keep.bin'), 'cache data')
+  const redirected = join(dir, 'audio')
+  try {
+    await fs.symlink(outside, redirected, process.platform === 'win32' ? 'junction' : 'dir')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EPERM') throw error
+    const realpath = fs.realpath.bind(fs)
+    vi.spyOn(fs, 'realpath').mockImplementation(path => path === redirected ? Promise.resolve(outside) : realpath(path))
+  }
+  await expect(moveCachedResources(dir, { audioCacheDir: 'cache', audioResDir: 'audio' } as Parameters<typeof moveCachedResources>[1], signal))
+    .rejects.toThrow(/重解析点/)
+  expect(await fs.readFile(join(source, 'keep.bin'), 'utf8')).toBe('cache data')
+  expect(await fs.readdir(outside)).toEqual([])
+})
+
+it('retains shared cache files and replacements with a different file identity', async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), 'kl-cache-ownership-'))
+  clean.push(() => fs.rm(root, { recursive: true, force: true }))
+  const dir = await fs.realpath(root)
+  await fs.mkdir(join(dir, 'chunk'))
+  const shared = join(dir, 'chunk', 'shared'), changed = join(dir, 'chunk', 'replaced')
+  await Promise.all([fs.writeFile(shared, 'shared bytes'), fs.writeFile(changed, 'original bytes')])
+  const oldTarget = gameWorkKey('genshin', '1.0', '2.0', 'sophon-cache')
+  const newTarget = gameWorkKey('genshin', '1.0', '3.0', 'sophon-cache')
+  const original = await openSophonCacheOwnership(dir, oldTarget)
+  await original.record(shared, true)
+  await original.record(changed, true)
+  await original.save()
+  const second = await openSophonCacheOwnership(dir, newTarget)
+  await second.record(shared, false)
+  await second.save()
+  await fs.rename(changed, changed + '.old')
+  await fs.writeFile(changed, 'new file at the same path')
+  const cleanup = await openSophonCacheOwnership(dir, oldTarget)
+  await cleanup.release()
+  await cleanup.save()
+  expect(await fs.readFile(shared, 'utf8')).toBe('shared bytes')
+  expect(await fs.readFile(changed, 'utf8')).toBe('new file at the same path')
+  const nextCleanup = await openSophonCacheOwnership(dir, newTarget)
+  await nextCleanup.release()
+  await expect(fs.stat(shared)).rejects.toMatchObject({ code: 'ENOENT' })
 })
 
 describe('Starward 0.19.0 update preparation', () => {
@@ -76,8 +149,10 @@ describe('Starward 0.19.0 update preparation', () => {
   })
 })
 
-it.each(['ok', 'current', 'bad-sdk', 'resume-sdk', 'repair-corrupt', 'repair-failed'] as const)('keeps compressed predownload and component completion consistent (%s)', async scenario => {
-  const root = await fs.mkdtemp(join(tmpdir(), 'kl-hoyo-'))
+// The install stage runs KevinArchive.exe, including WPF and the channel SDK.
+// Real archives and helper processes can exceed 15 s under Windows CI load.
+it.skipIf(process.platform !== 'win32').each(['ok', 'current', 'bad-sdk', 'resume-sdk', 'repair-corrupt', 'repair-failed', 'archive-corrupt'] as const)('keeps compressed predownload and component completion consistent (%s)', async scenario => {
+  const root = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'kl-hoyo-')))
   clean.push(() => fs.rm(root, { recursive: true, force: true }))
   userData = join(root, 'user-data')
   const dir = join(root, 'game'), src = join(root, 'archives')
@@ -100,12 +175,18 @@ it.each(['ok', 'current', 'bad-sdk', 'resume-sdk', 'repair-corrupt', 'repair-fai
     await fs.mkdir(join(dir, 'nested'))
     await fs.writeFile(filter, 'persistent')
     if (process.platform === 'win32') execFileSync('attrib.exe', ['+R', '+H', '+S', filter], { windowsHide: true })
+    await fs.writeFile(join(dir, 'unrelated.tmp'), 'keep this file')
+    await fs.writeFile(join(dir, 'nested', 'unrelated_tmp'), 'keep this file too')
     execFileSync('tar', ['-acf', join(src, 'game.bin.zip'), '-C', src, 'game.bin', 'hdifffiles.txt', 'hdiffmap.json', 'base.hdiff', 'lost.hdiff', 'map.diff'], { windowsHide: true })
     bodies.set('game.bin.zip', await fs.readFile(join(src, 'game.bin.zip')))
   }
   const gameBytes = Buffer.from('updated'), sdkBytes = Buffer.from('sdk')
   if (scenario === 'repair-corrupt') bodies.set('game.bin', gameBytes)
-  bodies.set('pkg_version', Buffer.from(JSON.stringify({ remoteName: 'game.bin', fileSize: gameBytes.length, md5: md5(gameBytes) })))
+  const expectedFiles = [{ remoteName: 'game.bin', fileSize: gameBytes.length, md5: md5(gameBytes) }]
+  if (scenario === 'ok') {
+    for (const name of ['base', 'new']) expectedFiles.push({ remoteName: name, fileSize: 7, md5: md5(Buffer.from('changed')) })
+  }
+  bodies.set('pkg_version', Buffer.from(expectedFiles.map(file => JSON.stringify(file)).join('\n')))
   if (scenario === 'current') {
     await fs.writeFile(join(dir, 'sdk.bin'), sdkBytes)
     await fs.writeFile(join(dir, 'sdk_version_list'), JSON.stringify({ remoteName: 'sdk.bin', fileSize: '3', md5: md5(sdkBytes) }))
@@ -164,6 +245,10 @@ it.each(['ok', 'current', 'bad-sdk', 'resume-sdk', 'repair-corrupt', 'repair-fai
   expect((await getHoYoUpdateInfo('starrail', dir)).preDownloadFinished).toBe(true)
   expect(requests).toEqual(['game.bin.zip'])
   expect(calls).not.toContain('getWPFPackages')
+  if (scenario === 'archive-corrupt') {
+    const archive = join(dir, 'game.bin.zip')
+    await fs.writeFile(archive, Buffer.alloc((await fs.stat(archive)).size, 1))
+  }
   promoted = true
   const now = Date.now
   vi.spyOn(Date, 'now').mockImplementation(() => now() + 6 * 60_000)
@@ -201,28 +286,78 @@ it.each(['ok', 'current', 'bad-sdk', 'resume-sdk', 'repair-corrupt', 'repair-fai
       expect(await fs.readFile(join(dir, 'wpf.bin'), 'utf8')).toBe('wpf')
       for (const name of ['base', 'new']) expect(await fs.readFile(join(dir, name), 'utf8')).toBe('changed')
       const names = await fs.readdir(dir)
+      expect(await fs.readFile(join(dir, 'unrelated.tmp'), 'utf8')).toBe('keep this file')
+      expect(await fs.readFile(join(dir, 'nested', 'unrelated_tmp'), 'utf8')).toBe('keep this file too')
       for (const name of ['old', 'base.hdiff', 'lost.hdiff', 'map.diff', 'hdifffiles.txt', 'hdiffmap.json']) expect(names).not.toContain(name)
       if (process.platform === 'win32') {
         const flags = execFileSync('attrib.exe', [join(dir, 'nested', 'flags.bin')], { encoding: 'utf8', windowsHide: true })
-        expect(flags.split(dir)[0].trim()).toBe('')
+        expect(flags.split(dir)[0]).toMatch(/R/)
+        expect(flags.split(dir)[0]).toMatch(/H/)
+        expect(flags.split(dir)[0]).toMatch(/S/)
+        execFileSync('attrib.exe', ['-R', '-H', '-S', join(dir, 'nested', 'flags.bin')], { windowsHide: true })
       }
     }
   }
   const expectedRequests = ['game.bin.zip', 'pkg_version']
+  if (scenario === 'archive-corrupt') expectedRequests.push('game.bin.zip')
   if (repair) expectedRequests.push(...Array(scenario === 'repair-failed' ? 3 : 1).fill('game.bin'))
   if (scenario !== 'current' && scenario !== 'repair-failed') expectedRequests.push('wpf.bin.zip', 'sdk.bin.zip')
   if (scenario === 'resume-sdk') expectedRequests.push('sdk.bin.zip', 'sdk.bin.zip', 'sdk.bin.zip')
   expect(requests).toEqual(expectedRequests)
-}, 15_000)
+}, 30_000)
+
+it('rejects a known wrong game, wrong region or channel before contacting HoYoPlay', async () => {
+  const dir = await fs.mkdtemp(join(tmpdir(), 'kl-hoyo-preflight-'))
+  clean.push(() => fs.rm(dir, { recursive: true, force: true }))
+  const fetch = vi.fn()
+  vi.stubGlobal('fetch', fetch)
+  for (const extra of ['game_biz=hk4e_cn', 'game_biz=hkrpg_global', 'channel=14']) {
+    await fs.writeFile(join(dir, 'config.ini'), 'game_version=1.2.3\n' + extra)
+    const info = await getHoYoUpdateInfo('starrail', dir)
+    expect(info.supported).toBe(false)
+  }
+  expect(fetch).not.toHaveBeenCalled()
+})
+
+it('keeps the original Sophon file when an applied patch fails target validation', async () => {
+  const { runSophonPatch } = await import('../src/main/update/sophonPatch')
+  const dir = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'kl-ldiff-bad-output-')))
+  clean.push(() => fs.rm(dir, { recursive: true, force: true }))
+  const source = Buffer.from('old')
+  const blob = Buffer.concat([Buffer.from('HDIFF13&\0'), Buffer.from([7, 3, 0, 0, 0, 1, 0, 0, 0, 7, 0, 6]), Buffer.from('changed')])
+  await fs.mkdir(join(dir, 'ldiff'))
+  await fs.writeFile(join(dir, 'base.bin'), source)
+  await fs.writeFile(join(dir, 'ldiff', 'blob'), blob)
+  const category = {
+    categoryId: 'game', matchingField: 'game', manifestId: 'safe', manifestUrlPrefix: '',
+    manifestCompression: 0, manifestSuffix: '', diffUrlPrefix: '', diffCompression: 0, diffSuffix: '', versions: {}
+  }
+  const chunk = {
+    patchName: 'blob', patchFileSize: blob.length, patchFileMd5: md5(blob), patchOffset: 0, patchLength: blob.length,
+    originalFileName: 'base.bin', originalFileLength: source.length, originalFileMd5: md5(source)
+  }
+  const asset = { assetName: 'target.bin', size: 7, md5: md5(Buffer.from('valid!!')), infos: [] }
+  const native = process.platform === 'win32'
+  const patcher = native ? join(process.cwd(), 'resources', 'hpatchz.exe') : join(dir, 'patch-fixture')
+  if (!native) {
+    await fs.writeFile(patcher, '#!/bin/sh\nprintf changed > "$4"\nprintf ran > "$2.fixture"\n', { mode: 0o700 })
+  }
+  await runSophonPatch({ patchId: 'patch', tag: '2.0', categories: [category] }, '1.0', dir, false,
+    patcher, [], () => {}, signal, undefined,
+    { tasks: [{ category, chunk, asset, mode: 0 }], deletes: [] })
+  if (!native) expect(await fs.readFile(join(dir, 'base.bin.fixture'), 'utf8')).toBe('ran')
+  expect(await fs.readFile(join(dir, 'base.bin'), 'utf8')).toBe('old')
+  await expect(fs.access(join(dir, 'target.bin'))).rejects.toMatchObject({ code: 'ENOENT' })
+})
 
 
 it.each(['cached', 'range', 'resume'])('applies a real patch manifest using %s', async mode => {
   const { runSophonPatch } = await import('../src/main/update/sophonPatch')
-  const dir = await fs.mkdtemp(join(tmpdir(), 'kl-hoyo-patch-'))
+  const dir = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'kl-hoyo-patch-')))
   clean.push(() => fs.rm(dir, { recursive: true, force: true }))
   const bytes = Buffer.from('live'), blob = Buffer.from('00live00')
   function uint(value: number): Buffer {
-    const out = []
+    const out: number[] = []
     while (value > 127) { out.push((value & 127) | 128); value >>>= 7 }
     return Buffer.from([...out, value])
   }

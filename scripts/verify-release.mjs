@@ -1,137 +1,146 @@
-import { promises as fs, createReadStream, createWriteStream } from 'node:fs'
-import { createHash } from 'node:crypto'
+import { createWriteStream, createReadStream } from 'node:fs'
+import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
+import { setTimeout as delay } from 'node:timers/promises'
+import { pathToFileURL } from 'node:url'
+import { matchesUpdateTransfer, parseUpdateManifest, payloadAssetName, STABLE_VERSION } from '../src/main/services/appUpdateManifest.ts'
+import { identifyFile } from './release-assets.mjs'
 
-/**
- * Smoke test for a published release: reads the release manifest, downloads the
- * update payload exactly like the launcher does (8 parallel HTTP Range
- * connections, no retries so failures are visible) and verifies the size and
- * SHA-256 that the app would check.
- *
- * Usage: node scripts/verify-release.mjs [tag]     (default: latest)
- */
+const repo = 'KevinYuHere/KevinLauncher'
+const parallel = 8
 
-const REPO = 'KevinYuHere/KevinLauncher'
-const PARALLEL = 8
-const tag = process.argv[2] ?? 'latest'
-const api =
-  `https://api.github.com/repos/${REPO}/releases/` +
-  (tag === 'latest' ? 'latest' : `tags/${tag}`)
-
-const headers = { 'user-agent': 'KevinLauncher', accept: 'application/vnd.github+json' }
-const release = await (await fetch(api, { headers })).json()
-if (!release.assets) throw new Error(`release ${tag} not found: ${release.message ?? ''}`)
-console.log(`release ${release.tag_name} (${release.assets.length} assets)`)
-
-const pick = (re) => release.assets.find((item) => re.test(item.name))
-const zip = pick(/^KevinLauncher-.*\.zip$/)
-const manifestAsset = pick(/^update-manifest\.json$/)
-if (!zip || !manifestAsset) throw new Error('payload or manifest asset missing')
-
-// The app prefers the API asset endpoint (reachable where github.com is not).
-const assetUrl = (asset) => `https://api.github.com/repos/${REPO}/releases/assets/${asset.id}`
-const download = (asset, extra = {}) =>
-  fetch(assetUrl(asset), {
-    headers: { accept: 'application/octet-stream', 'user-agent': 'KevinLauncher', ...extra },
-    // Never let a stalled connection hang the test (same as the launcher).
-    signal: AbortSignal.timeout(45_000)
-  })
-
-const manifest = JSON.parse(await (await download(manifestAsset)).text())
-console.log(
-  `manifest  version=${manifest.version} appSize=${manifest.appSize} critical=${manifest.critical === true} ` +
-    `sha256=${String(manifest.payloadSha256).slice(0, 16)}…`
-)
-console.log(`payload   ${zip.name} ${(zip.size / 1048576).toFixed(1)} MB`)
-
-const dir = await fs.mkdtemp(join(tmpdir(), 'verify-release-'))
-const parts = []
-const chunk = Math.ceil(zip.size / PARALLEL)
-const started = Date.now()
-let transferred = 0
-const ATTEMPTS = 8
-
-await Promise.all(
-  Array.from({ length: PARALLEL }, async (_, index) => {
-    const start = index * chunk
-    const end = Math.min(zip.size, start + chunk)
-    if (start >= end) return
-    const part = join(dir, `part${index}`)
-    parts.push({ index, path: part, start })
-    // Same resume-with-Range behaviour as the launcher.
-    for (let attempt = 0; ; attempt++) {
-      try {
-        let have = 0
-        try {
-          have = (await fs.stat(part)).size
-        } catch {
-          /* nothing yet */
-        }
-        if (have < end - start) {
-          const response = await download(zip, { Range: `bytes=${start + have}-${end - 1}` })
-          if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`)
-          const handle = await fs.open(part, 'a')
-          try {
-            const reader = response.body.getReader()
-            for (;;) {
-              const { done, value } = await reader.read()
-              if (done) break
-              await handle.write(value)
-              transferred += value.length
-            }
-          } finally {
-            await handle.close()
-          }
-        }
-        if ((await fs.stat(part)).size !== end - start) throw new Error('short read')
-        return
-      } catch (error) {
-        if (attempt >= ATTEMPTS - 1) throw error
-        process.stdout.write(
-          `  range ${start} retry ${attempt + 1} after "${error.message}"\n`
-        )
-        await new Promise((r) => setTimeout(r, 700 * (attempt + 1)))
-      }
+/** @param {string} url @param {Record<string, string>} [headers] @param {AbortSignal} [signal] */
+async function download(url, headers = {}, signal, { attempts = 1, request = fetch } = {}) {
+  const token = process.env.GH_TOKEN
+  const authentication = token && new URL(url).hostname === 'api.github.com'
+    ? { authorization: 'Bearer ' + token }
+    : {}
+  for (let attempt = 1; ; attempt++) {
+    const response = await request(url, {
+      headers: { accept: 'application/octet-stream', 'user-agent': 'KevinLauncher', ...authentication, ...headers },
+      signal: AbortSignal.any([AbortSignal.timeout(90_000), ...(signal ? [signal] : [])])
+    })
+    if (response.ok) return response
+    if (attempt >= attempts || ![429, 500, 502, 503, 504].includes(response.status)) {
+      throw new Error('HTTP ' + response.status + ' 下载失败')
     }
-  })
-)
-
-const seconds = (Date.now() - started) / 1000
-console.log(
-  `${PARALLEL} range requests: ${transferred} bytes in ${seconds.toFixed(1)}s ` +
-    `(${(transferred / 1048576 / Math.max(0.1, seconds)).toFixed(1)} MB/s)`
-)
-
-// Concatenate in range order and verify like the app does.
-const dest = join(dir, 'payload.zip')
-const output = createWriteStream(dest)
-for (const part of parts.sort((a, b) => a.start - b.start)) {
-  await new Promise((resolve, reject) => {
-    const input = createReadStream(part.path)
-    input.on('data', (chunkData) => output.write(chunkData))
-    input.on('end', resolve)
-    input.on('error', reject)
-  })
+    await response.body?.cancel()
+    await delay(250 * 2 ** (attempt - 1), undefined, { signal })
+  }
 }
-await new Promise((resolve, reject) => {
-  output.on('finish', resolve)
-  output.on('error', reject)
-  output.end()
-})
 
-const { size } = await fs.stat(dest)
-const sha256 = await new Promise((resolve, reject) => {
-  const hash = createHash('sha256')
-  const stream = createReadStream(dest)
-  stream.on('data', (chunkData) => hash.update(chunkData))
-  stream.on('end', () => resolve(hash.digest('hex')))
-  stream.on('error', reject)
-})
+export async function releasedAssets(tag = 'latest') {
+  if (tag !== 'latest' && (!tag.startsWith('v') || !STABLE_VERSION.test(tag.slice(1)))) {
+    throw new Error('请输入正式标签')
+  }
+  const path = tag === 'latest' ? 'latest' : 'tags/' + tag
+  const response = await download('https://api.github.com/repos/' + repo + '/releases/' + path, {
+    accept: 'application/vnd.github+json'
+  })
+  const release = await response.json()
+  const version = release.tag_name?.slice(1)
+  if (!STABLE_VERSION.test(version) || release.prerelease || release.draft ||
+      tag !== 'latest' && release.tag_name !== tag) throw new Error('正式 Release 身份无效')
+  const pick = name => {
+    const asset = release.assets?.find(item => item.name === name)
+    if (!asset || !Number.isSafeInteger(asset.id)) throw new Error('Release 缺少 ' + name)
+    const direct = 'https://github.com/' + repo + '/releases/download/v' + version + '/' + name
+    const api = 'https://api.github.com/repos/' + repo + '/releases/assets/' + asset.id
+    return { url: process.env.GH_TOKEN ? api : direct, size: asset.size }
+  }
+  const manifest = parseUpdateManifest(await (await download(pick('update-manifest.json').url)).text(), version)
+  if (!manifest.installerName) throw new Error('正式清单缺少安装包')
+  const payload = pick(payloadAssetName(version))
+  const installer = pick(manifest.installerName)
+  if (payload.size !== manifest.payloadSize || installer.size !== manifest.installerSize) {
+    throw new Error('GitHub 资产大小与更新清单不一致')
+  }
+  return { manifest, payload, installer }
+}
 
-const sizeOk = size === zip.size
-const hashOk = !manifest.payloadSha256 || sha256 === manifest.payloadSha256
-console.log(`assembled ${size} bytes, size ok=${sizeOk}, sha256 ok=${hashOk}`)
-await fs.rm(dir, { recursive: true, force: true }).catch(() => {})
-if (!sizeOk || !hashOk) throw new Error('verification failed')
-console.log('OK — the launcher can download and verify this release')
+async function downloadVerifiedAsset(asset, file, size, sha256, description, fetchFile) {
+  const response = await fetchFile(asset.url)
+  await pipeline(Readable.fromWeb(response.body), createWriteStream(file, { flags: 'wx' }))
+  const actual = await identifyFile(file)
+  if (actual.size !== size || actual.sha256 !== sha256) {
+    throw new Error(description + '校验失败')
+  }
+}
+
+export async function downloadInstaller(release, file) {
+  await downloadVerifiedAsset(release.installer, file, release.manifest.installerSize,
+    release.manifest.installerSha256, '历史正式安装包', download)
+}
+
+export async function downloadPayload(release, file, request = fetch) {
+  const fetchFixture = url => download(url, {}, undefined, { attempts: 3, request })
+  await downloadVerifiedAsset(release.payload, file, release.manifest.payloadSize,
+    release.manifest.payloadSha256, '历史正式应用载荷', fetchFixture)
+}
+
+export async function verifyRemotePayload(asset, manifest, dir, fetchRange = download) {
+  if (!Number.isSafeInteger(manifest.payloadSize) || manifest.payloadSize <= 0 ||
+      !/^[a-f0-9]{64}$/.test(manifest.payloadSha256)) throw new Error('缺少更新包校验信息')
+  const stage = await mkdtemp(join(dir, 'ranges-'))
+  try {
+    return await verifyRanges(asset, manifest, stage, fetchRange)
+  } finally {
+    await rm(stage, { recursive: true, force: true, maxRetries: 3 })
+  }
+}
+
+async function verifyRanges(asset, manifest, dir, fetchRange) {
+  const controller = new AbortController()
+  const count = Math.min(parallel, manifest.payloadSize)
+  const files = Array.from({ length: count }, (_, index) => join(dir, 'part-' + index))
+  const results = await Promise.allSettled(files.map(async (file, index) => {
+    const start = Math.floor(manifest.payloadSize * index / count)
+    const end = Math.floor(manifest.payloadSize * (index + 1) / count) - 1
+    try {
+      const response = await fetchRange(asset.url, { range: 'bytes=' + start + '-' + end }, controller.signal)
+      if (!response.body || !matchesUpdateTransfer(response.status, response.headers, end - start + 1, {
+        start, end: end + 1, size: manifest.payloadSize
+      })) {
+        await response.body?.cancel()
+        throw new Error('分片 Content-Range 不匹配')
+      }
+      let length = 0
+      await pipeline(Readable.fromWeb(response.body), async function* (input) {
+        for await (const chunk of input) {
+          length += chunk.length
+          if (length > end - start + 1) throw new Error('响应超过预期分片长度')
+          yield chunk
+        }
+      }, createWriteStream(file, { flags: 'wx' }), { signal: controller.signal })
+      if (length !== end - start + 1) throw new Error('分片长度不匹配')
+    } catch (error) {
+      controller.abort(error)
+      throw error
+    }
+  }))
+  if (controller.signal.aborted) throw controller.signal.reason
+  if (results.some(result => result.status === 'rejected')) throw new Error('分片下载失败')
+  const assembled = join(dir, 'payload.zip')
+  await pipeline(Readable.from((async function* () {
+    for (const file of files) yield* createReadStream(file)
+  })()), createWriteStream(assembled, { flags: 'wx' }))
+  const actual = await identifyFile(assembled)
+  if (actual.size !== manifest.payloadSize || actual.sha256 !== manifest.payloadSha256) {
+    throw new Error('更新包 SHA-256 或长度不匹配')
+  }
+  return actual
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const release = await releasedAssets(process.argv[2])
+  const dir = await mkdtemp(join(tmpdir(), 'verify-release-'))
+  try {
+    const payload = await verifyRemotePayload(release.payload, release.manifest, dir)
+    console.log('v' + release.manifest.version + ' ' + payload.size + ' bytes · ' + payload.sha256)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+}

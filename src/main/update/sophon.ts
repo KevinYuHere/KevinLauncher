@@ -6,11 +6,14 @@ import { createZstdDecompress } from 'zlib'
 import { createHash } from 'crypto'
 import { fields } from './sophonProto'
 import { dirname } from 'path'
-import { openWritableGameFile } from '../services/writableGameFile'
+import { allowGameFileWrite, openWritableGameFile } from '../services/writableGameFile'
+import { requireDiskSpace } from '../services/diskSpace'
 import type { HardLinkService } from '../services/hardLinkService'
 import { forEachResource, resourceProgress } from './hoyoSchedule'
 import { cacheHoYoResource } from './hoyoResourceCache'
-import { gamePath, retryHoYo } from './hoyoFiles'
+import type { RecordSophonCache } from './sophonCacheOwnership'
+import { gamePath, requirePlainGamePath, retryHoYo } from './hoyoFiles'
+import { temporaryGameFile } from './hoyoTemp'
 
 import { md5File } from '../services/hash'
 import { downloadGameBytes, streamGameBytes, downloadManifest, getHoYoMetadata, hoyoFetch } from './hoyoNetwork'
@@ -74,7 +77,7 @@ export async function getSophonBuild(
     `${CHUNK_API}/getBuild?branch=${encodeURIComponent(branch.branch)}` +
     `&package_id=${encodeURIComponent(branch.packageId)}&password=${encodeURIComponent(branch.password)}` +
     (tag ? `&tag=${encodeURIComponent(tag)}` : '')
-  return getHoYoMetadata(`GameSophonChunkBuild_${branch.packageId}_${tag ?? ''}`,
+  return getHoYoMetadata(`GameSophonChunkBuild_${JSON.stringify([branch.packageId, branch.branch, tag ?? ''])}`,
     async token => parseSophonBuild(await hoyoFetch(url, { signal: token })), signal)
 }
 
@@ -198,6 +201,7 @@ export interface SophonDownloadOptions {
   links?: HardLinkService
   finished?: Set<string>
   prepared?: PreparedChunkFiles
+  work?: string
   repair?: boolean
   /** Skip files that already match in `originDir` (delta: never stage unchanged). */
   skipUnchanged?: boolean
@@ -213,6 +217,7 @@ export interface SophonDownloadOptions {
   cacheDir?: string
   /** Pre-download: only fill the chunk cache, do not assemble the game files. */
   cacheOnly?: boolean
+  recordCache?: RecordSophonCache
   categoriesSelected?: boolean
   /** Files listed in the game's resource blacklist — never (re)downloaded. */
   blacklist?: string[]
@@ -321,11 +326,20 @@ export async function downloadSophonBuild(build: SophonBuild, destDir: string, o
       if (!oldChunks.has(chunk.name) && !needed.has(chunk.name)) needed.set(chunk.name, { category, chunk })
     }
     const total = [...needed.values()].reduce((sum, x) => sum + x.chunk.size, 0)
+    if (options.work) {
+      let remaining = 0
+      for (const { chunk } of needed.values()) {
+        if (!await fileMatches(gamePath(cacheDir, chunk.name), chunk.size, chunk.compressedMd5)) remaining += chunk.size
+      }
+      await requireDiskSpace([{ path: cacheDir, bytes: remaining }])
+    }
     const count = resourceProgress(total, report)
     await forEachResource([...needed.values()], signal, async ({ category, chunk }, token) => {
       if (!finished.has(chunk.name)) {
-        await cacheHoYoResource(gamePath(cacheDir, chunk.name), category.chunkUrlPrefix + '/' + chunk.name + category.chunkSuffix,
-          chunk.size, chunk.compressedMd5, links, token, n => count(chunk.name, n))
+        const path = gamePath(cacheDir, chunk.name)
+        const published = await cacheHoYoResource(options.work ? destDir : cacheDir, path, category.chunkUrlPrefix + '/' + chunk.name + category.chunkSuffix,
+          chunk.size, chunk.compressedMd5, links, token, n => count(chunk.name, n), options.work)
+        await options.recordCache?.(path, published)
         finished.add(chunk.name)
       }
       count(chunk.name, chunk.size)
@@ -338,7 +352,10 @@ export async function downloadSophonBuild(build: SophonBuild, destDir: string, o
   const total = work.reduce((sum, item) => sum + netSize(item.asset), 0)
   const present = async (asset: SophonAsset, path: string, token: AbortSignal): Promise<boolean> => {
     if (finished.has(asset.name)) return true
-    if (links && await links.tryLink(path, asset.size, asset.md5, token)) { finished.add(asset.name); return true }
+    if (links) {
+      await requirePlainGamePath(destDir, path)
+      if (await links.tryLink(path, asset.size, asset.md5, token)) { finished.add(asset.name); return true }
+    }
     if ((options.skipUnchanged || options.repair) && await fileMatches(path, asset.size, asset.md5)) {
       void links?.insert(path, asset.size, asset.md5)
       finished.add(asset.name)
@@ -349,13 +366,30 @@ export async function downloadSophonBuild(build: SophonBuild, destDir: string, o
   if (options.repair) await forEachResource(work, signal, async ({ asset }, token) => {
     await present(asset, gamePath(destDir, asset.name), token)
   })
+  const tempFor = (file: string): string => options.work
+    ? temporaryGameFile(destDir, options.work, 'chunks', file)
+    : file + '.tmp'
+  if (options.work) {
+    let required = 0
+    for (const { asset } of work) {
+      signal.throwIfAborted()
+      const path = gamePath(destDir, asset.name)
+      if (finished.has(asset.name) || await fileMatches(path, asset.size, asset.md5)) continue
+      const partial = (await fs.stat(tempFor(path)).catch(() => undefined))?.size ?? 0
+      required += Math.max(0, asset.size - Math.min(asset.size, partial))
+    }
+    await requireDiskSpace([{ path: destDir, bytes: required }])
+  }
   const count = resourceProgress(total, report)
   report(0, total, '')
   await forEachResource(work, signal, async ({ category, asset }, token) => {
     const path = gamePath(destDir, asset.name)
     if (!await present(asset, path, token)) {
+      const tmp = tempFor(path)
+      await requirePlainGamePath(destDir, path)
+      await requirePlainGamePath(destDir, tmp)
       await fs.mkdir(dirname(path), { recursive: true })
-      const tmp = path + '.tmp'
+      await fs.mkdir(dirname(tmp), { recursive: true })
       const handle = await openWritableGameFile(tmp)
       let received = 0
       try {
@@ -392,6 +426,7 @@ export async function downloadSophonBuild(build: SophonBuild, destDir: string, o
         count(asset.name, 0)
         throw new Error('文件校验失败：' + asset.name)
       }
+      await allowGameFileWrite(path)
       await fs.rename(tmp, path)
       void links?.insert(path, asset.size, asset.md5)
       finished.add(asset.name)
@@ -402,13 +437,12 @@ export async function downloadSophonBuild(build: SophonBuild, destDir: string, o
     for (const name of oldFiles.keys()) {
       if (currentFiles.has(name)) continue
       const path = gamePath(destDir, name)
-      try { await fs.unlink(path) } catch (error) {
+      try { await requirePlainGamePath(destDir, path); await allowGameFileWrite(path); await fs.unlink(path) } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') continue
       }
       links?.deleteFile(path)
     }
   }
-  if (cacheDir && !options.prepared) await fs.rm(cacheDir, { recursive: true, force: true })
 }
 
 async function verifiedSlice(handle: Awaited<ReturnType<typeof fs.open>>, offset: number, chunk: SophonChunk): Promise<Buffer | undefined> {

@@ -1,0 +1,367 @@
+/* KEVIN HUD gradient editor. Scoped to the editor and built on the shared
+   glass tokens; no animation, browser picker or standalone panel chrome. */
+.khg-editor,
+.khg-editor * {
+  box-sizing: border-box;
+}
+
+.khg-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  min-width: 0;
+}
+
+/* ---------------------------------------------------------------- preview */
+.khg-preview-row {
+  display: flex;
+  align-items: stretch;
+  flex-wrap: wrap;
+  gap: 9px 12px;
+  min-width: 0;
+}
+
+.khg-preview {
+  position: relative;
+  flex: 1 1 240px;
+  min-width: 0;
+  height: 74px;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background-color: var(--field-bg);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+}
+
+.khg-preview::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.16);
+  pointer-events: none;
+}
+
+.khg-preview-pin {
+  position: absolute;
+  z-index: 1;
+  width: 11px;
+  height: 11px;
+  border: 2px solid rgba(255, 255, 255, 0.92);
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.42);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.khg-preview-copy {
+  display: flex;
+  flex: 0 1 190px;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  min-width: 140px;
+  color: var(--fg-3);
+  font-size: 10.5px;
+  line-height: 1.45;
+  font-variant-numeric: tabular-nums;
+}
+
+.khg-preview-title {
+  color: var(--fg-2);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+/* ---------------------------------------------------------------- fields */
+.khg-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.khg-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px 12px;
+  min-width: 0;
+}
+
+.khg-label {
+  flex: 0 0 72px;
+  color: var(--fg-2);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.khg-control {
+  display: flex;
+  align-items: center;
+  flex: 1 1 250px;
+  flex-wrap: wrap;
+  gap: 7px 9px;
+  min-width: 0;
+}
+
+.khg-hint,
+.khg-inline-label,
+.khg-mini-label {
+  color: var(--fg-3);
+  font-size: 10.5px;
+  line-height: 1.45;
+}
+
+.khg-inline-label,
+.khg-mini-label {
+  white-space: nowrap;
+}
+
+.khg-editor .khg-slider {
+  flex: 1 1 140px;
+  width: auto;
+  min-width: 110px;
+  max-width: 280px;
+}
+
+.khg-editor .khg-number {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+}
+
+.khg-editor .khg-number-input {
+  width: 78px;
+  height: 30px;
+  padding: 0 25px 0 8px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.khg-number-unit {
+  position: absolute;
+  right: 8px;
+  color: var(--fg-3);
+  font-size: 10.5px;
+  pointer-events: none;
+}
+
+/* -------------------------------------------------------------- stops */
+.khg-stops-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 9px;
+  min-width: 0;
+  padding-top: 3px;
+}
+
+.khg-stops-title {
+  color: var(--fg-2);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.khg-stops-count {
+  color: var(--fg-3);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.khg-stops-head .btn {
+  flex: none;
+  margin-left: auto;
+}
+
+.khg-stops-head .btn:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.khg-stops {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.khg-stop .collapse-head {
+  border-radius: 9px;
+}
+
+.khg-stop .collapse.open > .collapse-head {
+  border-radius: 9px 9px 0 0;
+}
+
+.khg-stop .collapse-inner::before {
+  display: none;
+}
+
+.khg-stop-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 7px 12px;
+  min-width: 0;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--field-bg);
+}
+
+.khg-stop .collapse.open > .collapse-head .khg-stop-head {
+  border-bottom-color: transparent;
+  border-radius: 9px 9px 0 0;
+}
+
+.khg-stop-identity {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  min-width: 0;
+}
+
+.khg-stop-name {
+  color: var(--fg-2);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.khg-stop-hex {
+  color: var(--fg-3);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.khg-color-trigger {
+  flex: none;
+}
+
+.khg-color-trigger[aria-expanded='true'] {
+  border-color: var(--brand);
+}
+
+.khg-swatch {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 5px;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.18);
+}
+
+.khg-stop-position {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex: 1 1 300px;
+  gap: 6px 8px;
+  min-width: 0;
+}
+
+.khg-editor .khg-stop-slider {
+  flex: 1 1 100px;
+  width: auto;
+  min-width: 80px;
+  max-width: 220px;
+}
+
+.khg-stop-position .khg-number-input {
+  width: 68px;
+}
+
+.khg-remove {
+  flex: none;
+}
+
+.khg-remove:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.khg-color-panel {
+  margin: 0;
+  padding: 10px 10px 12px;
+  border: 1px solid var(--line);
+  border-top: 0;
+  border-radius: 0 0 9px 9px;
+  background: color-mix(in srgb, var(--field-bg) 74%, transparent);
+}
+
+.khg-editor .khg-stop .khg-color-panel {
+  padding-left: 10px;
+}
+
+.khg-editor .khg-stop .khg-color-panel .color-editor {
+  width: min(100%, 300px);
+}
+
+.khg-foot {
+  margin: 0;
+  color: var(--fg-3);
+  font-size: 10.5px;
+  line-height: 1.55;
+}
+
+/* ---- 星轨手记 (mitia) geometry -----------------------------------------
+   The editor chrome follows the HUD settings card's square language through
+   the existing theme scope. The preview centre pin stays a round point marker,
+   default radii remain unchanged, and fills keep using the glass tokens. */
+[data-special-theme~='mitia'] :is(
+    .khg-editor,
+    .khg-preview,
+    .khg-stop .collapse-head,
+    .khg-stop-head,
+    .khg-color-panel,
+    .khg-swatch
+  ) {
+  border-radius: 0 !important;
+}
+
+@media (max-width: 760px) {
+  .khg-label {
+    flex-basis: 100%;
+  }
+
+  .khg-preview,
+  .khg-preview-copy {
+    flex-basis: 100%;
+  }
+
+  .khg-preview-copy {
+    min-width: 0;
+  }
+
+  .khg-stop-position {
+    flex-basis: 100%;
+    justify-content: flex-start;
+  }
+
+  .khg-editor .khg-stop-slider {
+    max-width: none;
+  }
+}
+
+@media (max-width: 460px) {
+  .khg-stop-head {
+    align-items: flex-start;
+  }
+
+  .khg-stop-position {
+    flex-wrap: wrap;
+  }
+
+  .khg-stops-head .btn {
+    margin-left: 0;
+  }
+
+  .khg-editor .khg-stop .khg-color-panel .color-editor {
+    width: 100%;
+  }
+}

@@ -1,38 +1,56 @@
-// Module worker that turns a full-size screenshot into a small JPEG thumbnail
-// off the main thread. The renderer reads the file into an ArrayBuffer and
-// transfers it here; the resulting Blob is sent back (also transferred).
-interface WorkerScope {
-  onmessage: ((event: MessageEvent) => void) | null
-  postMessage: (message: unknown, transfer?: Transferable[]) => void
+import { imageHeaderSize } from '../wallpaperHeader'
+
+type Task = { id: number; url: string } | { id: number; cancel: true }
+
+const scope = self as unknown as {
+  onmessage: ((event: MessageEvent<Task>) => void) | null
+  postMessage(message: unknown): void
+}
+const EDGE = 480
+const active = new Map<number, AbortController>()
+
+function thumbnailSize(width: number, height: number): { width: number; height: number } {
+  const scale = Math.min(1, EDGE / Math.max(width, height))
+  return { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) }
 }
 
-const scope = self as unknown as WorkerScope
-
-const THUMB_WIDTH = 480
-
-interface Task {
-  path: string
-  buffer: ArrayBuffer
-}
-
-scope.onmessage = async (event: MessageEvent): Promise<void> => {
-  const { path, buffer } = event.data as Task
+async function prepare(id: number, url: string, signal: AbortSignal): Promise<void> {
+  let bitmap: ImageBitmap | undefined
   try {
-    const blob = new Blob([buffer])
-    const bitmap = await createImageBitmap(blob, {
-      resizeWidth: THUMB_WIDTH,
-      resizeQuality: 'medium'
-    })
-    const width = bitmap.width
-    const height = bitmap.height
+    const response = await fetch(url, { signal, cache: 'no-store' })
+    if (!response.ok) throw new Error('Image unavailable')
+    const blob = await response.blob()
+    const original = imageHeaderSize(new Uint8Array(await blob.slice(0, 128 * 1024).arrayBuffer()))
+    signal.throwIfAborted()
+    const size = original && thumbnailSize(original.width, original.height)
+    bitmap = await createImageBitmap(blob, size ? {
+      resizeWidth: size.width, resizeHeight: size.height, resizeQuality: 'medium'
+    } : undefined)
+    signal.throwIfAborted()
+    const { width, height } = thumbnailSize(bitmap.width, bitmap.height)
     const canvas = new OffscreenCanvas(width, height)
     const ctx = canvas.getContext('2d')
-    if (!ctx) throw new Error('no 2d context')
-    ctx.drawImage(bitmap, 0, 0)
+    if (!ctx) throw new Error('No canvas context')
+    ctx.drawImage(bitmap, 0, 0, width, height)
     bitmap.close()
-    const out = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.82 })
-    scope.postMessage({ path, blob: out, width, height })
-  } catch (error) {
-    scope.postMessage({ path, error: String(error) })
+    bitmap = undefined
+    const result = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.82 })
+    signal.throwIfAborted()
+    scope.postMessage({ id, blob: result, width, height })
+  } catch {
+    scope.postMessage({ id })
+  } finally {
+    bitmap?.close()
+    active.delete(id)
   }
+}
+
+scope.onmessage = ({ data }): void => {
+  if ('cancel' in data) {
+    active.get(data.id)?.abort()
+    return
+  }
+  const controller = new AbortController()
+  active.set(data.id, controller)
+  void prepare(data.id, data.url, controller.signal)
 }
