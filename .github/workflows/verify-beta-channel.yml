@@ -12,6 +12,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: verify-beta-channel-${{ inputs.beta_version }}
+  cancel-in-progress: false
+
 jobs:
   verify:
     name: Published v2.0.5 -> Beta self-update
@@ -47,3 +51,11 @@ jobs:
           }
           node scripts/verify-windows-release.mjs --live-beta-channel $version
           exit $LASTEXITCODE
+      - name: Upload the published-channel verification record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: published-beta-channel-verification
+          path: ${{ runner.temp }}/kl-live-beta-verification-*/windows-verification.json
+          if-no-files-found: warn
+          retention-days: 14

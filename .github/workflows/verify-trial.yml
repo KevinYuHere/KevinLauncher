@@ -68,6 +68,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+        env:
+          # Keep repository bytes on Windows; the host fingerprint must match the baseline inventory.
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
       - uses: actions/setup-node@v4
         with:
           node-version-file: .node-version
@@ -102,13 +107,14 @@ jobs:
           $batch = @(Get-ChildItem -LiteralPath . -Directory -Filter 'release-beta-*')
           if ($batch.Count -ne 1) { throw 'Expected exactly one Beta build' }
           $inventoryArgs = @()
+          $baseline = $null
           if ($env:BASE_INVENTORY) {
             $inventory = "$env:BASE_INVENTORY".Trim()
             if ($inventory) {
               if ([Text.Encoding]::UTF8.GetByteCount($inventory) -ge 65536) {
                 throw 'base_inventory must be compact JSON below 65 KB'
               }
-              try { $null = $inventory | ConvertFrom-Json } catch { throw 'base_inventory must be valid JSON' }
+              try { $baseline = $inventory | ConvertFrom-Json } catch { throw 'base_inventory must be valid JSON' }
               $inventoryPath = Join-Path $env:RUNNER_TEMP ('kl-beta-base-' + [guid]::NewGuid().ToString('N') + '.json')
               [System.IO.File]::WriteAllText($inventoryPath, $inventory, (New-Object System.Text.UTF8Encoding($false)))
               $inventoryArgs = @($inventoryPath)
@@ -116,7 +122,26 @@ jobs:
           }
           $batchPath = $batch[0].FullName
           & node scripts/build-beta-update.mjs $batchPath @inventoryArgs
-          exit $LASTEXITCODE
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($baseline) {
+            $manifest = Get-Content -LiteralPath (Join-Path $batchPath 'update-manifest.json') -Raw | ConvertFrom-Json
+            $targetCompatibility = Join-Path $batchPath ('win-unpacked\resources\app-' + $manifest.version + '\release-compatibility.json')
+            $baselineCompatibility = @($baseline.files | Where-Object { $_.path -eq 'release-compatibility.json' })
+            if ($baselineCompatibility.Count -ne 1) {
+              throw 'base_inventory must contain exactly one release-compatibility.json entry'
+            }
+            $baselineCompatibility = $baselineCompatibility[0]
+            $actualCompatibility = Get-Item -LiteralPath $targetCompatibility
+            $actualHash = (Get-FileHash -LiteralPath $targetCompatibility -Algorithm SHA256).Hash.ToLowerInvariant()
+            $deltaText = if ($manifest.delta) { "$([long]$manifest.delta.size) bytes" } else { 'none' }
+            Write-Host ("baseline release-compatibility.json {0} bytes {1}; target {2} bytes {3}; payload {4} bytes; delta {5}" -f
+              [long]$baselineCompatibility.size, $baselineCompatibility.sha256, $actualCompatibility.Length, $actualHash,
+              [long]$manifest.payloadSize, $deltaText)
+            if ([long]$baselineCompatibility.size -ne [long]$actualCompatibility.Length -or
+                "$($baselineCompatibility.sha256)".ToLowerInvariant() -ne $actualHash) {
+              throw "base_inventory release-compatibility.json does not match app-$($manifest.version); refusing an incompatible baseline"
+            }
+          }
       - name: Verify packaged parity and exercise the installer on disposable Windows
         env:
           GH_TOKEN: ${{ github.token }}
