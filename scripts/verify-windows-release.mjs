@@ -285,9 +285,7 @@ async function betaFixtureRoot() {
 
 /** A raced deadline must not keep this verifier alive after the real work ends. */
 function deadline(milliseconds, message) {
-  const timer = delay(milliseconds)
-  timer.unref?.()
-  return timer.then(() => { throw new Error(message) })
+  return delay(milliseconds, undefined, { ref: false }).then(() => { throw new Error(message) })
 }
 
 async function until(operation, description, timeout = 120_000, failed) {
@@ -606,6 +604,49 @@ async function relaunchLiveInstalled(ui, target, restart = launchLiveLegacy) {
     const main = await until(findMain, '重新启动后的主进程就绪', 30_000)
     assert(!previousIds.has(main.id), '重新启动后应运行新的启动器进程')
     return { ui: restarted, method: 're-execed-exact-entry', mainPid: main.id, mainImage: basename(main.path) }
+  }
+}
+
+/**
+ * A modern Beta update relaunches the public entry without the verifier's
+ * debug port. Observe the real automatic restart through its runtime window
+ * and durable markers, close that window normally, then attach to a fresh
+ * launch of the exact entry to prove the one-time introduction is gone.
+ */
+async function relaunchLiveModern(ui, target, version, data) {
+  const entry = join(target, windowsLayout.entry)
+  const runtime = join(target, windowsLayout.runtime)
+  const resources = join(target, 'resources')
+  await ui.waitForRelaunchExit()
+  const intro = await installedFeatureIntro(target, version)
+  const main = await until(async () => {
+    const { processes } = await windows('processes', '-Target', target)
+    const candidate = processes.find(process => samePath(process.path, runtime) &&
+      (process.chromeVisible || process.window))
+    if (!candidate) return null
+    if ((await readFile(join(resources, 'app-version.txt'), 'utf8')).trim() !== version) return null
+    if (JSON.parse(await readFile(join(resources, 'app-activation.json'), 'utf8')).healthy !== version) return null
+    if (intro && !(await featureIntroApplied(data, version))) return null
+    return candidate
+  }, '更新后的真实主窗口、版本指针和激活记录就绪', 60_000)
+  console.log('Observed the automatic modern Beta relaunch as PID ' + main.id +
+    '; closing its real runtime window')
+  await windows('close', '-Target', runtime, '-ProcessId', String(main.id))
+  await until(async () => !(await windows('processes', '-Target', target)).processes.length,
+    '更新后自动重启的实例正常退出', 30_000)
+  const restarted = await launch(entry)
+  try {
+    assert.equal(await restarted.run('window.api.appVersion()'), version, '重新启动后必须运行目标 Beta')
+    await assertNoFeatureIntro(restarted, '差量更新后的重新启动')
+    if (intro) assert.equal(await featureIntroApplied(data, version), true,
+      '重新启动后应保留功能介绍应用记录')
+  } catch (error) {
+    await restarted.close().catch(() => {})
+    throw error
+  }
+  return {
+    ui: restarted, intro, method: 'auto-relaunch-observed',
+    mainPid: main.id, mainImage: basename(main.path)
   }
 }
 
@@ -1223,7 +1264,7 @@ async function verifyLiveModernChannel(fromVersion) {
     return true
   })()`)
   await ui.run('void window.api.appUpdateStart()')
-  const relaunched = await relaunchLiveInstalled(ui, target, launch)
+  const relaunched = await relaunchLiveModern(ui, target, liveBeta.manifest.version, data)
   assert.equal(await relaunched.ui.run('window.api.appVersion()'), liveBeta.manifest.version,
     '更新后必须运行目标 Beta')
   assert.match(await relaunched.ui.run('navigator.userAgent'), new RegExp('Electron/' + electronPattern + '(?:[^\\d]|$)'),
@@ -1261,16 +1302,16 @@ async function verifyLiveModernChannel(fromVersion) {
   assert(states.some(state => state.phase === 'installing' || state.phase === 'done'),
     '来源 Beta 应进入应用差量安装阶段')
 
-  const intro = await installedFeatureIntro(target, liveBeta.manifest.version)
+  const intro = relaunched.intro
   let featureIntro = null
   if (intro) {
-    featureIntro = await verifyFeatureIntroOnce(
-      relaunched.ui, () => launch(join(target, windowsLayout.entry)), data,
-      liveBeta.manifest.version, intro, '差量更新后的启动'
-    )
-  } else {
-    await relaunched.ui.close()
+    assert.equal(String(intro.body ?? '').trim(), FEATURE_INTRO_TEXT,
+      '差量更新后的启动内置功能介绍文案必须为验收文案')
+    assert.equal(await featureIntroApplied(data, liveBeta.manifest.version), true,
+      '功能介绍实际显示后才应记录目标版本')
+    featureIntro = intro
   }
+  await relaunched.ui.close()
 
   const appendedLog = (await readFile(logFile, 'utf8')).slice(logBeforeLength)
   const versionPattern = escapeRegExp(liveBeta.manifest.version)
@@ -1665,5 +1706,8 @@ try {
       }
     }
   }
-  await rm(root, { recursive: true, force: true, maxRetries: 3 })
+  await rm(root, { recursive: true, force: true, maxRetries: 3 }).catch(error => {
+    console.error('清理临时验证目录失败：' + error.message)
+    process.exitCode = 1
+  })
 }
