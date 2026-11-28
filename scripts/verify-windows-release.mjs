@@ -398,6 +398,23 @@ async function launch(file, ...args) {
   }
 }
 
+// The published v2.0.5 installer and installed launcher use Electron 44.7.0.
+// On the headless hosted runner their GPU process repeatedly crashes
+// (error_code=18) before setup IPC becomes reachable. These switches apply
+// only to those already hash-verified legacy programs in --live-beta-channel
+// mode. v2.0.5 calls bare app.relaunch(), which preserves argv, so the debug
+// port and these switches survive the update restart. Current Beta/release
+// launches keep their strict sandbox checks.
+const LIVE_LEGACY_CHROMIUM_FLAGS = Object.freeze(['--no-sandbox', '--disable-gpu'])
+function launchLiveLegacy(file, ...args) {
+  assert(live, '旧版 Chromium 参数仅用于实时 Beta 验证')
+  const verifiedInstaller = join(dir, 'KevinLauncher-Installer-2.0.5.exe')
+  const verifiedLauncher = liveInstalled && join(liveInstalled, windowsLayout.entry)
+  assert(samePath(file, verifiedInstaller) || (verifiedLauncher && samePath(file, verifiedLauncher)),
+    '旧版 Chromium 参数只能用于已校验的 v2.0.5 安装程序或已安装启动器')
+  return launch(file, ...args, ...LIVE_LEGACY_CHROMIUM_FLAGS)
+}
+
 function relaunchedUi(page, target) {
   return {
     ...page,
@@ -449,7 +466,7 @@ async function relaunchLiveInstalled(ui, target) {
   } catch (error) {
     console.warn('更新后的实例没有复用旧调试端口，改为重新启动准确入口：' + error.message)
     if ((await windows('processes', '-Target', target)).processes.length) await stopExactTargetProcesses(target)
-    const restarted = await launch(entry)
+    const restarted = await launchLiveLegacy(entry)
     const main = await until(findMain, '重新启动后的主进程就绪', 30_000)
     assert(!previousIds.has(main.id), '重新启动后应运行新的启动器进程')
     return { ui: restarted, method: 're-execed-exact-entry', mainPid: main.id, mainImage: basename(main.path) }
@@ -554,7 +571,7 @@ async function install(file, name, version, previousVersion) {
   const target = sandboxInstall(name)
   const data = sandboxData(name)
   await mkdir(data, { recursive: true })
-  const ui = await launch(file)
+  const ui = live && name === 'live-beta' ? await launchLiveLegacy(file) : await launch(file)
   const info = await ui.run('window.api.installerInfo()')
   let selections
   assert.equal(info.version, version)
@@ -604,7 +621,8 @@ async function checkProfile(data, fixture, history) {
 }
 
 async function seedProfile(target, data, version) {
-  const ui = await launch(join(target, windowsLayout.entry))
+  const entry = join(target, windowsLayout.entry)
+  const ui = live ? await launchLiveLegacy(entry) : await launch(entry)
   assert.equal(await ui.run('window.api.appVersion()'), version)
   assert.deepEqual(await ui.run('window.api.listApps()'), [])
   const fixture = await ui.run('window.api.addApp({ name: "Windows 验收夹具", launchMethods: [] })')
@@ -977,13 +995,15 @@ async function verifyLiveBetaChannel() {
   assert.equal(previousHash.sha256, stable.manifest.installerSha256)
   windowsExecutable.assertExecutionLevel(previousFile, 'requireAdministrator')
   console.log('Verified public v2.0.5 installer ' + previousHash.size + ' bytes · ' + previousHash.sha256)
+  console.log('Temporary verifier-only Chromium switches for the published v2.0.5 installer and installed launcher: ' +
+    LIVE_LEGACY_CHROMIUM_FLAGS.join(' ') + ' (no release binary is changed)')
 
   const { target } = await install(previousFile, 'live-beta', stable.manifest.version)
   liveInstalled = target
   assert.equal((await readFile(join(target, 'resources', 'app-version.txt'), 'utf8')).trim(), stable.manifest.version)
   const data = sandboxData('live-beta')
   const { fixture, history } = await seedProfile(target, data, stable.manifest.version)
-  const ui = await launch(join(target, windowsLayout.entry))
+  const ui = await launchLiveLegacy(join(target, windowsLayout.entry))
   assert.equal(await ui.run('window.api.appVersion()'), stable.manifest.version)
   assert.match(await ui.run('navigator.userAgent'), /Electron\/44\.7\.0(?:[^\d]|$)/,
     '实际安装的 v2.0.5 运行库必须是 Electron 44.7.0')
@@ -1192,6 +1212,8 @@ try {
           (proof.runtimeLayout === 'dedicated-runtime'
             ? 'entry and runtime binaries stayed unchanged.'
             : 'the single entry binary stayed unchanged and no separate runtime was added.'),
+        'Temporary verifier-only Chromium switches for the published v2.0.5 installer and launcher: ' +
+          LIVE_LEGACY_CHROMIUM_FLAGS.join(' ') + ' (production and release launches are unchanged).',
         'Restarted on Electron 44.7.0 with the new version pointer, real renderer, profile and update backup intact.',
         '',
         ...Object.entries(assets).map(([file, asset]) => '- ' + file + ': ' + asset.sha256)
